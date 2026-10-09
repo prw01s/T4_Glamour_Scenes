@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Paint color visualizer</title>
+<style>
+  :root {
+    --booth: #ECECEC;      /* container surface */
+    --surround: #D4D4D4;   /* page band around the container */
+    --graphite: #242424;   /* text, rings */
+    --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
+    --rule: #C6C6C6;       /* hairlines */
+    --active-paint: #e3d4b9;
+    --pad: clamp(20px, 3vw, 40px);
+    --gap: 20px;
+    --cap: 32px;           /* figcaption line + gap above it */
+    color-scheme: light;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { background: var(--surround); }
+  body {
+    margin: 0;
+    font: 16px/1.5 Optima, Candara, "Segoe UI", system-ui, sans-serif;
+    color: var(--graphite);
+    -webkit-font-smoothing: antialiased;
+  }
+  fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
+  .vh {
+    position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+
+  /* ---- booth ---------------------------------------------------------------- */
+  .booth {
+    width: min(97%, 1800px);
+    margin: 1.5vh auto;
+    margin: 1.5dvh auto;
+    padding: var(--pad);
+    min-height: 97vh;
+    min-height: 97svh;
+    background: var(--booth);
+    border-radius: 16px;
+    display: grid;
+    gap: var(--gap);
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto 1fr auto;
+    grid-template-areas:
+      "rooms   model"
+      "intro   intro"
+      "stage   stage"
+      "palette palette";
+    align-content: start;
+  }
+  .booth > * { min-width: 0; }
+
+  /* ---- room switch (the one bold move) ------------------------------------- */
+  .rooms { grid-area: rooms; }
+  .rooms__list { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 28px; row-gap: 4px; }
+  .room { position: relative; cursor: pointer; }
+  .room span {
+    display: inline-block;
+    font-size: 48px; line-height: 1.1;
+    color: var(--slate);
+    text-decoration: underline transparent;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 0.14em;
+    transition: color .15s, text-decoration-color .15s;
+  }
+  .room:hover span { color: var(--graphite); }
+  .room input:checked + span { color: var(--graphite); text-decoration-color: currentColor; }
+  .room input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 4px; border-radius: 2px; }
+
+  /* ---- intro + notice ------------------------------------------------------ */
+  .intro { grid-area: intro; }
+  .intro p { margin: 0; max-width: 62ch; }
+  .intro__text { font-size: 18px; color: var(--slate); }
+  .notice {
+    margin-top: 12px !important;
+    padding: 10px 14px;
+    font-size: 14px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .notice:empty { margin: 0 !important; padding: 0; border: 0; }
+  .notice b { font-weight: 600; }
+  .notice a { color: inherit; }
+
+  /* ---- shader toggle ------------------------------------------------------- */
+  .model { grid-area: model; justify-self: end; align-self: center; }
+  .model__row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .model__label { color: var(--slate); }
+  .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
+  .segmented label { position: relative; cursor: pointer; }
+  .segmented span { display: block; padding: 5px 12px; border-radius: 2px; color: var(--slate); white-space: nowrap; }
+  .segmented label:hover span { color: var(--graphite); }
+  .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
+  .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .model:disabled { opacity: .45; }
+  .model:disabled label { cursor: default; }
+
+  /* ---- scenes -------------------------------------------------------------- */
+  .stage { grid-area: stage; }
+  .renderer {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--gap);
+    align-content: start;
+    justify-content: start;
+  }
+  .scene { margin: 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .scene figcaption { font-size: 14px; line-height: 24px; }
+  .scene__frame {
+    position: relative;
+    isolation: isolate;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 3px;
+    overflow: hidden;
+    background: #DADADA;
+  }
+  .scene__layer { position: absolute; inset: 0; }
+  .scene__layer--bottom { z-index: 1; }
+  .scene__layer--top { z-index: 2; }
+  .scene__canvas, .scene__photo {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+  }
+  .scene__canvas--incoming { opacity: 0; }
+  .scene__photo { object-fit: cover; visibility: hidden; }
+  .renderer[data-room="livingRoom"] .scene__photo[data-room="livingRoom"],
+  .renderer[data-room="study"] .scene__photo[data-room="study"] { visibility: visible; }
+  /* Masks are opt-in: until .is-painted, visitors see the plain photos.
+     Black in the mask is wall, so luminance mode hides exactly the walls. */
+  .is-painted .scene__photo {
+    mask-image: var(--mask);
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: cover;
+    mask-mode: luminance;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation-duration: 240ms; }
+
+  /* ---- palette ------------------------------------------------------------- */
+  .palette { grid-area: palette; }
+  .palette__body { display: flex; align-items: flex-start; gap: 16px 28px; }
+  .palette__label { font-size: 14px; line-height: 40px; color: var(--slate); white-space: nowrap; }
+  .chips { list-style: none; margin: 0; padding: 0; display: flex; gap: 14px; }
+  .chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+  .chip {
+    display: block; width: 40px; height: 40px;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
+    transition: transform .15s, box-shadow .15s;
+  }
+  .chip-option:hover .chip { transform: translateY(-1px); }
+  .chip-option input:checked + .chip {
+    outline: 2px solid var(--graphite);
+    outline-offset: 3px;
+    transform: translateY(-2px);
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 3px 6px rgb(0 0 0 / .16);
+  }
+  .chip-option input:focus-visible + .chip {
+    outline: 2px solid var(--graphite);
+    outline-offset: 3px;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 0 0 7px var(--booth), 0 0 0 9px var(--slate);
+  }
+  .chip__hex {   /* visually hidden except on desktop */
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    font-size: 12px; line-height: 16px; color: var(--slate);
+  }
+  .chip-option input:checked ~ .chip__hex { color: var(--graphite); }
+  .readout { margin: 0 0 0 auto; display: flex; align-items: center; gap: 12px; line-height: 40px; white-space: nowrap; }
+  .readout__swatch {
+    width: 12px; height: 12px; border-radius: 2px;
+    background: var(--active-paint);
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
+  }
+  .readout__lrv { color: var(--slate); }
+
+  /* ---- desktop (>=1024, and landscape 640-1023) ---------------------------- */
+  @media (min-width: 1024px), (min-width: 640px) and (min-aspect-ratio: 5/4) {
+    .chip__hex { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
+  }
+
+  /* Tall enough to fit: definite height, tiles shrink, nothing scrolls */
+  @media (min-width: 640px) and (min-height: 600px) {
+    .booth { height: 97vh; height: 97dvh; min-height: 0; }
+    .stage { container-type: size; min-height: 0; }
+    .renderer {
+      grid-template-columns: repeat(3, min(calc((100cqi - 2 * var(--gap)) / 3), calc(100cqb - var(--cap))));
+    }
+  }
+
+  /* ---- tablet (640-1023, portrait) ----------------------------------------- */
+  @media (min-width: 640px) and (max-width: 1023.98px) and (max-aspect-ratio: 5/4) {
+    .booth {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-rows: auto auto 1fr 1fr;
+      grid-template-areas:
+        "rooms rooms"
+        "intro model"
+        ".     ."
+        ".     .";
+    }
+    .model { align-self: start; }
+    .stage { display: contents; }
+    .renderer { grid-area: 3 / 1 / 5 / 3; grid-template: subgrid / subgrid; }
+    .palette { grid-area: 4 / 2 / 5 / 3; align-self: start; }
+    .palette__body { flex-direction: column; gap: 12px; }
+    .palette__label, .readout { line-height: 1.5; }
+    .readout { margin: 0; }
+  }
+  @media (min-width: 640px) and (max-width: 1023.98px) and (max-aspect-ratio: 5/4) and (min-height: 600px) {
+    .scene { container-type: size; }
+    .scene__frame { width: min(100cqi, calc(100cqb - var(--cap))); }
+  }
+
+  /* ---- mobile (<640) ------------------------------------------------------- */
+  @media (max-width: 639.98px) {
+    .booth { display: flex; flex-direction: column; }
+    .room span { font-size: 36px; }
+    .intro__text { font-size: 16px; }
+    .model { justify-self: auto; align-self: flex-start; }
+    .renderer { grid-template-columns: minmax(0, 1fr); }
+    .palette {
+      position: sticky;
+      bottom: 0;
+      z-index: 5;
+      margin: 0 calc(-1 * var(--pad)) calc(-1 * var(--pad));
+      padding: 12px var(--pad) calc(12px + env(safe-area-inset-bottom));
+      background: rgb(236 236 236 / .82);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+      border-top: 1px solid var(--rule);
+      border-radius: 0 0 16px 16px;
+    }
+    .palette__body { flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+    .palette__label, .readout { line-height: 1.5; }
+    .chips { order: 3; width: 100%; justify-content: space-between; padding-block: 6px; }
+    .chip { width: 44px; height: 44px; }
+  }
+</style>
+</head>
+<body>
+<main class="booth" id="app">
+  <h1 class="vh">Paint color visualizer</h1>
+
+  <fieldset class="rooms">
+    <legend class="vh">Room</legend>
+    <div class="rooms__list" id="rooms"></div>
+  </fieldset>
+
+  <div class="intro">
+    <p class="intro__text">See how one paint color looks on the walls in morning, noon and night light.</p>
+    <p class="notice" id="notice" role="status"></p>
+  </div>
+
+  <fieldset class="model" id="model">
+    <legend class="vh">Shader model</legend>
+    <div class="model__row">
+      <span class="model__label" aria-hidden="true">Shader</span>
+      <div class="segmented">
+        <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
+        <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="stage">
+    <div class="renderer" id="renderer" data-room="livingRoom"></div>
+  </div>
+
+  <fieldset class="palette">
+    <legend class="vh">Paint color</legend>
+    <div class="palette__body">
+      <span class="palette__label" aria-hidden="true">Paint color</span>
+      <ul class="chips" id="chips"></ul>
+      <p class="readout"><span class="readout__swatch"></span><span id="readoutHex">#E3D4B9</span><span class="readout__lrv" id="readoutLrv">LRV 67</span></p>
+    </div>
+  </fieldset>
+</main>
+
+<script type="module">
+/* ==========================================================================
+ * shaderSceneRenderer — paints a room's walls under morning, noon and night
+ * light. Each photo is used as a LIGHT MAP: the wall colour is re-lit by the
+ * light at every pixel, then CSS luminance masks keep everything that isn't
+ * wall original.
+ *
+ * The GLSL and host helpers are ported verbatim from js/tinted-wall-v2.js
+ * (v2 perception-aware model + v1 HSV model; v1 also lives in
+ * glsl/wall_lighting.glsl). Unlike TintedWall.create(), which allocates a
+ * full-size GPU pipeline per image, all photos here share one off-DOM WebGL2
+ * context at a fixed N x N working size.
+ * ======================================================================== */
+
+// ---------------------------------------------------------------- config
+const PAINT_COLORS = ["#e3d4b9", "#58679d", "#a4aca6", "#cfdbde", "#dda27a"];
+const ROOMS = {
+  livingRoom: {
+    label: "Living room",
+    mask: "images/masks/living_room_mask.jpg",
+    photos: {
+      morning: "images/lighting_variants/living_room/living-room_morning.jpg",
+      noon:    "images/lighting_variants/living_room/living_room-noon.jpg",
+      night:   "images/lighting_variants/living_room/living-room_night.jpg"
+    }
+  },
+  study: {
+    label: "Study",
+    mask: "images/masks/study_mask.jpg",
+    photos: {
+      morning: "images/lighting_variants/study/study_morning.jpg",
+      noon:    "images/lighting_variants/study/study_noon.jpg",
+      night:   "images/lighting_variants/study/study_night.jpg"
+    }
+  }
+};
+const TIMES = [
+  { key: "morning", label: "Morning" },
+  { key: "noon",    label: "Noon" },
+  { key: "night",   label: "Night" }
+];
+const N = 1024;           // working size of every photo (texA, targets and drawing buffer must match)
+const FADE_MS = 360, STAGGER_MS = 70;
+
+const SHADER_DEFAULTS = {
+  model:        "v2",              // "v2" (this version) or "v1" (previous HSV version)
+  wallHSL:      [0.5, 0.43, 0.76], // hue in degrees, S and L in 0..1
+  warmCCT:      2700,  // colour temperature of ImageA's warm light (K)
+  warmTint:     0.0,   // Duv tint of the warm light: 0 = true blackbody, + = golden/greener, - = rosier
+  skyCCT:       10000, // colour temperature of the shadow fill / cool light (K)
+  adaptation:   0.35,  // colour constancy: 0 = camera at daylight, 1 = eye fully adapted
+  fill:         0.12,  // fill (ambient) light in the deepest shadow
+  bounce:       0.4,   // share of the fill that is pink light bounced off the wall
+  glow:         0.5,   // extra intensity of the warm light
+  shadowCurve:  1.0,   // >1 = deeper shadows
+  penumbra:     0.2,   // light-map softness, % of image width
+  dither:       true,
+  // v1-only settings (used when model === "v1")
+  v1: { ambient: 0.12, shadowCurve: 1.0, warmth: 0.8, glow: 1.2 }
+};
+
+// ---------------------------------------------------------------- state
+let activePaintColor = PAINT_COLORS[0];
+let activeRoom = "livingRoom";   // requested room
+let activeModel = "v2";
+let shownRoom = activeRoom;      // room currently on screen
+
+// ======================================================================
+// GLSL (verbatim from js/tinted-wall-v2.js)
+// ======================================================================
+const VERT = `#version 300 es
+void main() {
+  vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
+
+const COMMON = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+out vec4 fragOut;
+
+// ---- transfer functions ------------------------------------------------
+vec3 toLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 toSRGB(vec3 c)   { c = max(c, 0.0);
+                        return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+float lum(vec3 c)     { return dot(c, vec3(0.2126729, 0.7151522, 0.0721750)); }
+
+// ---- matrices (written as rows, transposed into GLSL column order) -------
+const mat3 RGB2XYZ = transpose(mat3(0.4124564, 0.3575761, 0.1804375,
+                                    0.2126729, 0.7151522, 0.0721750,
+                                    0.0193339, 0.1191920, 0.9503041));
+const mat3 XYZ2RGB = transpose(mat3( 3.2404542, -1.5371385, -0.4985314,
+                                    -0.9692660,  1.8760108,  0.0415560,
+                                     0.0556434, -0.2040259,  1.0572252));
+const mat3 CAT16   = transpose(mat3( 0.401288, 0.650173, -0.051461,
+                                    -0.250268, 1.204414,  0.045854,
+                                    -0.002079, 0.048952,  0.953127));
+
+// ---- Oklab (Ottosson 2020) -----------------------------------------------
+vec3 cbrt3(vec3 v) { return sign(v) * pow(abs(v), vec3(1.0 / 3.0)); }
+vec3 oklab(vec3 c) {
+  vec3 lms = vec3(dot(c, vec3(0.4122214708, 0.5363325363, 0.0514459929)),
+                  dot(c, vec3(0.2119034982, 0.6806995451, 0.1073969566)),
+                  dot(c, vec3(0.0883024619, 0.2817188376, 0.6299787005)));
+  lms = cbrt3(lms);
+  return vec3(dot(lms, vec3(0.2104542553,  0.7936177850, -0.0040720468)),
+              dot(lms, vec3(1.9779984951, -2.4285922050,  0.4505937099)),
+              dot(lms, vec3(0.0259040371,  0.7827717662, -0.8086757660)));
+}
+vec3 oklabToRGB(vec3 L) {
+  vec3 lms = vec3(dot(L, vec3(1.0,  0.3963377774,  0.2158037573)),
+                  dot(L, vec3(1.0, -0.1055613458, -0.0638541728)),
+                  dot(L, vec3(1.0, -0.0894841775, -1.2914855480)));
+  lms = lms * lms * lms;
+  return vec3(dot(lms, vec3( 4.0767416621, -3.3077115913,  0.2309699292)),
+              dot(lms, vec3(-1.2684380046,  2.6097574011, -0.3413193965)),
+              dot(lms, vec3(-0.0041960863, -0.7034186147,  1.7076147010)));
+}
+
+// ---- HSV / HSL ------------------------------------------------------------
+vec3 rgb2hsv(vec3 c) {
+  float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b)), d = mx - mn;
+  float H = 0.0;
+  if (d > 1e-6) {
+    if      (mx == c.r) H = mod((c.g - c.b) / d, 6.0);
+    else if (mx == c.g) H = (c.b - c.r) / d + 2.0;
+    else                H = (c.r - c.g) / d + 4.0;
+    H *= 60.0;
+  }
+  return vec3(H, mx > 1e-6 ? d / mx : 0.0, mx);
+}
+vec3 hsv2rgb(vec3 c) {
+  vec3 k = mod(vec3(5.0, 3.0, 1.0) + mod(c.x, 360.0) / 60.0, 6.0);
+  return c.z - c.z * c.y * clamp(min(k, 4.0 - k), 0.0, 1.0);
+}
+vec3 hsl2rgb(vec3 hsl) {
+  vec3 k = mod(vec3(0.0, 8.0, 4.0) + mod(hsl.x, 360.0) / 30.0, 12.0);
+  float a = hsl.y * min(hsl.z, 1.0 - hsl.z);
+  return hsl.z - a * clamp(min(k - 3.0, 9.0 - k), -1.0, 1.0);
+}
+
+// ---- blackbody (Planckian) light colour, Kim et al. 2002 -----------------
+vec2 planckXY(float T) {                      // chromaticity of a blackbody
+  T = clamp(T, 1667.0, 25000.0);
+  float T2 = T * T, T3 = T2 * T, x, y;
+  if (T <= 4000.0) x = -0.2661239e9 / T3 - 0.2343589e6 / T2 + 0.8776956e3 / T + 0.179910;
+  else             x = -3.0258469e9 / T3 + 2.1070379e6 / T2 + 0.2226347e3 / T + 0.240390;
+  float x2 = x * x, x3 = x2 * x;
+  if      (T <= 2222.0) y = -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683;
+  else if (T <= 4000.0) y = -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867;
+  else                  y =  3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483;
+  return vec2(x, y);
+}
+vec2 xy2uv(vec2 c) { return vec2(4.0 * c.x, 6.0 * c.y) / (-2.0 * c.x + 12.0 * c.y + 3.0); }
+vec2 uv2xy(vec2 c) { return vec2(3.0 * c.x, 2.0 * c.y) / (2.0 * c.x - 8.0 * c.y + 4.0); }
+// Light of colour temperature T with a Duv tint (CIE 1960 uv distance from the
+// blackbody curve; + = toward green/yellow, - = toward magenta). Linear sRGB, Y = 1.
+vec3 planckRGB(float T, float duv) {
+  vec2 uv = xy2uv(planckXY(T));
+  vec2 t  = normalize(xy2uv(planckXY(T * 1.01)) - uv);
+  vec2 n  = vec2(-t.y, t.x); if (n.y < 0.0) n = -n;
+  vec2 xy = uv2xy(uv + duv * n);
+  return XYZ2RGB * vec3(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
+}
+// light colour relative to the neutral (6500 K) light, luminance 1
+vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.0, 0.0); return c / lum(c); }
+`;
+
+// P0: decode sRGB ImageA -> linear light
+const DECODE = COMMON + `
+uniform sampler2D src;
+void main() { fragOut = vec4(toLinear(texelFetch(src, ivec2(gl_FragCoord.xy), 0).rgb), 1.0); }`;
+
+// P0b: separable Gaussian blur of linear light (soft penumbra)
+const BLUR = COMMON + `
+uniform sampler2D src;
+uniform vec2 dir;        // (1,0) or (0,1)
+uniform float sigma;     // pixels
+void main() {
+  vec2 size = vec2(textureSize(src, 0));
+  float stepPx = max(1.0, ceil(3.0 * sigma / 48.0));
+  int n = int(ceil(3.0 * sigma / stepPx));
+  vec3 acc = vec3(0.0); float wsum = 0.0;
+  for (int i = -n; i <= n; i++) {
+    float o = float(i) * stepPx;
+    float w = exp(-0.5 * o * o / (sigma * sigma));
+    acc += w * texture(src, (gl_FragCoord.xy + dir * o) / size).rgb;
+    wsum += w;
+  }
+  fragOut = vec4(acc / wsum, 1.0);
+}`;
+
+// P1 / STEP 1: theArray = light at each pixel minus white light
+const ANALYSE = COMMON + `
+uniform sampler2D lightLin;   // blurred linear light map (v2)
+uniform sampler2D sharpLin;   // unblurred linear ImageA   (v1)
+uniform int model;            // 2 = v2, 1 = v1
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (model == 1) {                                        // v1: HSV(pixel) - HSV(white)
+    fragOut = vec4(rgb2hsv(toSRGB(texelFetch(sharpLin, p, 0).rgb)) - vec3(0.0, 0.0, 1.0), 1.0);
+    return;
+  }
+  vec3 lin = texelFetch(lightLin, p, 0).rgb;
+  // Exposure: how close the pixel is to the brightest displayable version of
+  // its own colour. (Plain luminance would make the yellow beams darker than
+  // the plain wall, because sRGB yellow can't be as luminous as white.)
+  float exposure = max(lin.r, max(lin.g, lin.b));
+  vec3  enc = toSRGB(lin);
+  float mx = max(enc.r, max(enc.g, enc.b)), mn = min(enc.r, min(enc.g, enc.b));
+  float sat = mx > 1e-4 ? (mx - mn) / mx : 0.0;            // stable near white
+  // Warm/cool direction from the Oklab hue. Real lights sit on the blackbody
+  // curve: warm lights have Oklab hue ~70 deg, cool skylight ~ -100 deg.
+  // Green/magenta deviations are discarded (no real light source has them).
+  vec3  lab  = oklab(lin);
+  float hue  = atan(lab.z, lab.y);
+  float warm = clamp(2.0 * cos(hue - radians(70.0)), -1.0, 1.0) * sat;
+  fragOut = vec4(exposure - 1.0, warm, sat, 1.0);
+}`;
+
+// P2 / STEPS 2-4: light the wall
+const RENDER = COMMON + `
+uniform sampler2D theArray;
+uniform int   W, H, model, dither;
+uniform vec3  wallHSL;
+uniform float warmCCT, warmTint, skyCCT, adaptation, fill, bounce, glow, shadowCurve;
+uniform vec4  v1p;            // ambient, shadowCurve, warmth, glow
+
+// ---- previous version, kept for side-by-side comparison --------------------
+vec3 renderV1(vec3 d, vec3 albedo) {
+  float Hh = d.x, S = d.y, V = 1.0 + d.z;
+  float exposure = pow(max(V, 0.0), 2.2 * v1p.y);
+  vec3  lightCol = toLinear(hsv2rgb(vec3(Hh, 1.0, 1.0)));
+  vec3  tint     = mix(vec3(1.0), lightCol, S * v1p.z);
+  float boost    = 1.0 + v1p.w * S * exposure;
+  vec3  c = albedo * (v1p.x + (1.0 - v1p.x) * exposure * boost * tint);
+  float m = max(c.r, max(c.g, c.b));
+  if (m > 1.0) c = mix(c / m, vec3(1.0), clamp((m - 1.0) * 0.5, 0.0, 1.0));
+  return clamp(c, 0.0, 1.0);
+}
+
+// ---- highlight roll-off + gamut mapping at constant Oklab hue --------------
+bool inGamut(vec3 c) { return all(greaterThanEqual(c, vec3(-1e-4))) && all(lessThanEqual(c, vec3(1.0 + 1e-4))); }
+vec3 compress(vec3 c) {
+  if (inGamut(c)) return c;                        // untouched when displayable
+  // Over-bright light: first fit the exposure (divide by the largest channel,
+  // which keeps hue AND saturation), then let the excess bleach the colour
+  // toward white the way over-bright light does, at constant Oklab hue.
+  float m = max(c.r, max(c.g, c.b));
+  vec3 lab = oklab(m > 1.0 ? c / m : c);
+  float t = m > 1.0 ? 1.0 - exp(-0.7 * (m - 1.0)) : 0.0;   // how blown-out
+  lab.x  = mix(lab.x, 1.0, 0.5 * t);
+  lab.yz *= 1.0 - t;
+  lab.x = clamp(lab.x, 0.0, 1.0);
+  if (inGamut(oklabToRGB(lab))) return oklabToRGB(lab);
+  float lo = 0.0, hi = 1.0;                        // shrink chroma, keep hue + lightness
+  for (int i = 0; i < 16; i++) {
+    float mid = 0.5 * (lo + hi);
+    if (inGamut(oklabToRGB(vec3(lab.x, lab.yz * mid)))) lo = mid; else hi = mid;
+  }
+  return clamp(oklabToRGB(vec3(lab.x, lab.yz * lo)), 0.0, 1.0);
+}
+
+vec3 renderV2(vec3 d, vec3 albedo) {
+  float exposure = pow(max(1.0 + d.x, 0.0), shadowCurve);
+  float warm = d.y, sat = d.z;
+
+  // 1. colour temperature of the light (blackbody), interpolated in mireds
+  float mN = 1e6 / 6500.0;
+  float mired = warm >= 0.0 ? mix(mN, 1e6 / warmCCT, warm) : mix(mN, 1e6 / skyCCT, -warm);
+  vec3  direct = lightRGB(1e6 / mired, max(warm, 0.0) * warmTint) * exposure * (1.0 + glow * abs(warm) * exposure);
+
+  // 2. fill light: cool sky mixed with pink light bounced off the wall itself
+  vec3 fillCol = mix(lightRGB(skyCCT, 0.0), albedo / lum(albedo), bounce);
+  fillCol /= lum(fillCol);
+  vec3 total   = fill * fillCol + (1.0 - fill) * direct;
+  vec3 neutral = fill * fillCol + (1.0 - fill) * vec3(1.0);
+  vec3 light   = total / neutral;          // white in ImageA -> exactly (1,1,1)
+
+  // 3. light x wall, per channel in linear sRGB
+  vec3 c = albedo * light;
+
+  // 4. partial colour constancy (CAT16 von Kries, degree D) toward neutral
+  float Ll = lum(light);
+  if (Ll > 1e-5) {
+    vec3 wSrc = CAT16 * (RGB2XYZ * (light / Ll));
+    vec3 wDst = CAT16 * (RGB2XYZ * vec3(1.0));
+    vec3 gain = adaptation * wDst / wSrc + (1.0 - adaptation);
+    c = XYZ2RGB * (inverse(CAT16) * (gain * (CAT16 * (RGB2XYZ * c))));
+  }
+
+  // 5. highlight roll-off and gamut mapping in Oklab
+  return compress(c);
+}
+
+float hash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
+
+void main() {
+  int col = int(gl_FragCoord.x);
+  int row = H - 1 - int(gl_FragCoord.y);               // canvas y=0 is the bottom
+  int index = row * W + col;                            // walk theArray in order
+  vec3 d = texelFetch(theArray, ivec2(index % W, index / W), 0).xyz;
+  vec3 albedo = toLinear(hsl2rgb(wallHSL));
+  vec3 c = model == 1 ? renderV1(d, albedo) : renderV2(d, albedo);
+  vec3 enc = toSRGB(c);
+  if (dither == 1) {                                    // triangular-PDF dither, +-1 LSB
+    float n = hash(gl_FragCoord.xy) + hash(gl_FragCoord.xy + 17.3) - 1.0;
+    enc += n / 255.0;
+  }
+  fragOut = vec4(clamp(enc, 0.0, 1.0), 1.0);
+}`;
+
+// ======================================================================
+// Host helpers (verbatim from js/tinted-wall-v2.js)
+// ======================================================================
+function compile(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error("Shader compile error:\n" + gl.getShaderInfoLog(s));
+  return s;
+}
+function makeProgram(gl, frag) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, frag));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("Program link error:\n" + gl.getProgramInfoLog(p));
+  const loc = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const u = gl.getActiveUniform(p, i); loc[u.name] = gl.getUniformLocation(p, u.name); }
+  return { p, loc };
+}
+function makeTexture(gl, W, H, internal, fmt, type, data, linear) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  const f = linear ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (data) gl.texImage2D(gl.TEXTURE_2D, 0, internal, fmt, type, data);
+  else      gl.texImage2D(gl.TEXTURE_2D, 0, internal, W, H, 0, fmt, type, null);
+  return t;
+}
+function makeTarget(gl, W, H, linear) {
+  const tex = makeTexture(gl, W, H, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, linear);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+    throw new Error("This GPU/browser can't render to half-float textures.");
+  return { tex, fbo };
+}
+const INT_UNIFORMS = new Set(["src", "lightLin", "sharpLin", "theArray", "W", "H", "model", "dither"]);
+function merge(base, extra) {
+  const out = Object.assign({}, base, extra || {});
+  out.v1 = Object.assign({}, base.v1, (extra && extra.v1) || {});
+  return out;
+}
+
+class PaintError extends Error {
+  constructor(kind, message) { super(message || kind); this.kind = kind; }
+}
+
+// ======================================================================
+// WallShader — one off-DOM WebGL2 context shared by every photo
+// ======================================================================
+class WallShader {
+  #hooks; #scratch;
+
+  constructor(n, hooks) {
+    this.n = n;
+    this.#hooks = hooks;
+    this.entries = new Set();
+    this.canvas = Object.assign(document.createElement("canvas"), { width: n, height: n });
+    this.canvas.addEventListener("webglcontextlost", e => e.preventDefault());
+    this.canvas.addEventListener("webglcontextrestored", () => this.#restore());
+    this.gl = this.canvas.getContext("webgl2", {
+      alpha: false, antialias: false, depth: false, stencil: false,
+      premultipliedAlpha: false, preserveDrawingBuffer: true
+    });
+    if (!this.gl) throw new PaintError("webgl", "WebGL2 is not supported in this browser.");
+    // Photos are downscaled to N x N through this canvas before upload
+    this.#scratch = Object.assign(document.createElement("canvas"), { width: n, height: n }).getContext("2d");
+    this.#init();
+  }
+
+  get lost() { return this.gl.isContextLost(); }
+
+  #init() {
+    const gl = this.gl, n = this.n;
+    if (!gl.getExtension("EXT_color_buffer_float") && !gl.getExtension("EXT_color_buffer_half_float"))
+      throw new PaintError("webgl", "This GPU/browser can't render to floating-point textures.");
+    if (n > gl.getParameter(gl.MAX_TEXTURE_SIZE))
+      throw new PaintError("webgl", `Working size is larger than this GPU's limit.`);
+    // Let the browser convert any embedded colour profile (e.g. Display P3) to sRGB
+    if ("unpackColorSpace" in gl) gl.unpackColorSpace = "srgb";
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+    this.progs = { decode: makeProgram(gl, DECODE), blur: makeProgram(gl, BLUR),
+                   analyse: makeProgram(gl, ANALYSE), render: makeProgram(gl, RENDER) };
+    // Shared scratch targets; each entry keeps only texA and its own theArray
+    this.lin = makeTarget(gl, n, n, true);
+    this.tmp = makeTarget(gl, n, n, true);
+    this.blurred = makeTarget(gl, n, n, true);
+    gl.bindVertexArray(gl.createVertexArray());
+    gl.viewport(0, 0, n, n);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  #restore() {
+    try {
+      this.#init();
+      for (const entry of this.entries) this.#upload(entry);
+    } catch (err) { this.#hooks.onError(err); return; }
+    this.#hooks.onRestored();
+  }
+
+  #upload(entry) {
+    const gl = this.gl, n = this.n, ctx = this.#scratch;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.clearRect(0, 0, n, n);
+    ctx.drawImage(entry.img, 0, 0, n, n);
+    try { entry.texA = makeTexture(gl, n, n, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, ctx.canvas, false); }
+    catch (err) {
+      // On file:// the scratch canvas is silently tainted; the upload is where it fails
+      if (err && err.name === "SecurityError") throw new PaintError("origin", "The browser blocked reading the photo's pixels.");
+      throw err;
+    }
+    entry.theArray = makeTarget(gl, n, n, false);
+    entry.analysedFor = null;
+  }
+
+  createEntry(img) {
+    const entry = { img, texA: null, theArray: null, analysedFor: null };
+    this.#upload(entry);
+    this.entries.add(entry);
+    return entry;
+  }
+
+  #draw(prog, target, tex, uniforms) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    gl.useProgram(prog.p);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    for (const [k, v] of Object.entries(uniforms)) {
+      const l = prog.loc[k]; if (!l) continue;
+      if (typeof v === "number") (INT_UNIFORMS.has(k) ? gl.uniform1i : gl.uniform1f).call(gl, l, v);
+      else if (v.length === 2) gl.uniform2fv(l, v);
+      else if (v.length === 3) gl.uniform3fv(l, v);
+      else gl.uniform4fv(l, v);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  #sigma() { return Math.max(0, SHADER_DEFAULTS.penumbra) / 100 * this.n; }
+  #key(model) { return model + "|" + this.#sigma().toFixed(3); }
+
+  // P0 decode -> P0b blur (v2) -> P1 theArray
+  analyse(entry, model) {
+    const gl = this.gl, P = this.progs, isV1 = model === "v1", sigma = this.#sigma();
+    this.#draw(P.decode, this.lin, entry.texA, { src: 0 });
+    let lightTex = this.lin.tex;
+    if (!isV1 && sigma >= 0.3) {
+      this.#draw(P.blur, this.tmp, this.lin.tex, { src: 0, dir: [1, 0], sigma });
+      this.#draw(P.blur, this.blurred, this.tmp.tex, { src: 0, dir: [0, 1], sigma });
+      lightTex = this.blurred.tex;
+    }
+    // lightLin on unit 0, sharpLin on unit 1
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lin.tex); gl.activeTexture(gl.TEXTURE0);
+    this.#draw(P.analyse, entry.theArray, lightTex, { lightLin: 0, sharpLin: 1, model: isV1 ? 1 : 2 });
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
+    entry.analysedFor = this.#key(model);
+  }
+
+  ensureAnalysed(entry, model) {
+    if (entry.analysedFor !== this.#key(model)) this.analyse(entry, model);
+  }
+
+  // P2: light the wall, then copy the drawing buffer out in the same task
+  renderTo(entry, model, hex, ctx2d) {
+    const S = SHADER_DEFAULTS, n = this.n, isV1 = model === "v1";
+    this.#draw(this.progs.render, null, entry.theArray.tex, {
+      theArray: 0, W: n, H: n, model: isV1 ? 1 : 2, dither: S.dither ? 1 : 0,
+      wallHSL: hexToHsl(hex), warmCCT: +S.warmCCT, warmTint: +S.warmTint, skyCCT: +S.skyCCT,
+      adaptation: +S.adaptation, fill: +S.fill, bounce: +S.bounce,
+      glow: +S.glow, shadowCurve: +S.shadowCurve,
+      v1p: [S.v1.ambient, S.v1.shadowCurve, S.v1.warmth, S.v1.glow]
+    });
+    ctx2d.drawImage(this.canvas, 0, 0);
+  }
+}
+
+// ---------------------------------------------------------------- colour
+function normalizeHex(hex) {
+  const h = String(hex).trim().toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(h)) throw new TypeError(`Expected a colour like "#e3d4b9", got "${hex}"`);
+  return h;
+}
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+function hexToHsl(hex) {   // hue in degrees, S and L in 0..1
+  const [r, g, b] = hexToRgb(hex).map(c => c / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, l = (mx + mn) / 2;
+  let h = 0, s = 0;
+  if (d > 0) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    if      (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else               h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return [h, s, l];
+}
+function lrv(hex) {        // light reflectance value = relative luminance x 100
+  const lin = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const [r, g, b] = hexToRgb(hex).map(lin);
+  return Math.round(100 * (0.2126729 * r + 0.7151522 * g + 0.0721750 * b));
+}
+
+// ---------------------------------------------------------------- markup
+const app = document.getElementById("app");
+const renderer = document.getElementById("renderer");
+const modelFieldset = document.getElementById("model");
+const notice = document.getElementById("notice");
+const readoutHex = document.getElementById("readoutHex");
+const readoutLrv = document.getElementById("readoutLrv");
+
+document.getElementById("rooms").innerHTML = Object.entries(ROOMS).map(([key, room]) =>
+  `<label class="room"><input class="vh" type="radio" name="room" value="${key}"${key === activeRoom ? " checked" : ""}><span>${room.label}</span></label>`
+).join("");
+
+document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
+  `<li><label class="chip-option">` +
+    `<input class="vh" type="radio" name="paint" value="${hex}"${hex === activePaintColor ? " checked" : ""}>` +
+    `<span class="chip" style="background:${hex}"></span>` +
+    `<span class="chip__hex">${hex.toUpperCase()}</span><span class="vh">, LRV ${lrv(hex)}</span>` +
+  `</label></li>`
+).join("");
+
+renderer.dataset.room = shownRoom;
+renderer.innerHTML = TIMES.map(time => `
+  <figure class="scene" data-time="${time.key}">
+    <div class="scene__frame" style="view-transition-name: scene-${time.key}">
+      <div class="scene__layer scene__layer--bottom" aria-hidden="true">
+        <canvas class="scene__canvas" width="${N}" height="${N}"></canvas>
+        <canvas class="scene__canvas scene__canvas--incoming" width="${N}" height="${N}"></canvas>
+      </div>
+      <div class="scene__layer scene__layer--top">
+        ${Object.entries(ROOMS).map(([key, room]) =>
+          `<img class="scene__photo" data-room="${key}" src="${room.photos[time.key]}"` +
+          ` alt="${room.label}, ${time.label.toLowerCase()} light" width="2048" height="2048" decoding="async"` +
+          `${key === shownRoom ? "" : ` fetchpriority="low"`} style="--mask: url('${room.mask}')">`
+        ).join("")}
+      </div>
+    </div>
+    <figcaption>${time.label}</figcaption>
+  </figure>`).join("");
+
+const NOTICES = {
+  nogl:   "Paint previews are turned off. Remove <b>?nogl</b> from the address to turn them on.",
+  origin: "Paint previews need http. Run <b>bash serve.sh</b> in this folder and open " +
+          `<a href="http://localhost:8000/shaderSceneRenderer.html">http://localhost:8000/shaderSceneRenderer.html</a>.`,
+  webgl:  "Paint previews need WebGL2. Open this page in a current version of Chrome, Edge, Firefox or Safari.",
+  mask:   "Paint previews need CSS luminance masks. Open this page in a current version of Chrome, Edge, Firefox or Safari.",
+  load:   "Some photos didn't load. Check the images folder, then reload the page.",
+  error:  "Paint previews stopped working. Reload the page to try again."
+};
+function showNotice(kind) { notice.innerHTML = NOTICES[kind] || NOTICES.error; }
+
+// ======================================================================
+// Scene tiles: base canvas + incoming canvas under the masked photo
+// ======================================================================
+let shader = null;
+let painting = false;
+let resumeOnRestore = false;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+class SceneTile {
+  constructor(figure) {
+    this.time = figure.dataset.time;
+    [this.base, this.incoming] = figure.querySelectorAll("canvas");
+    this.baseCtx = this.base.getContext("2d");
+    this.inCtx = this.incoming.getContext("2d");
+    this.imgs = Object.fromEntries([...figure.querySelectorAll("img")].map(img => [img.dataset.room, img]));
+    this.anim = null;
+  }
+
+  // Base starts as the original photo, so turning masks on changes nothing
+  seed(room) {
+    this.baseCtx.imageSmoothingQuality = "high";
+    this.baseCtx.drawImage(this.imgs[room], 0, 0, N, N);
+  }
+
+  present(entry, animate, delay = 0) {
+    if (!animate) {
+      this.settle();
+      shader.renderTo(entry, activeModel, activePaintColor, this.baseCtx);
+      return Promise.resolve();
+    }
+    shader.renderTo(entry, activeModel, activePaintColor, this.inCtx);
+    if (!this.anim) {      // mid-fade changes just redraw incoming and let the fade continue
+      const anim = this.incoming.animate([{ opacity: 0 }, { opacity: 1 }],
+        { duration: FADE_MS, delay, easing: "cubic-bezier(.2, 0, 0, 1)", fill: "both" });
+      anim.onfinish = () => { if (this.anim === anim) this.settle(); };
+      this.anim = anim;
+    }
+    return this.anim.finished.then(() => {}, () => {});
+  }
+
+  // Finish now: commit incoming to base and drop incoming back to opacity 0
+  settle() {
+    const anim = this.anim;
+    if (!anim) return;
+    this.anim = null;
+    this.baseCtx.drawImage(this.incoming, 0, 0);
+    anim.cancel();
+  }
+}
+const tiles = [...renderer.querySelectorAll(".scene")].map(f => new SceneTile(f));
+
+// ---------------------------------------------------------------- rooms
+const roomEntries = {}, roomLoading = {};
+
+function prepareRoom(room) {
+  roomLoading[room] ??= (async () => {
+    const imgs = tiles.map(t => t.imgs[room]);
+    await Promise.all(imgs.map(img => img.decode().catch(() => {
+      if (!img.naturalWidth) throw new PaintError("load", `Couldn't load ${img.src}`);
+    })));
+    return (roomEntries[room] = imgs.map(img => shader.createEntry(img)));
+  })().catch(err => { delete roomLoading[room]; throw err; });
+  return roomLoading[room].then(list => {
+    for (const entry of list) shader.ensureAnalysed(entry, activeModel);
+    return list;
+  });
+}
+
+function decodeImage(src) {
+  const img = new Image();
+  img.src = src;
+  return img.decode().catch(() => { throw new PaintError("load", `Couldn't load ${src}`); });
+}
+
+function whenIdle(cb) {
+  if ("requestIdleCallback" in window) requestIdleCallback(cb, { timeout: 2000 });
+  else setTimeout(cb, 200);
+}
+
+// ---------------------------------------------------------------- rendering
+let frame = null;
+function scheduleRender() {      // coalesced per animation frame
+  frame ??= new Promise(resolve => requestAnimationFrame(() => { frame = null; resolve(flush()); }));
+  return frame;
+}
+
+function flush() {
+  if (!painting || shader.lost) return;
+  try {
+    const list = roomEntries[shownRoom];
+    const animate = !reducedMotion.matches;
+    return Promise.all(tiles.map((tile, i) => {
+      shader.ensureAnalysed(list[i], activeModel);
+      return tile.present(list[i], animate, i * STAGGER_MS);
+    }));
+  } catch (err) { fail(err); }
+}
+
+function repaint() {             // instant, no fade
+  const list = roomEntries[shownRoom];
+  tiles.forEach((tile, i) => {
+    shader.ensureAnalysed(list[i], activeModel);
+    tile.present(list[i], false);
+  });
+}
+
+function fail(err) {
+  if (shader && shader.lost) { resumeOnRestore = true; return; }   // wait for webglcontextrestored
+  painting = false;
+  app.classList.remove("is-painted");
+  for (const tile of tiles) tile.settle();
+  modelFieldset.disabled = true;
+  const kind = err instanceof PaintError ? err.kind : "error";
+  if (kind === "error" || kind === "webgl") console.warn("shaderSceneRenderer:", err);
+  showNotice(kind);
+}
+
+function onRestored() {
+  try {
+    if (painting) repaint();
+    else if (resumeOnRestore) { resumeOnRestore = false; startPainting().catch(fail); }
+  } catch (err) { fail(err); }
+}
+
+// ---------------------------------------------------------------- public setters
+function syncRadio(name, value) {
+  for (const input of document.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value;
+}
+
+function setPaint(hex) {
+  hex = normalizeHex(hex);
+  activePaintColor = hex;
+  document.documentElement.style.setProperty("--active-paint", hex);
+  syncRadio("paint", hex);
+  readoutHex.textContent = hex.toUpperCase();
+  readoutLrv.textContent = `LRV ${lrv(hex)}`;
+  return scheduleRender();
+}
+
+function setModel(model) {
+  if (model !== "v1" && model !== "v2") throw new RangeError(`Unknown shader model "${model}"`);
+  activeModel = model;
+  syncRadio("model", model);
+  return scheduleRender();
+}
+
+let roomToken = 0;
+async function setRoom(room) {
+  if (!(room in ROOMS)) throw new RangeError(`Unknown room "${room}"`);
+  activeRoom = room;
+  syncRadio("room", room);
+  const token = ++roomToken;
+  if (painting) {
+    try { await prepareRoom(room); } catch (err) { fail(err); }
+  }
+  if (token !== roomToken || room === shownRoom) return;   // the last call wins
+  for (const tile of tiles) tile.settle();
+  const swap = () => {
+    shownRoom = room;
+    renderer.dataset.room = room;
+    if (painting && !shader.lost) {
+      try { repaint(); } catch (err) { fail(err); }
+    }
+  };
+  if (reducedMotion.matches || !document.startViewTransition) { swap(); return; }
+  await document.startViewTransition(swap).finished;
+}
+
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.name === "paint") setPaint(t.value);
+  else if (t.name === "room") setRoom(t.value);
+  else if (t.name === "model") setModel(t.value);
+});
+
+// ---------------------------------------------------------------- boot
+async function startPainting() {
+  if (new URLSearchParams(location.search).has("nogl")) throw new PaintError("nogl");
+  if (location.protocol === "file:") throw new PaintError("origin");
+  if (!CSS.supports("mask-mode", "luminance")) throw new PaintError("mask");
+  shader ??= new WallShader(N, { onRestored, onError: fail });
+  const masks = Promise.all(Object.values(ROOMS).map(r => decodeImage(r.mask)));
+  let room;
+  do {                           // the visitor may switch rooms while we load
+    room = shownRoom;
+    await Promise.all([prepareRoom(room), masks]);
+  } while (room !== shownRoom);
+  for (const tile of tiles) tile.seed(room);
+  painting = true;
+  modelFieldset.disabled = false;
+  notice.textContent = "";
+  app.classList.add("is-painted");
+  whenIdle(() => {
+    for (const other of Object.keys(ROOMS)) if (other !== shownRoom) prepareRoom(other).catch(fail);
+  });
+  await scheduleRender();        // the paint fades in
+}
+
+const ready = startPainting().catch(fail);
+
+// ---------------------------------------------------------------- handle
+const sampler = Object.assign(document.createElement("canvas"), { width: 1, height: 1 })
+  .getContext("2d", { willReadFrequently: true });
+sampler.imageSmoothingEnabled = false;
+
+window.sceneRenderer = {
+  get activePaintColor() { return activePaintColor; },
+  get activeRoom() { return activeRoom; },
+  get activeModel() { return activeModel; },
+  size: N,
+  setPaint, setRoom, setModel, ready,
+  // Pixel [r, g, b] of a tile's painted canvas; tile = "morning" | "noon" | "night" | 0..2,
+  // x and y in canvas pixels (0..size-1, top-left origin)
+  sample(tile, x, y) {
+    const t = typeof tile === "number" ? tiles[tile] : tiles.find(s => s.time === tile);
+    if (!t) throw new RangeError(`Unknown tile "${tile}"`);
+    const src = t.anim ? t.incoming : t.base;
+    sampler.clearRect(0, 0, 1, 1);
+    sampler.drawImage(src, Math.round(x), Math.round(y), 1, 1, 0, 0, 1, 1);
+    const [r, g, b] = sampler.getImageData(0, 0, 1, 1).data;
+    return [r, g, b];
+  }
+};
+</script>
+</body>
+</html>

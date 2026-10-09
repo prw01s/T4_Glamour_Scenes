@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Gradient Tint</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            width: 100%;
+            background: linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+            color: #1a1a1a;
+        }
+
+        .container {
+            width: 1200px;
+            margin: max(10vh, 20px) auto 0;
+            padding: 0 20px;
+        }
+
+        #image-container {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            transition: box-shadow 0.3s ease;
+        }
+
+        #image-container:hover {
+            box-shadow: 0 12px 48px rgba(0, 0, 0, 0.15);
+        }
+
+        #image-container img {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+            mix-blend-mode: multiply;
+            transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 3;
+        }
+
+        #yellow-gradient {
+            /* mix-blend-mode: soft-light; */
+            z-index: 1;
+        }
+
+        #tintColor {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            /* mix-blend-mode: soft-light; */
+            /* mix-blend-mode: multiply;
+            transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1); 
+            z-index: 2; */
+        }
+
+        .color-blocks-container {
+            margin-top: 48px;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            width: 100%;
+        }
+
+        .color-block {
+            width: 120px;
+            height: 120px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            border: 2px solid transparent;
+        }
+
+        .color-block:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .color-block.active {
+            transform: scale(1.1);
+            border: 2px solid #000;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Color blocks */
+        .color-block[data-color="#9ABA25"] {
+            background-color: #9ABA25;
+        }
+
+        .color-block[data-color="#F8AC1D"] {
+            background-color: #F8AC1D;
+        }
+
+        .color-block[data-color="#996F32"] {
+            background-color: #996F32;
+        }
+
+        .color-block[data-color="#F2EAC3"] {
+            background-color: #F2EAC3;
+        }
+
+        .color-block[data-color="#D1E3D2"] {
+            background-color: #D1E3D2;
+        }
+
+        @media (max-width: 1280px) {
+            .container {
+                width: 90vw;
+                max-width: 1200px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .color-block {
+                width: 100px;
+                height: 100px;
+            }
+
+            .color-blocks-container {
+                gap: 12px;
+                margin-top: 36px;
+            }
+
+            #image-container {
+                border-radius: 8px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .color-block {
+                width: 80px;
+                height: 80px;
+            }
+
+            .color-block.active {
+                transform: scale(1.08);
+            }
+
+            .color-blocks-container {
+                gap: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="image-container">
+            <img src="./images/color-gradient-test.png" alt="Color gradient test">
+            <div id="tintColor"></div>
+            <!-- <img id="yellow-gradient" src="./images/yellow-only-gradient.png" alt="Color gradient test"> -->
+            <!-- <img id="yellow-gradient" src="./images/yellow-and-white-gradient.png" alt="Color gradient test"> -->
+        </div>
+
+        <div class="color-blocks-container">
+            <div class="color-block" data-color="#9ABA25"></div>
+            <div class="color-block" data-color="#F8AC1D"></div>
+            <div class="color-block" data-color="#996F32"></div>
+            <div class="color-block" data-color="#F2EAC3"></div>
+            <div class="color-block" data-color="#D1E3D2"></div>
+        </div>
+    </div>
+
+    <script>
+        const colorBlocks = document.querySelectorAll('.color-block');
+        const tintColor = document.getElementById('tintColor');
+
+        function setActiveColorBlock(block) {
+            colorBlocks.forEach(b => b.classList.remove('active'));
+            block.classList.add('active');
+            const color = block.getAttribute('data-color');
+            tintColor.style.backgroundColor = color;
+        }
+
+        setActiveColorBlock(colorBlocks[0]);
+
+        colorBlocks.forEach(block => {
+            block.addEventListener('click', () => {
+                setActiveColorBlock(block);
+            });
+
+            block.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveColorBlock(block);
+                }
+            });
+
+            block.setAttribute('tabindex', '0');
+            block.setAttribute('role', 'button');
+            block.setAttribute('aria-pressed', 'false');
+        });
+
+        const observer = new MutationObserver(() => {
+            colorBlocks.forEach(block => {
+                const isActive = block.classList.contains('active');
+                block.setAttribute('aria-pressed', isActive);
+            });
+        });
+
+        observer.observe(document.body, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class']
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["/Users/prw01s-mbp/Desktop/development/T4_Glamour_Scenes/serve.sh"],
+      "port": 8000
+    },
+    {
+      "name": "site",
+      "url": "http://localhost:8000",
+      "port": 8000
+    }
+  ]
+}

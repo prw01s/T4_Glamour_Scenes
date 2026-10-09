@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tinted wall — v1 vs v2</title>
+<style>
+  /* Neutral mid-grey surround: a coloured or very dark page would bias how
+     the wall colours are perceived (simultaneous contrast / adaptation). */
+  :root { --bg: #767676; --panel: #6b6b6b; --ink: #f4f4f4; --muted: #dcdcdc; --line: #858585; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 18px 22px 6px; }
+  h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+  .views { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; padding: 14px 22px; }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .scene { display: block; width: 100%; height: auto; border-radius: 3px; }
+  .controls { margin: 0 22px 22px; padding: 14px 16px; background: var(--panel); border-radius: 6px;
+              display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px 26px; }
+  .presets { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .presets span { color: var(--muted); margin-right: 4px; }
+  button { font: inherit; color: var(--ink); background: #5d5d5d; border: 1px solid var(--line);
+           border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+  button:hover { background: #535353; }
+  button[aria-pressed="true"] { background: #3f3f3f; border-color: #bbb; }
+  label { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; }
+  label small { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+  output { font-variant-numeric: tabular-nums; color: var(--muted); }
+  input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: #e9e9e9; }
+  .check { grid-template-columns: auto 1fr; }
+  #diag { grid-column: 1 / -1; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+          border-top: 1px solid var(--line); padding-top: 8px; white-space: pre-wrap; }
+  #err { margin: 0 22px; color: #fff; background: #8a2b2b; padding: 10px 12px; border-radius: 4px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pink wall lit by a light map: v1 vs v2</h1>
+  <p>Both renderings use the same image (#tintedScene) as the light. v1 is the previous HSV-based script; v2 adds blackbody light colours, partial colour constancy (CAT16), cool/bounce fill light, Oklab highlight handling, soft penumbra and dithering.</p>
+</header>
+<div id="err"></div>
+
+<div class="views">
+  <figure id="figV1"><figcaption>v1 — previous (HSV)</figcaption></figure>
+  <figure id="figV2"><figcaption>v2 — perception-aware</figcaption>
+    <img id="tintedScene" class="scene" src="./images/gradients/color-gradient-test.png" alt="Pink wall with shadows and warm light">
+  </figure>
+</div>
+
+<div class="controls" id="controls">
+  <div class="presets"><span>Presets:</span>
+    <button data-preset="default" aria-pressed="true">Balanced (default)</button>
+    <button data-preset="physical">Camera, daylight balance</button>
+    <button data-preset="adapted">Eye fully adapted</button>
+    <button data-preset="golden">Golden hour (stylised)</button>
+    <button data-preset="dusk">Dusk, deep shadows</button>
+  </div>
+</div>
+
+<script src="./js/tinted-wall-v2.js"></script>
+<script>
+(function () {
+  const SLIDERS = [
+    ["warmCCT",     "Warm light colour temperature", 1700, 5000, 50,    v => v + " K",  "Lower = deeper orange. Candle ≈ 1900 K, tungsten ≈ 2700 K, golden-hour sun ≈ 3500 K."],
+    ["warmTint",    "Warm light tint (Duv)",       -0.02, 0.05, 0.001, v => (v > 0 ? "+" : "") + v.toFixed(3), "0 = real blackbody light. Positive = more golden/yellow (stylised, beyond real lamps), negative = rosier."],
+    ["adaptation",  "Colour constancy (adaptation)", 0, 1, 0.01,      v => v.toFixed(2), "0 = camera locked at daylight balance, 1 = the eye fully discounts the light colour."],
+    ["glow",        "Warm light intensity boost",    0, 1.5, 0.01,    v => v.toFixed(2), "How much brighter the warm light is than neutral light."],
+    ["fill",        "Shadow fill amount",            0, 0.4, 0.005,   v => v.toFixed(3), "Light left in the deepest shadow."],
+    ["skyCCT",      "Shadow fill colour temperature", 4000, 20000, 100, v => v + " K", "Skylight in shade ≈ 8000–12000 K (cool)."],
+    ["bounce",      "Bounce light from the wall",    0, 1, 0.01,      v => v.toFixed(2), "Share of the fill that is pink light reflected off the wall itself."],
+    ["shadowCurve", "Shadow depth curve",            0.5, 2.5, 0.01,  v => v.toFixed(2), ">1 = deeper, more contrasty shadows."],
+    ["penumbra",    "Penumbra softness",             0, 2, 0.01,      v => v.toFixed(2) + "% width", "Blur of the light map; real shadow edges are never razor-sharp."]
+  ];
+  const PRESETS = {
+    default:  {},
+    physical: { adaptation: 0, warmTint: 0, warmCCT: 3000 },
+    adapted:  { adaptation: 1 },
+    golden:   { warmCCT: 3200, warmTint: 0.04, adaptation: 0.2, glow: 0.5 },
+    dusk:     { warmCCT: 2000, skyCCT: 14000, fill: 0.06, shadowCurve: 1.6, adaptation: 0.3, glow: 0.7, penumbra: 0.35 }
+  };
+  const D = TintedWall.DEFAULTS;
+  const controls = document.getElementById("controls");
+  const diag = document.createElement("div"); diag.id = "diag";
+  const inputs = {};
+  let main = null, v1 = null, queued = null;
+
+  for (const [key, name, min, max, step, fmt, help] of SLIDERS) {
+    const l = document.createElement("label");
+    l.innerHTML = `<span>${name}</span><output></output><input type="range" min="${min}" max="${max}" step="${step}"><small>${help}</small>`;
+    const inp = l.querySelector("input"), out = l.querySelector("output");
+    inp.value = D[key]; out.textContent = fmt(+inp.value);
+    inp.addEventListener("input", () => { out.textContent = fmt(+inp.value); markPreset(null); schedule({ [key]: +inp.value }); });
+    inputs[key] = { inp, out, fmt };
+    controls.appendChild(l);
+  }
+  const dl = document.createElement("label"); dl.className = "check";
+  dl.innerHTML = `<input type="checkbox" checked><span>Dither output (removes 8-bit banding)</span>`;
+  dl.querySelector("input").addEventListener("change", e => schedule({ dither: e.target.checked }));
+  controls.appendChild(dl);
+  controls.appendChild(diag);
+
+  function schedule(change) {
+    queued = Object.assign(queued || {}, change);
+    requestAnimationFrame(() => { if (!queued || !main) return; main.update(queued); queued = null; diagnose(); });
+  }
+  function markPreset(name) {
+    controls.querySelectorAll("[data-preset]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.preset === name)));
+  }
+  controls.querySelectorAll("[data-preset]").forEach(b => b.addEventListener("click", () => {
+    const s = {};
+    for (const [key] of SLIDERS) s[key] = key in PRESETS[b.dataset.preset] ? PRESETS[b.dataset.preset][key] : D[key];
+    for (const [k, v] of Object.entries(s)) { inputs[k].inp.value = v; inputs[k].out.textContent = inputs[k].fmt(v); }
+    markPreset(b.dataset.preset); schedule(s);
+  }));
+
+  function diagnose() {
+    const W = main.canvas.width, H = main.canvas.height;
+    const pts = { "plain wall": [0.78, 0.42], "warm beam": [0.25, 0.93], "shadow": [0.47, 0.74] };
+    let txt = "Sampled pixels (v2 | v1):\n";
+    for (const [n, [fx, fy]] of Object.entries(pts)) {
+      const x = Math.round(fx * W), y = Math.round(fy * H);
+      txt += `  ${n.padEnd(11)} rgb(${main.sample(x, y).join(", ")})  |  rgb(${v1 ? v1.sample(x, y).join(", ") : "—"})\n`;
+    }
+    txt += "Expected plain wall: rgb(220, 168, 167) = hsl(0.5, 43%, 76%), ±1 from dithering.";
+    diag.textContent = txt;
+  }
+
+  function showError(msg) { const e = document.getElementById("err"); e.textContent = msg; e.style.display = "block"; }
+  document.addEventListener("tintedscene:error", e => showError(e.detail.error.message));
+  function start(inst) {
+    main = inst;
+    try {
+      v1 = TintedWall.create(document.getElementById("tintedScene"), { model: "v1" });
+      v1.canvas.className = "scene";
+      document.getElementById("figV1").appendChild(v1.canvas);
+    } catch (e) { showError("v1: " + e.message); }
+    diagnose();
+  }
+  document.addEventListener("tintedscene:rendered", e => start(e.detail.instance));
+  if (window.__tintedMain) start(window.__tintedMain);
+})();
+</script>
+</body>
+</html>

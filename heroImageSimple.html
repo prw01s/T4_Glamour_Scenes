@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T4 Glamour Scene Visualization</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --surface: #17171b;
+    --active-color: #e3d4b9;
+    --warmth-strength: 0.8;  /* 0 = no sconce warmth, 1 = full */
+    /* color-scheme: dark; */
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html, body {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: #f2f2f2;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100dvh;
+    padding: 0 20px 40px;
+  }
+
+  .stage {
+    width: 100%;
+    max-width: 380px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  #image-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    margin-top: 30px;
+    border-radius: 20px;
+    /* height: 1280px; */
+    height: 688px;
+    overflow: hidden;
+    /* width: 720px; */
+    width: 384px;
+    background-color: var(--active-color);
+    transition: background-color 0.5s ease;
+    box-shadow: 0 20px 45px -15px rgba(0, 0, 0, 0.6);
+  }
+
+  #image-container img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .image-bottom {
+    z-index: 1;
+    background-color: var(--active-color);
+    filter: brightness(0.75) contrast(1.5);
+    mix-blend-mode: multiply;
+    transition: background-color 0.5s ease;
+  }
+
+  .image-top {
+    z-index: 2;
+    -webkit-mask-image: url("./images/720p-mask_v1.png");
+    mask-image: url("./images/720p-mask_v1.png");
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-size: cover;
+    mask-size: cover;
+    -webkit-mask-mode: luminance;
+    mask-mode: luminance;
+  }
+
+  #color-blocks {
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    margin: 22px 0 0;
+    padding: 0;
+  }
+
+  #color-blocks li {
+    flex: 1 1 0;
+    aspect-ratio: 1 / 1;
+    border-radius: 8px;
+    cursor: pointer;
+    outline: 3px solid transparent;
+    outline-offset: 2px;
+    transform: scale(1);
+    transition: transform 0.2s ease, outline-color 0.2s ease;
+  }
+
+  #color-blocks li:hover {
+    transform: scale(1.05);
+  }
+
+  #color-blocks li.active {
+    transform: scale(1.15);
+    outline-color: #000;
+  }
+
+  /* ---- The blend stack ------------------------------------------------ */
+  /* .stage {
+    position: relative;
+    width: min(100vw, 1200px);
+    width: 1920px;
+    aspect-ratio: 3 / 2;     ---- match your photo's ratio ----
+    margin: 0 auto;
+    isolation: isolate;      ---- keep blends inside this box ---
+    overflow: hidden;
+    height: 1080px;
+  }
+
+  .stage > * {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  } */
+
+  /* Layer 1 (bottom): solid active-color colour */
+  .active-color { background: var(--active-color); }
+
+  /* Layer 2: photo luminance × active-color. White → active-color, shadows darken. */
+  .lum {
+    filter: grayscale(1);
+    mix-blend-mode: multiply;
+  }
+
+  /* Layer 3 (top): warmth extracted by the SVG filter, added on top.
+     Swap plus-lighter for screen if you want a softer result. */
+  .warmth {
+    filter: url(#warmth);
+    mix-blend-mode: plus-lighter;
+    mix-blend-mode: screen;
+    opacity: var(--warmth-strength);
+  }
+
+</style>
+</head>
+<body>
+  <!-- Warmth extractor. Each row is [R G B A offset] weights for one
+    output channel. Warmth is measured as R − B and clamped at 0, so
+    neutral light and grey shadows contribute nothing.
+      Row 1 (red):   R − B
+      Row 2 (green): 0.6 × (R − B)   → makes the added light yellow, not red
+      Row 3 (blue):  0
+    If the ambient light isn't perfectly neutral, put a small negative
+    value in the last column of rows 1 and 2 (e.g. -0.10 and -0.06) to
+    subtract that baseline before clamping. -->
+  <svg width="0" height="0" aria-hidden="true" focusable="false"
+      style="position:absolute">
+  <filter id="warmth" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="
+      1    0  -1    0   0
+      0.6  0  -0.6  0   0
+      0    0   0    0   0
+      0    0   0    1   0"/>
+  </filter>
+  </svg>
+
+  <div class="stage">
+    <div id="image-container">
+      <img class="image-top" src="./images/hero_mobile_white.png" alt="">
+      <img class="image-bottom" src="./images/hero_mobile_white.png" alt="">
+    </div>
+
+    <ul id="color-blocks">
+      <li data-color="#e3d4b9" class="active" style="background-color:#e3d4b9"></li>
+      <li data-color="#58679d" style="background-color:#58679d"></li>
+      <li data-color="#a4aca6" style="background-color:#a4aca6"></li>
+      <li data-color="#cfdbde" style="background-color:#cfdbde"></li>
+      <li data-color="#dda27a" style="background-color:#dda27a"></li>
+    </ul>
+  </div>
+
+  <script>
+    const videoContainer = document.getElementById("image-container");
+    const colorBlocks = document.getElementById("color-blocks");
+    const bottomVideo = document.querySelector(".image-bottom");
+
+    colorBlocks.addEventListener("click", (event) => {
+      const block = event.target.closest("li[data-color]");
+      if (!block) return;
+
+      colorBlocks.querySelectorAll("li.active").forEach((el) => el.classList.remove("active"));
+      block.classList.add("active");
+
+      videoContainer.style.setProperty("--active-color", block.dataset.color);
+      videoContainer.style.setProperty("--active-color", block.dataset.color);
+      bottomVideo.style.backgroundColor = block.dataset.color;
+    });
+  </script>
+
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stacked CSS Blend Modes Demo</title>
+  <style>
+    /* Reset and layout centering */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      background-color: #111;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      color: #fff;
+    }
+
+    /* The canvas container that establishes the stacking context */
+    .canvas-container {
+      position: relative;
+      width: 600px;
+      height: 400px;
+      background-image: url('lamp.jpeg'); /* Landscape photo */
+      background-size: cover;
+      background-position: center;
+      border-radius: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+    }
+
+    /* Common layout properties for overlapping absolute elements */
+    .blend-layer {
+      position: absolute;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      user-select: none;
+    }
+
+    /* LAYER 1: Large Base Circle (Bottom of the custom stack) */
+    .circle-bottom {
+      top: 50px;
+      left: 80px;
+      width: 220px;
+      height: 220px;
+      background-color: #ff0055; /* Hot Pink */
+      border-radius: 50%;
+      z-index: 10;
+      
+      /* Multiply makes white transparent and darkens underlying image pixels */
+      mix-blend-mode: multiply; 
+    }
+
+    /* LAYER 2: Medium Top Circle (Overlaps the bottom circle and the photo) */
+    .circle-top {
+      top: 120px;
+      left: 220px;
+      width: 180px;
+      height: 180px;
+      background-color: #00ffcc; /* Bright Cyan */
+      border-radius: 50%;
+      z-index: 20; /* Sits higher than .circle-bottom */
+      
+      /* Screen makes black transparent and brightens everything beneath it */
+      mix-blend-mode: screen; 
+    }
+
+    /* LAYER 3: Large Text Banner (Top of the entire stack) */
+    .text-overlay {
+      bottom: 40px;
+      left: 0;
+      width: 100%;
+      font-size: 4.5rem;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: -2px;
+      color: #ffffff;
+      z-index: 30; /* Sits on top of both colored circles and the photo */
+      
+      /* Difference subtracts overlap pixel colors, creating an inverted/negative effect */
+      mix-blend-mode: difference; 
+    }
+
+    /* Label helper for visual clarity in the demo */
+    .label {
+      font-size: 0.8rem;
+      font-weight: bold;
+      background-color: rgba(0, 0, 0, 0.7);
+      padding: 4px 8px;
+      border-radius: 4px;
+      color: #fff;
+      mix-blend-mode: normal; /* Keeps label legible */
+    }
+  </style>
+</head>
+<body>
+
+  <div class="canvas-container">
+    
+    <!-- Z-INDEX 10: Multiplied Layer -->
+    <div class="blend-layer circle-bottom">
+      <span class="label">z-index: 10 (multiply)</span>
+    </div>
+
+    <!-- Z-INDEX 20: Screened Layer -->
+    <div class="blend-layer circle-top">
+      <span class="label">z-index: 20 (screen)</span>
+    </div>
+
+    <!-- Z-INDEX 30: Differenced Text Layer -->
+    <h1 class="blend-layer text-overlay">
+      ECLIPSE
+    </h1>
+
+  </div>
+
+</body>
+</html>
