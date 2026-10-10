@@ -11,7 +11,7 @@
     --graphite: #242424;   /* text, rings */
     --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
     --rule: #C6C6C6;       /* hairlines */
-    --active-paint: #e3d4b9;
+    --active-paint: #e3d4b9;   /* placeholder; syncPaintUi() sets it from PAINT_COLORS[0] at startup */
     --pad: clamp(20px, 3vw, 40px);
     --gap: 20px;
     --cap: 32px;           /* figcaption line + gap above it */
@@ -279,7 +279,7 @@
     <div class="palette__body">
       <span class="palette__label" aria-hidden="true">Paint color</span>
       <ul class="chips" id="chips"></ul>
-      <p class="readout"><span class="readout__swatch"></span><span id="readoutHex">#E3D4B9</span><span class="readout__lrv" id="readoutLrv">LRV 67</span></p>
+      <p class="readout"><span class="readout__swatch"></span><span id="readoutHex"></span><span class="readout__lrv" id="readoutLrv"></span></p>
     </div>
   </fieldset>
 </main>
@@ -291,15 +291,91 @@
  * light at every pixel, then CSS luminance masks keep everything that isn't
  * wall original.
  *
- * The GLSL and host helpers are ported verbatim from js/tinted-wall-v2.js
- * (v2 perception-aware model + v1 HSV model; v1 also lives in
- * glsl/wall_lighting.glsl). Unlike TintedWall.create(), which allocates a
- * full-size GPU pipeline per image, all photos here share one off-DOM WebGL2
+ * The GLSL and host helpers are ported from js/tinted-wall-v2.js (v2
+ * perception-aware model + v1 HSV model; v1 also lives in
+ * glsl/wall_lighting.glsl). Their logic is unchanged; the comments are added
+ * here. Unlike TintedWall.create(), which allocates a full-size GPU pipeline
+ * per image (~170 MB at 2048²), all photos here share one off-DOM WebGL2
  * context at a fixed N x N working size.
+ *
+ * --------------------------------------------------------------------------
+ * DATA FLOW (per photo, all on the GPU except the first and last hop)
+ *
+ *   <img> photo (2048² sRGB JPEG)
+ *     │  drawImage into an N x N scratch 2D canvas (high-quality downscale)
+ *     ▼
+ *   texA            RGBA8, N x N, one per photo ("entry")
+ *     │  P0  DECODE   sRGB -> linear light                    -> lin
+ *     │  P0b BLUR     separable Gaussian, v2 only              -> tmp -> blurred
+ *     │  P1  ANALYSE  light minus white light, per pixel       -> entry.theArray
+ *     ▼
+ *   theArray        RGBA16F, N x N, one per photo; cached until the model changes
+ *     │  P2  RENDER   wall paint lit by theArray               -> drawing buffer
+ *     ▼
+ *   WebGL canvas    copied with drawImage, in the same task, into a tile's 2D canvas
+ *
+ * N is fixed for every surface because DECODE reads texA with texelFetch at
+ * gl_FragCoord, and RENDER walks theArray with row * W + col: texA, the
+ * scratch targets, theArray and the drawing buffer must all be N x N.
+ * Memory at N = 1024: 3 shared RGBA16F targets (24 MB) + 6 x (RGBA8 texA
+ * 4 MB + RGBA16F theArray 8 MB) + drawing buffer ≈ 135 MB.
+ *
+ * --------------------------------------------------------------------------
+ * TILES (one per time of day). Each figure has two stacked layers:
+ *   bottom  base canvas (what is shown) + incoming canvas (the next paint,
+ *           faded in over the base, then committed to it)
+ *   top     one <img> per room. Only the shown room's is visible. Under
+ *           .is-painted, each photo carries a luminance mask whose black
+ *           (wall) pixels are transparent, so the painted canvas shows through
+ *           exactly where the walls are.
+ *
+ * STATE: activePaintColor / activeModel / activeRoom are what the visitor
+ * asked for. shownRoom is the room actually on screen; it lags activeRoom
+ * while the new room's photos load and analyse.
+ *
+ * LIFECYCLE
+ *   boot          startPainting(): feature gates -> WallShader -> prepare the
+ *                 shown room + decode masks -> seed canvases with the photos ->
+ *                 add .is-painted -> fade the paint in -> prepare other rooms
+ *                 when idle.
+ *   paint/model   setPaint() / setModel() -> scheduleRender() (one per frame)
+ *                 -> flush() -> staggered fades.
+ *   room switch   setRoom() -> prepareRoom() -> settle fades -> view
+ *                 transition around swap(): data-room + instant repaint().
+ *   context loss  WallShader rebuilds itself on webglcontextrestored, then
+ *                 onRestored() repaints (or resumes an interrupted boot).
+ *   failure       fail(): drop .is-painted (plain photos) and show a notice.
+ *
+ * PUBLIC API: window.sceneRenderer (see the SceneRenderer typedef at the end).
  * ======================================================================== */
 
 // ---------------------------------------------------------------- config
+
+/**
+ * Paint swatches shown in the palette, as lowercase #rrggbb. The first entry
+ * is the paint on screen when the page loads.
+ * @type {string[]}
+ */
 const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#dda27a", "#e3d4b9", "#58679d"];
+
+/**
+ * @typedef {"morning" | "noon" | "night"} TimeKey
+ *
+ * @typedef {Object} Room
+ * @property {string} label  Name shown in the room switch and used in alt text.
+ * @property {string} mask   Wall mask, same framing as the photos. Black = wall,
+ *                           white = everything else, so `mask-mode: luminance`
+ *                           hides exactly the walls of the photo above the canvas.
+ * @property {Record<TimeKey, string>} photos  One photo per time of day.
+ */
+
+/**
+ * Every room and its assets. The paths are listed explicitly because the
+ * filenames don't follow one pattern (e.g. "living_room-noon.jpg" next to
+ * "living-room_morning.jpg"). The keys double as data-room values in the DOM
+ * and in the CSS that picks the visible photo.
+ * @type {Record<string, Room>}
+ */
 const ROOMS = {
   livingRoom: {
     label: "Living room",
@@ -320,14 +396,54 @@ const ROOMS = {
     }
   }
 };
+
+/**
+ * The tiles, left to right. The order is also the fade stagger order.
+ * @type {{ key: TimeKey, label: string }[]}
+ */
 const TIMES = [
   { key: "morning", label: "Morning" },
   { key: "noon",    label: "Noon" },
   { key: "night",   label: "Night" }
 ];
+
+/**
+ * Working size in pixels. Every photo is downscaled to N x N, and every GPU
+ * surface and tile canvas is N x N (see "DATA FLOW" above for why it must be
+ * one fixed size).
+ * @type {number}
+ */
 const N = 1024;           // working size of every photo (texA, targets and drawing buffer must match)
+
+/** Paint fade duration, and the delay between successive tiles (morning -> noon -> night), in ms. */
 const FADE_MS = 360, STAGGER_MS = 70;
 
+/**
+ * Lighting-model settings passed to the shaders as uniforms (see RENDER).
+ * Same values as DEFAULTS in js/tinted-wall-v2.js, minus `replaceImage`.
+ *
+ *  model        Ignored here: the activeModel state variable is used instead.
+ *  wallHSL      Ignored here: the paint comes from activePaintColor via hexToHsl().
+ *  warmCCT      Colour temperature, in kelvin, of the warmest light in a photo
+ *               (warm = +1 in theArray). Lower = more orange (2700 K ≈ tungsten).
+ *  warmTint     Duv offset of the warm light from the blackbody curve, in CIE 1960
+ *               uv units (≈ ±0.02 is a lot). + = greener/golden, - = rosier.
+ *  skyCCT       Colour temperature of cool light (warm = -1) and of the shadow fill.
+ *               10000 K ≈ blue skylight.
+ *  adaptation   CAT16 degree of adaptation D, 0..1. 0 = the camera sees the light's
+ *               colour cast fully; 1 = the eye fully discounts it (colour constancy).
+ *  fill         Share (0..1) of ambient fill light that remains in the deepest
+ *               shadow, so walls never go fully black.
+ *  bounce       Share (0..1) of that fill that is light bounced off the painted
+ *               wall itself (it takes the paint's colour); the rest is skylight.
+ *  glow         Extra intensity of strongly coloured (warm or cool) direct light,
+ *               so sunbeams read brighter than neutral light of the same exposure.
+ *  shadowCurve  Exponent on exposure. 1 = linear; > 1 = deeper shadows.
+ *  penumbra     Softness of the light map: Gaussian sigma as a % of image width
+ *               (0.2 % of 1024 px ≈ 2 px). Hides JPEG noise and hard texture edges.
+ *  dither       Add ±1 LSB triangular noise before 8-bit output (prevents banding).
+ *  v1           Settings for the legacy HSV model only (see renderV1).
+ */
 const SHADER_DEFAULTS = {
   model:        "v2",              // "v2" (this version) or "v1" (previous HSV version)
   wallHSL:      [0.5, 0.43, 0.76], // hue in degrees, S and L in 0..1
@@ -346,45 +462,107 @@ const SHADER_DEFAULTS = {
 };
 
 // ---------------------------------------------------------------- state
+// Written only by the public setters (setPaint, setModel, setRoom) and swap().
+
+/** Paint on the walls, lowercase #rrggbb. Written by setPaint(). */
 let activePaintColor = PAINT_COLORS[0];
+/** Room the visitor asked for (ROOMS key). Written by setRoom() at once. */
 let activeRoom = "livingRoom";   // requested room
+/** Lighting model: "v2" (perceptual) or "v1" (HSV). Written by setModel(). */
 let activeModel = "v2";
+/**
+ * Room actually on screen. Changes only inside setRoom()'s swap(), once the
+ * room's photos are loaded and analysed, so rendering never waits on a load.
+ */
 let shownRoom = activeRoom;      // room currently on screen
 
 // ======================================================================
-// GLSL (verbatim from js/tinted-wall-v2.js)
+// GLSL (ported from js/tinted-wall-v2.js; logic unchanged, comments added here)
+//
+// Every shader is GLSL ES 3.00 (WebGL2). The fragment shaders share the
+// COMMON prelude, so "#version 300 es" stays the very first line of each
+// string. These are JS template literals: comments inside them must not
+// contain a backtick or a dollar-brace.
 // ======================================================================
+
+/*
+ * Vertex shader for every pass: the "fullscreen triangle". With no vertex
+ * buffer, drawArrays(TRIANGLES, 0, 3) gives vertex IDs 0, 1 and 2, which map
+ * to clip-space (-1,-1), (3,-1) and (-1,3). That one triangle covers the whole
+ * [-1,1]² viewport (the overhang is clipped), so every pixel of the target
+ * runs the fragment shader exactly once, with no diagonal seam as with two
+ * triangles.
+ */
 const VERT = `#version 300 es
 void main() {
   vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
   gl_Position = vec4(p, 0.0, 1.0);
 }`;
 
+/*
+ * COMMON: the prelude shared by every fragment shader: precision, the single
+ * output, and the colour-science helpers.
+ */
 const COMMON = `#version 300 es
+// highp everywhere: theArray holds signed, > 1 values and the colour maths
+// (cube roots, matrix chains) loses visible precision at mediump.
 precision highp float;
 precision highp int;
 precision highp sampler2D;
+// Every pass writes one RGBA value per pixel.
 out vec4 fragOut;
 
 // ---- transfer functions ------------------------------------------------
+// sRGB electro-optical transfer function (IEC 61966-2-1). Encoded values at or
+// below 0.04045 sit on a linear toe (c / 12.92); above it the curve is
+// ((c + 0.055) / 1.055)^2.4. step() picks the branch per channel without an if:
+// mix(a, b, 0) = a, mix(a, b, 1) = b.
 vec3 toLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+// Inverse: linear light -> encoded sRGB. The knee is 0.0031308 (= 0.04045 / 12.92).
+// Negative input is clamped first, because pow() of a negative number is undefined.
 vec3 toSRGB(vec3 c)   { c = max(c, 0.0);
                         return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+// Relative luminance Y of linear sRGB (the Y row of RGB2XYZ: Rec. 709
+// primaries, D65 white). 1.0 = the luminance of white.
 float lum(vec3 c)     { return dot(c, vec3(0.2126729, 0.7151522, 0.0721750)); }
 
 // ---- matrices (written as rows, transposed into GLSL column order) -------
+// GLSL's mat3(...) constructor fills COLUMNS, so a matrix typed out row by row
+// as on paper must be transposed before M * v gives the textbook result.
+//
+// RGB2XYZ: linear sRGB -> CIE 1931 XYZ, D65 white. White (1,1,1) maps to
+// XYZ ~ (0.9505, 1.0, 1.089).
 const mat3 RGB2XYZ = transpose(mat3(0.4124564, 0.3575761, 0.1804375,
                                     0.2126729, 0.7151522, 0.0721750,
                                     0.0193339, 0.1191920, 0.9503041));
+// XYZ2RGB: the inverse of RGB2XYZ (XYZ, D65 -> linear sRGB). Colours outside
+// the sRGB gamut come out with channels < 0 or > 1.
 const mat3 XYZ2RGB = transpose(mat3( 3.2404542, -1.5371385, -0.4985314,
                                     -0.9692660,  1.8760108,  0.0415560,
                                      0.0556434, -0.2040259,  1.0572252));
+// CAT16: the chromatic adaptation transform of CIECAM16 (Li et al. 2017).
+// It maps XYZ into a "sharpened" cone-like RGB space, where scaling each
+// channel separately (a von Kries gain) best predicts how a colour looks
+// after the eye adapts to a different light.
 const mat3 CAT16   = transpose(mat3( 0.401288, 0.650173, -0.051461,
                                     -0.250268, 1.204414,  0.045854,
                                     -0.002079, 0.048952,  0.953127));
 
 // ---- Oklab (Ottosson 2020) -----------------------------------------------
+// Oklab is a perceptually uniform colour space: equal distances look like
+// roughly equal differences, and its hue angle stays steady as lightness or
+// chroma change (unlike HSV/HSL hue). Components:
+//   L  lightness, 0 (black) .. 1 (white)
+//   a  green (-) .. red (+)
+//   b  blue (-)  .. yellow (+)
+// chroma = length(ab), hue = atan(b, a).
+//
+// Signed cube root. pow() is undefined for negative bases, and out-of-gamut
+// linear colours can have negative LMS values, so take the root of |v| and
+// restore the sign. This keeps oklab() invertible for every input.
 vec3 cbrt3(vec3 v) { return sign(v) * pow(abs(v), vec3(1.0 / 3.0)); }
+// Linear sRGB -> Oklab: linear RGB -> LMS cone response (M1), cube-root
+// compression (roughly the eye's non-linear response), -> Lab (M2).
 vec3 oklab(vec3 c) {
   vec3 lms = vec3(dot(c, vec3(0.4122214708, 0.5363325363, 0.0514459929)),
                   dot(c, vec3(0.2119034982, 0.6806995451, 0.1073969566)),
@@ -394,6 +572,9 @@ vec3 oklab(vec3 c) {
               dot(lms, vec3(1.9779984951, -2.4285922050,  0.4505937099)),
               dot(lms, vec3(0.0259040371,  0.7827717662, -0.8086757660)));
 }
+// Oklab -> linear sRGB: the exact inverse (inverse M2, cube, inverse M1).
+// The result can fall outside 0..1 when the Lab colour isn't displayable;
+// compress() in RENDER relies on that to test the gamut.
 vec3 oklabToRGB(vec3 L) {
   vec3 lms = vec3(dot(L, vec3(1.0,  0.3963377774,  0.2158037573)),
                   dot(L, vec3(1.0, -0.1055613458, -0.0638541728)),
@@ -405,6 +586,12 @@ vec3 oklabToRGB(vec3 L) {
 }
 
 // ---- HSV / HSL ------------------------------------------------------------
+// Hue is in DEGREES (0..360) in all three functions; S, V and L are 0..1.
+//
+// RGB -> HSV (used by the v1 model). The hue is the position around the
+// colour hexagon: which channel is the maximum picks the 120-degree sector,
+// and the difference of the other two picks the offset inside it. Grey pixels
+// (d ~ 0) get hue 0. S = chroma / value, V = the largest channel.
 vec3 rgb2hsv(vec3 c) {
   float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b)), d = mx - mn;
   float H = 0.0;
@@ -416,10 +603,18 @@ vec3 rgb2hsv(vec3 c) {
   }
   return vec3(H, mx > 1e-6 ? d / mx : 0.0, mx);
 }
+// HSV -> RGB without branches. For each channel, k is its distance around the
+// hue wheel in 60-degree units (offsets 5, 3, 1 put R, G and B 120 degrees
+// apart). min(k, 4 - k) clamped to 0..1 is the trapezoid "how much of this
+// channel is missing" at this hue; scale it by the chroma V*S and take it from V.
 vec3 hsv2rgb(vec3 c) {
   vec3 k = mod(vec3(5.0, 3.0, 1.0) + mod(c.x, 360.0) / 60.0, 6.0);
   return c.z - c.z * c.y * clamp(min(k, 4.0 - k), 0.0, 1.0);
 }
+// HSL -> RGB without branches (the CSS Color 4 formulation). k is in
+// 30-degree units, with offsets 0, 8 and 4 for R, G and B; a is half the
+// chroma. The clamp gives each channel's +1/-1 trapezoid around L. Used for
+// the paint colour, which JS sends as HSL (see hexToHsl()).
 vec3 hsl2rgb(vec3 hsl) {
   vec3 k = mod(vec3(0.0, 8.0, 4.0) + mod(hsl.x, 360.0) / 30.0, 12.0);
   float a = hsl.y * min(hsl.z, 1.0 - hsl.z);
@@ -427,6 +622,11 @@ vec3 hsl2rgb(vec3 hsl) {
 }
 
 // ---- blackbody (Planckian) light colour, Kim et al. 2002 -----------------
+// Real light sources (the sun, sky, tungsten, most LEDs) sit on or near the
+// Planckian locus: the colour of a glowing blackbody at temperature T (kelvin).
+// Kim et al. fitted CIE 1931 xy along the locus with cubic polynomials: x as a
+// cubic in 1/T (two ranges, split at 4000 K) and y as a cubic in x (three
+// ranges). The fit is valid from 1667 K to 25000 K, so T is clamped to that.
 vec2 planckXY(float T) {                      // chromaticity of a blackbody
   T = clamp(T, 1667.0, 25000.0);
   float T2 = T * T, T3 = T2 * T, x, y;
@@ -438,10 +638,18 @@ vec2 planckXY(float T) {                      // chromaticity of a blackbody
   else                  y =  3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483;
   return vec2(x, y);
 }
+// CIE 1931 xy <-> CIE 1960 uv. The uv diagram is the one where Duv (distance
+// from the Planckian locus) is defined, and it is closer to perceptually
+// uniform than xy.
 vec2 xy2uv(vec2 c) { return vec2(4.0 * c.x, 6.0 * c.y) / (-2.0 * c.x + 12.0 * c.y + 3.0); }
 vec2 uv2xy(vec2 c) { return vec2(3.0 * c.x, 2.0 * c.y) / (2.0 * c.x - 8.0 * c.y + 4.0); }
 // Light of colour temperature T with a Duv tint (CIE 1960 uv distance from the
 // blackbody curve; + = toward green/yellow, - = toward magenta). Linear sRGB, Y = 1.
+// How: take the locus point uv(T); estimate the locus tangent with a finite
+// difference to uv(1.01 T); rotate it 90 degrees to get the normal, flipped
+// so +duv always points to +v (above the locus, toward green). Step duv
+// along the normal, then go back to xy and on to XYZ with Y = 1:
+// X = x / y, Z = (1 - x - y) / y. Finally convert XYZ to linear sRGB.
 vec3 planckRGB(float T, float duv) {
   vec2 uv = xy2uv(planckXY(T));
   vec2 t  = normalize(xy2uv(planckXY(T * 1.01)) - uv);
@@ -450,27 +658,51 @@ vec3 planckRGB(float T, float duv) {
   return XYZ2RGB * vec3(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
 }
 // light colour relative to the neutral (6500 K) light, luminance 1
+// Dividing by the 6500 K blackbody makes "neutral" light exactly (1,1,1) (the
+// photos are white-balanced near daylight), so a light only tints the wall by
+// how much it differs from neutral. Dividing by lum() then removes any
+// brightness change, so colour and exposure stay independent.
 vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.0, 0.0); return c / lum(c); }
 `;
 
 // P0: decode sRGB ImageA -> linear light
+// Input:  src = texA (RGBA8, encoded sRGB). Output: the "lin" target (RGBA16F, linear light).
+// All light arithmetic (blurring, mixing, multiplying) must happen in linear
+// light, where values are proportional to physical intensity. texelFetch reads
+// the exact integer pixel with no filtering. This works only because texA and
+// the target are both N x N, so gl_FragCoord.xy maps 1:1 to texels.
 const DECODE = COMMON + `
 uniform sampler2D src;
 void main() { fragOut = vec4(toLinear(texelFetch(src, ivec2(gl_FragCoord.xy), 0).rgb), 1.0); }`;
 
 // P0b: separable Gaussian blur of linear light (soft penumbra)
+// Runs twice: horizontally (lin -> tmp, dir = (1,0)), then vertically
+// (tmp -> blurred, dir = (0,1)). A 2-D Gaussian is the product of two 1-D
+// ones, so two passes of n taps replace one n² kernel. Blurring linear light
+// (not sRGB) gives physically correct soft shadow edges, and it averages
+// away JPEG noise and surface texture that would otherwise print onto the paint.
 const BLUR = COMMON + `
 uniform sampler2D src;
 uniform vec2 dir;        // (1,0) or (0,1)
 uniform float sigma;     // pixels
 void main() {
   vec2 size = vec2(textureSize(src, 0));
+  // The kernel spans +-3 sigma (99.7 % of the Gaussian's weight). To cap the
+  // loop at about 2 * 48 + 1 = 97 taps for wide blurs, the tap spacing
+  // (stepPx) grows once 3 sigma exceeds 48 px. The source is sampled with
+  // LINEAR filtering, so spaced taps still average their neighbours.
   float stepPx = max(1.0, ceil(3.0 * sigma / 48.0));
   int n = int(ceil(3.0 * sigma / stepPx));
   vec3 acc = vec3(0.0); float wsum = 0.0;
   for (int i = -n; i <= n; i++) {
     float o = float(i) * stepPx;
+    // Gaussian weight exp(-o^2 / 2 sigma^2). The weights are summed and divided
+    // out at the end, so the kernel always integrates to 1 (no brightening or
+    // darkening, even when truncated).
     float w = exp(-0.5 * o * o / (sigma * sigma));
+    // gl_FragCoord.xy is the pixel CENTRE (e.g. 0.5, 0.5), so dividing by
+    // the size gives exact texel-centre UVs. CLAMP_TO_EDGE repeats the border
+    // pixels beyond the image edge.
     acc += w * texture(src, (gl_FragCoord.xy + dir * o) / size).rgb;
     wsum += w;
   }
@@ -478,6 +710,12 @@ void main() {
 }`;
 
 // P1 / STEP 1: theArray = light at each pixel minus white light
+// Output (RGBA16F, signed values), per pixel:
+//   v2: .x = exposure - 1  (0 = as bright as white, -1 = black, > 0 never for a photo)
+//       .y = warm/cool     (-1 cool sky ... 0 neutral ... +1 warm sun/tungsten)
+//       .z = saturation    (0 = white/grey light ... 1 = fully coloured light)
+//   v1: .xyz = HSV(pixel) - HSV(white) = (hue in degrees, S, V - 1)
+// White light therefore encodes as (0,0,0): "no change to the paint".
 const ANALYSE = COMMON + `
 uniform sampler2D lightLin;   // blurred linear light map (v2)
 uniform sampler2D sharpLin;   // unblurred linear ImageA   (v1)
@@ -493,12 +731,19 @@ void main() {
   // its own colour. (Plain luminance would make the yellow beams darker than
   // the plain wall, because sRGB yellow can't be as luminous as white.)
   float exposure = max(lin.r, max(lin.g, lin.b));
+  // Saturation is measured on the ENCODED value, HSV-style: (max - min) / max.
+  // In encoded sRGB, near-white pixels give small, stable values instead of
+  // JPEG noise being amplified as it is near black in linear light.
   vec3  enc = toSRGB(lin);
   float mx = max(enc.r, max(enc.g, enc.b)), mn = min(enc.r, min(enc.g, enc.b));
   float sat = mx > 1e-4 ? (mx - mn) / mx : 0.0;            // stable near white
   // Warm/cool direction from the Oklab hue. Real lights sit on the blackbody
   // curve: warm lights have Oklab hue ~70 deg, cool skylight ~ -100 deg.
   // Green/magenta deviations are discarded (no real light source has them).
+  // cos(hue - 70 deg) projects the hue onto that warm-cool axis: +1 at 70 deg,
+  // -1 at -110 deg, and 0 for pure green or magenta. Doubling and clamping makes
+  // every hue within +-60 deg of either end count as fully warm or cool. Scaling
+  // by sat means a nearly white light is nearly neutral, whatever its hue.
   vec3  lab  = oklab(lin);
   float hue  = atan(lab.z, lab.y);
   float warm = clamp(2.0 * cos(hue - radians(70.0)), -1.0, 1.0) * sat;
@@ -506,7 +751,18 @@ void main() {
 }`;
 
 // P2 / STEPS 2-4: light the wall
+// Draws into the default framebuffer (the WebGL canvas's drawing buffer).
+// For each output pixel, read that pixel's light from theArray and apply it
+// to the paint colour. Output is encoded sRGB, dithered to 8 bits.
 const RENDER = COMMON + `
+// theArray    P1 output for this photo (NEAREST filtering; read with texelFetch)
+// W, H        working size in pixels (N x N)
+// model       1 = v1 (HSV), 2 = v2 (perceptual)
+// dither      1 = add triangular dither before 8-bit quantisation
+// wallHSL     the paint: hue in degrees, S and L 0..1 (from hexToHsl in JS)
+// warmCCT, skyCCT        kelvin; warmTint is a Duv offset (see SHADER_DEFAULTS)
+// adaptation  CAT16 degree of adaptation D, 0..1
+// fill, bounce, glow, shadowCurve   see SHADER_DEFAULTS
 uniform sampler2D theArray;
 uniform int   W, H, model, dither;
 uniform vec3  wallHSL;
@@ -514,6 +770,15 @@ uniform float warmCCT, warmTint, skyCCT, adaptation, fill, bounce, glow, shadowC
 uniform vec4  v1p;            // ambient, shadowCurve, warmth, glow
 
 // ---- previous version, kept for side-by-side comparison --------------------
+// v1 (HSV) model. d = (light hue in degrees, light saturation, V - 1); albedo =
+// the paint in linear light. Steps:
+//   1. exposure: V raised to 2.2 * shadowCurve. This is a rough gamma decode,
+//      because V was measured on encoded sRGB.
+//   2. tint: the light's hue at full saturation, mixed in by S * warmth.
+//   3. boost: coloured light (high S) at high exposure is brightened by glow.
+//   4. ambient: a constant floor so shadows keep some paint colour.
+//   5. soft clip: anything above 1 is normalised by its largest channel and
+//      then pushed toward white by the amount it overshot.
 vec3 renderV1(vec3 d, vec3 albedo) {
   float Hh = d.x, S = d.y, V = 1.0 + d.z;
   float exposure = pow(max(V, 0.0), 2.2 * v1p.y);
@@ -527,7 +792,20 @@ vec3 renderV1(vec3 d, vec3 albedo) {
 }
 
 // ---- highlight roll-off + gamut mapping at constant Oklab hue --------------
+// True when c is displayable linear sRGB (every channel in 0..1). The 1e-4
+// slack absorbs float rounding, so colours that are exactly on the edge pass.
 bool inGamut(vec3 c) { return all(greaterThanEqual(c, vec3(-1e-4))) && all(lessThanEqual(c, vec3(1.0 + 1e-4))); }
+// Maps any linear colour into the sRGB gamut without shifting its hue.
+// Naive per-channel clamping changes hue: an over-bright orange clamps toward
+// yellow. Instead, everything is done in Oklab at constant hue.
+//   Stage 1 (too bright, max channel m > 1): divide by m to fit the exposure,
+//     which keeps hue AND saturation. Then bleach toward white by
+//     t = 1 - exp(-0.7 (m - 1)): 0 at m = 1, rising smoothly toward 1. t lifts
+//     lightness halfway to 1 and scales chroma down by (1 - t), the way film or
+//     the eye loses colour in blown-out light.
+//   Stage 2 (still out of gamut, e.g. too saturated or negative channels):
+//     binary-search a chroma scale in 0..1 at fixed L and hue. 16 halvings
+//     give 1/65536 precision, well below one 8-bit step.
 vec3 compress(vec3 c) {
   if (inGamut(c)) return c;                        // untouched when displayable
   // Over-bright light: first fit the exposure (divide by the largest channel,
@@ -548,16 +826,35 @@ vec3 compress(vec3 c) {
   return clamp(oklabToRGB(vec3(lab.x, lab.yz * lo)), 0.0, 1.0);
 }
 
+// v2 (perceptual) model. d = theArray texel (exposure - 1, warm, sat);
+// albedo = the paint in linear sRGB (its reflectance per channel).
+// Returns the lit wall colour in linear sRGB, inside the gamut.
 vec3 renderV2(vec3 d, vec3 albedo) {
+  // exposure 0..1 (1 = as bright as the photo's white). shadowCurve > 1
+  // deepens the shadows.
   float exposure = pow(max(1.0 + d.x, 0.0), shadowCurve);
   float warm = d.y, sat = d.z;
 
   // 1. colour temperature of the light (blackbody), interpolated in mireds
+  // Mired = 1e6 / T. Equal steps in mireds look like equal colour changes,
+  // whereas kelvin is very uneven (2700 -> 3000 K is a much bigger visual
+  // shift than 9700 -> 10000 K). warm in 0..1 slides from neutral (6500 K)
+  // to warmCCT; warm in -1..0 slides toward skyCCT. The Duv tint is applied
+  // only to the warm side, in proportion to warmth. The glow term brightens
+  // strongly coloured direct light, more so where it is already bright
+  // (sunbeams).
   float mN = 1e6 / 6500.0;
   float mired = warm >= 0.0 ? mix(mN, 1e6 / warmCCT, warm) : mix(mN, 1e6 / skyCCT, -warm);
   vec3  direct = lightRGB(1e6 / mired, max(warm, 0.0) * warmTint) * exposure * (1.0 + glow * abs(warm) * exposure);
 
   // 2. fill light: cool sky mixed with pink light bounced off the wall itself
+  // fillCol mixes skylight and the paint's own colour (light that has bounced
+  // between walls picks up their colour), normalised to luminance 1. The fill
+  // share of the light is the same everywhere; the rest is the direct light.
+  // Dividing by "neutral" (the same mix for a white photo pixel: exposure 1,
+  // warm 0, so direct = (1,1,1)) normalises the result. A pure white photo
+  // pixel therefore gives light = (1,1,1) EXACTLY, and the wall shows the
+  // paint swatch exactly where the photo's wall was lit white.
   vec3 fillCol = mix(lightRGB(skyCCT, 0.0), albedo / lum(albedo), bounce);
   fillCol /= lum(fillCol);
   vec3 total   = fill * fillCol + (1.0 - fill) * direct;
@@ -565,9 +862,20 @@ vec3 renderV2(vec3 d, vec3 albedo) {
   vec3 light   = total / neutral;          // white in ImageA -> exactly (1,1,1)
 
   // 3. light x wall, per channel in linear sRGB
+  // Reflected light = incident light x reflectance, per channel. This is a
+  // 3-sample approximation of the spectral product. For this kind of matte
+  // paint, linear sRGB primaries were measured as the most accurate
+  // 3-channel basis (see the header of js/tinted-wall-v2.js).
   vec3 c = albedo * light;
 
   // 4. partial colour constancy (CAT16 von Kries, degree D) toward neutral
+  // The eye partly discounts the colour of the light; a camera doesn't. Von
+  // Kries adaptation: go to CAT16 space, multiply each channel by
+  // (destination white / source white), and come back. The source white is
+  // the light's colour at luminance 1; the destination is neutral (1,1,1).
+  // Degree D (= adaptation) blends the gain with 1:
+  // gain = D * dst / src + (1 - D), so D = 0 leaves the camera's colour cast
+  // and D = 1 removes it entirely.
   float Ll = lum(light);
   if (Ll > 1e-5) {
     vec3 wSrc = CAT16 * (RGB2XYZ * (light / Ll));
@@ -580,16 +888,31 @@ vec3 renderV2(vec3 d, vec3 albedo) {
   return compress(c);
 }
 
+// Cheap, stateless hash: a pixel position -> pseudo-random 0..1. Its only
+// job is to decorrelate neighbouring pixels for the dither, so it doesn't
+// need to be of cryptographic or statistical quality. The constants are
+// arbitrary.
 float hash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
 
 void main() {
+  // gl_FragCoord has its origin at the BOTTOM-left, but theArray was built
+  // from an image uploaded with row 0 at the top (UNPACK_FLIP_Y false, and
+  // DECODE/ANALYSE copy rows 1:1). Flip the row to read the matching texel,
+  // walking theArray in the image's own reading order (index = row * W + col)
+  // and converting back to a 2-D texel address.
   int col = int(gl_FragCoord.x);
   int row = H - 1 - int(gl_FragCoord.y);               // canvas y=0 is the bottom
   int index = row * W + col;                            // walk theArray in order
   vec3 d = texelFetch(theArray, ivec2(index % W, index / W), 0).xyz;
+  // The paint's reflectance: HSL -> encoded sRGB -> linear.
   vec3 albedo = toLinear(hsl2rgb(wallHSL));
   vec3 c = model == 1 ? renderV1(d, albedo) : renderV2(d, albedo);
   vec3 enc = toSRGB(c);
+  // Triangular-PDF dither: the sum of two independent uniform 0..1 values,
+  // minus 1, is triangular on -1..1. Adding it in units of one 8-bit step
+  // (1/255) before quantisation turns smooth gradients' banding into fine,
+  // signal-independent noise. The second hash is offset so the two values
+  // are independent.
   if (dither == 1) {                                    // triangular-PDF dither, +-1 LSB
     float n = hash(gl_FragCoord.xy) + hash(gl_FragCoord.xy + 17.3) - 1.0;
     enc += n / 255.0;
@@ -598,8 +921,18 @@ void main() {
 }`;
 
 // ======================================================================
-// Host helpers (verbatim from js/tinted-wall-v2.js)
+// Host helpers (ported from js/tinted-wall-v2.js; logic unchanged, comments added here)
 // ======================================================================
+
+/**
+ * Compiles one shader stage.
+ * @param {WebGL2RenderingContext} gl
+ * @param {GLenum} type  gl.VERTEX_SHADER or gl.FRAGMENT_SHADER.
+ * @param {string} src   GLSL ES 3.00 source.
+ * @returns {WebGLShader}
+ * @throws {Error} With the driver's info log when compilation fails (also
+ *   when the context is lost, because COMPILE_STATUS then reads as null).
+ */
 function compile(gl, type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src); gl.compileShader(s);
@@ -607,6 +940,17 @@ function compile(gl, type, src) {
     throw new Error("Shader compile error:\n" + gl.getShaderInfoLog(s));
   return s;
 }
+
+/**
+ * Links the shared fullscreen-triangle VERT with a fragment shader.
+ * @param {WebGL2RenderingContext} gl
+ * @param {string} frag  Fragment shader source.
+ * @returns {{ p: WebGLProgram, loc: Record<string, WebGLUniformLocation> }}
+ *   The program, plus a map from uniform name to location built by asking
+ *   the linked program for its active uniforms. Uniforms the compiler
+ *   optimised away are absent, which #draw() treats as "skip".
+ * @throws {Error} With the info log when linking fails.
+ */
 function makeProgram(gl, frag) {
   const p = gl.createProgram();
   gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VERT));
@@ -619,6 +963,24 @@ function makeProgram(gl, frag) {
   for (let i = 0; i < n; i++) { const u = gl.getActiveUniform(p, i); loc[u.name] = gl.getUniformLocation(p, u.name); }
   return { p, loc };
 }
+
+/**
+ * Creates a 2-D texture with clamp-to-edge wrapping. It is left bound to
+ * TEXTURE_2D on the active unit.
+ * @param {WebGL2RenderingContext} gl
+ * @param {number} W  Width in pixels (used only when `data` is null).
+ * @param {number} H  Height in pixels (used only when `data` is null).
+ * @param {GLenum} internal  Sized internal format, e.g. gl.RGBA8 or gl.RGBA16F.
+ * @param {GLenum} fmt   Pixel format, e.g. gl.RGBA.
+ * @param {GLenum} type  Pixel type, e.g. gl.UNSIGNED_BYTE or gl.HALF_FLOAT.
+ * @param {TexImageSource | null} data  An image, canvas, etc. to upload (its
+ *   own size is used), or null to allocate an empty W x H texture. These are
+ *   the two texImage2D overloads.
+ * @param {boolean} linear  LINEAR filtering (for blurring) or NEAREST (for
+ *   exact per-pixel data such as theArray).
+ * @returns {WebGLTexture}
+ * @throws {DOMException} SecurityError when `data` is cross-origin/tainted.
+ */
 function makeTexture(gl, W, H, internal, fmt, type, data, linear) {
   const t = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, t);
@@ -631,6 +993,21 @@ function makeTexture(gl, W, H, internal, fmt, type, data, linear) {
   else      gl.texImage2D(gl.TEXTURE_2D, 0, internal, W, H, 0, fmt, type, null);
   return t;
 }
+
+/**
+ * Creates an offscreen render target: an RGBA16F texture attached to a
+ * framebuffer. Half floats hold the signed and > 1 values of linear light
+ * and theArray (RGBA8 would clamp them to 0..1 and band them), at half the
+ * memory of RGBA32F. Rendering to them needs EXT_color_buffer_float or
+ * EXT_color_buffer_half_float. The framebuffer is left bound.
+ * @param {WebGL2RenderingContext} gl
+ * @param {number} W
+ * @param {number} H
+ * @param {boolean} linear  Texture filtering when the target is later sampled.
+ * @returns {{ tex: WebGLTexture, fbo: WebGLFramebuffer }}
+ * @throws {Error} When the framebuffer is incomplete (no half-float
+ *   rendering, or the context is lost).
+ */
 function makeTarget(gl, W, H, linear) {
   const tex = makeTexture(gl, W, H, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, linear);
   const fbo = gl.createFramebuffer();
@@ -640,30 +1017,110 @@ function makeTarget(gl, W, H, linear) {
     throw new Error("This GPU/browser can't render to half-float textures.");
   return { tex, fbo };
 }
+
+/**
+ * Uniforms that must be set with uniform1i: the sampler units and the GLSL
+ * `int`s. Every other numeric uniform is a float (uniform1f). A JS number
+ * doesn't say which one it is, hence this list.
+ * @type {Set<string>}
+ */
 const INT_UNIFORMS = new Set(["src", "lightLin", "sharpLin", "theArray", "W", "H", "model", "dither"]);
+
+/**
+ * Settings merge from the source file (shallow, plus a one-level merge of
+ * `v1`). UNUSED here, because SHADER_DEFAULTS is used as-is. It is kept so this
+ * port stays line-for-line comparable with js/tinted-wall-v2.js.
+ * @param {object} base
+ * @param {object} [extra]
+ * @returns {object}
+ */
 function merge(base, extra) {
   const out = Object.assign({}, base, extra || {});
   out.v1 = Object.assign({}, base.v1, (extra && extra.v1) || {});
   return out;
 }
 
+/**
+ * @typedef {"nogl" | "origin" | "webgl" | "mask" | "load" | "error"} PaintErrorKind
+ *   nogl    ?nogl is in the URL (forced fallback for testing)
+ *   origin  page opened from file://, so the photos' pixels can't be read
+ *   webgl   no WebGL2, no float render targets, or N is above the GPU limit
+ *   mask    the browser can't do `mask-mode: luminance`
+ *   load    a photo or mask failed to load or decode
+ *   error   anything unexpected (non-PaintError exceptions map here)
+ */
+
+/**
+ * An expected reason paint previews can't run. fail() shows NOTICES[kind]
+ * and falls back to the plain photos.
+ */
 class PaintError extends Error {
+  /**
+   * @param {PaintErrorKind} kind
+   * @param {string} [message]  Developer-facing detail (defaults to `kind`).
+   */
   constructor(kind, message) { super(message || kind); this.kind = kind; }
 }
 
 // ======================================================================
 // WallShader — one off-DOM WebGL2 context shared by every photo
 // ======================================================================
-class WallShader {
-  #hooks; #scratch;
 
+/**
+ * One photo's GPU state.
+ * @typedef {Object} Entry
+ * @property {HTMLImageElement} img  The source photo. Kept so the textures can
+ *   be rebuilt after a context loss.
+ * @property {WebGLTexture} texA  The photo, downscaled to N x N, RGBA8 sRGB.
+ * @property {{ tex: WebGLTexture, fbo: WebGLFramebuffer }} theArray  The P1
+ *   output for this photo (RGBA16F, NEAREST).
+ * @property {string | null} analysedFor  Cache key ("model|sigma") of the
+ *   analysis currently in theArray, or null when it must be re-run.
+ */
+
+/**
+ * Owns one WebGL2 context, on a canvas that is never in the DOM, and runs the
+ * whole pipeline for any number of photos.
+ *
+ * Resources:
+ *   shared     lin, tmp, blurred: RGBA16F scratch targets, reused by every
+ *              analyse(). They only hold data during a single analyse() call.
+ *   per entry  texA (RGBA8) + theArray (RGBA16F). Keeping theArray per photo
+ *              means that changing the paint only costs one RENDER pass.
+ *
+ * Context loss: webglcontextlost is preventDefault()-ed, which tells the
+ * browser we want the context back. On webglcontextrestored every GL object is
+ * gone, so #restore() rebuilds programs, targets and every entry's textures
+ * from entry.img, then calls hooks.onRestored() (or hooks.onError(err)).
+ */
+class WallShader {
+  /** @type {{ onRestored: () => void, onError: (err: unknown) => void }} */
+  #hooks;
+  /** @type {CanvasRenderingContext2D} N x N canvas used to downscale photos before upload. */
+  #scratch;
+
+  /**
+   * @param {number} n  Working size (N).
+   * @param {{ onRestored: () => void, onError: (err: unknown) => void }} hooks
+   *   Called after a lost context has been rebuilt, or when rebuilding fails.
+   * @throws {PaintError} "webgl" when WebGL2 or float render targets are missing.
+   */
   constructor(n, hooks) {
     this.n = n;
     this.#hooks = hooks;
+    /** @type {Set<Entry>} Every entry, so they can be rebuilt after context loss. */
     this.entries = new Set();
     this.canvas = Object.assign(document.createElement("canvas"), { width: n, height: n });
     this.canvas.addEventListener("webglcontextlost", e => e.preventDefault());
     this.canvas.addEventListener("webglcontextrestored", () => this.#restore());
+    // Context options:
+    //   alpha: false                 the output is opaque, and an opaque buffer
+    //                                composites and copies faster
+    //   antialias/depth/stencil off  fullscreen 2-D passes don't need them,
+    //                                and they cost memory
+    //   premultipliedAlpha: false    no alpha maths applied to output colours
+    //   preserveDrawingBuffer: true  the drawing buffer keeps its pixels after
+    //                                compositing, so drawImage can always read it
     this.gl = this.canvas.getContext("webgl2", {
       alpha: false, antialias: false, depth: false, stencil: false,
       premultipliedAlpha: false, preserveDrawingBuffer: true
@@ -674,30 +1131,48 @@ class WallShader {
     this.#init();
   }
 
+  /** True while the GPU context is lost. GL calls are then silent no-ops. */
   get lost() { return this.gl.isContextLost(); }
 
+  /**
+   * Creates every context-level resource. Runs at construction and again
+   * after a context restore (every old GL object is invalid by then).
+   * @throws {PaintError} "webgl" when float render targets or the size aren't supported.
+   * @throws {Error} When a shader fails to compile or link.
+   */
   #init() {
     const gl = this.gl, n = this.n;
+    // Either extension makes RGBA16F colour-renderable (needed for every target)
     if (!gl.getExtension("EXT_color_buffer_float") && !gl.getExtension("EXT_color_buffer_half_float"))
       throw new PaintError("webgl", "This GPU/browser can't render to floating-point textures.");
     if (n > gl.getParameter(gl.MAX_TEXTURE_SIZE))
       throw new PaintError("webgl", `Working size is larger than this GPU's limit.`);
     // Let the browser convert any embedded colour profile (e.g. Display P3) to sRGB
     if ("unpackColorSpace" in gl) gl.unpackColorSpace = "srgb";
+    // Upload rows top-to-bottom, as stored (RENDER's main() flips back), with
+    // no alpha premultiplication, and with the browser's colour management.
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
     this.progs = { decode: makeProgram(gl, DECODE), blur: makeProgram(gl, BLUR),
                    analyse: makeProgram(gl, ANALYSE), render: makeProgram(gl, RENDER) };
     // Shared scratch targets; each entry keeps only texA and its own theArray
+    // lin, tmp and blurred are LINEAR-filtered so BLUR's spaced taps interpolate.
     this.lin = makeTarget(gl, n, n, true);
     this.tmp = makeTarget(gl, n, n, true);
     this.blurred = makeTarget(gl, n, n, true);
+    // VERT reads no attributes, but WebGL2 still wants a VAO bound to draw.
     gl.bindVertexArray(gl.createVertexArray());
+    // Every pass renders a full N x N surface, so the viewport never changes.
     gl.viewport(0, 0, n, n);
     gl.activeTexture(gl.TEXTURE0);
   }
 
+  /**
+   * webglcontextrestored handler: rebuilds the context resources and every
+   * entry, then lets the page repaint. The analyses are re-run lazily
+   * (analysedFor is reset to null by #upload).
+   */
   #restore() {
     try {
       this.#init();
@@ -706,8 +1181,18 @@ class WallShader {
     this.#hooks.onRestored();
   }
 
+  /**
+   * (Re)creates an entry's GPU textures from its photo: downscale to N x N
+   * through the scratch canvas, upload as texA, allocate theArray, and mark
+   * the analysis stale.
+   * @param {Entry} entry
+   * @throws {PaintError} "origin" when the photo's pixels can't be read (file://).
+   * @throws {Error} When theArray can't be allocated.
+   */
   #upload(entry) {
     const gl = this.gl, n = this.n, ctx = this.#scratch;
+    // "high" smoothing gives a filtered (not nearest-pixel) downscale, so
+    // fine detail doesn't alias into the light map.
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.clearRect(0, 0, n, n);
@@ -722,6 +1207,13 @@ class WallShader {
     entry.analysedFor = null;
   }
 
+  /**
+   * Uploads a decoded photo and registers it. The analysis is not run yet;
+   * call ensureAnalysed() before rendering.
+   * @param {HTMLImageElement} img  Must be fully decoded and same-origin.
+   * @returns {Entry}
+   * @throws {PaintError | Error} See #upload().
+   */
   createEntry(img) {
     const entry = { img, texA: null, theArray: null, analysedFor: null };
     this.#upload(entry);
@@ -729,6 +1221,16 @@ class WallShader {
     return entry;
   }
 
+  /**
+   * Runs one fullscreen pass.
+   * @param {{ p: WebGLProgram, loc: Record<string, WebGLUniformLocation> }} prog
+   * @param {{ fbo: WebGLFramebuffer } | null} target  Offscreen target, or null
+   *   for the canvas's drawing buffer.
+   * @param {WebGLTexture} tex  Bound to texture unit 0 (the active unit).
+   * @param {Record<string, number | number[]>} uniforms  Numbers are set as int
+   *   or float according to INT_UNIFORMS; arrays of length 2/3/4 as vec2/3/4.
+   *   Names the program doesn't use are skipped.
+   */
   #draw(prog, target, tex, uniforms) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
@@ -741,17 +1243,32 @@ class WallShader {
       else if (v.length === 3) gl.uniform3fv(l, v);
       else gl.uniform4fv(l, v);
     }
+    // Three vertices = VERT's fullscreen triangle.
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  /** Blur radius in pixels: penumbra is a % of the image width. */
   #sigma() { return Math.max(0, SHADER_DEFAULTS.penumbra) / 100 * this.n; }
+  /**
+   * Cache key for theArray's contents. It covers everything the analysis
+   * depends on except the photo itself, which is fixed per entry.
+   * @param {"v1" | "v2"} model
+   */
   #key(model) { return model + "|" + this.#sigma().toFixed(3); }
 
   // P0 decode -> P0b blur (v2) -> P1 theArray
+  /**
+   * Fills entry.theArray for `model`. The shared targets hold whichever
+   * photo was analysed last, so the decode is redone for every call; it is
+   * one cheap pass.
+   * @param {Entry} entry
+   * @param {"v1" | "v2"} model
+   */
   analyse(entry, model) {
     const gl = this.gl, P = this.progs, isV1 = model === "v1", sigma = this.#sigma();
     this.#draw(P.decode, this.lin, entry.texA, { src: 0 });
     let lightTex = this.lin.tex;
+    // Only v2 blurs. Below about 0.3 px the Gaussian is effectively a single tap.
     if (!isV1 && sigma >= 0.3) {
       this.#draw(P.blur, this.tmp, this.lin.tex, { src: 0, dir: [1, 0], sigma });
       this.#draw(P.blur, this.blurred, this.tmp.tex, { src: 0, dir: [0, 1], sigma });
@@ -760,15 +1277,33 @@ class WallShader {
     // lightLin on unit 0, sharpLin on unit 1
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lin.tex); gl.activeTexture(gl.TEXTURE0);
     this.#draw(P.analyse, entry.theArray, lightTex, { lightLin: 0, sharpLin: 1, model: isV1 ? 1 : 2 });
+    // Unbind unit 1 so `lin` is never left bound while the next analyse()
+    // renders into it (a feedback loop WebGL rejects). TEXTURE0 stays the
+    // active unit, as #draw() assumes.
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
     entry.analysedFor = this.#key(model);
   }
 
+  /**
+   * Re-runs analyse() only if theArray was built for a different model or
+   * blur, or has been invalidated by a context restore.
+   * @param {Entry} entry
+   * @param {"v1" | "v2"} model
+   */
   ensureAnalysed(entry, model) {
     if (entry.analysedFor !== this.#key(model)) this.analyse(entry, model);
   }
 
   // P2: light the wall, then copy the drawing buffer out in the same task
+  /**
+   * Renders the wall for one photo and paint into `ctx2d`. The single
+   * drawing buffer is shared by every photo, so the copy must happen right
+   * away, before any other render overwrites it.
+   * @param {Entry} entry  Must already be analysed for `model`.
+   * @param {"v1" | "v2"} model
+   * @param {string} hex  Paint colour, #rrggbb.
+   * @param {CanvasRenderingContext2D} ctx2d  An N x N tile canvas.
+   */
   renderTo(entry, model, hex, ctx2d) {
     const S = SHADER_DEFAULTS, n = this.n, isV1 = model === "v1";
     this.#draw(this.progs.render, null, entry.theArray.tex, {
@@ -783,21 +1318,44 @@ class WallShader {
 }
 
 // ---------------------------------------------------------------- colour
+
+/**
+ * Validates and canonicalises a paint colour.
+ * @param {string} hex  "#rrggbb" in any case, with optional surrounding whitespace.
+ * @returns {string} Lowercase "#rrggbb".
+ * @throws {TypeError} For anything else (including the 3-digit "#rgb" form).
+ */
 function normalizeHex(hex) {
   const h = String(hex).trim().toLowerCase();
   if (!/^#[0-9a-f]{6}$/.test(h)) throw new TypeError(`Expected a colour like "#e3d4b9", got "${hex}"`);
   return h;
 }
+
+/**
+ * @param {string} hex  "#rrggbb".
+ * @returns {[number, number, number]} 8-bit encoded sRGB channels, 0..255.
+ */
 function hexToRgb(hex) {
   const v = parseInt(hex.slice(1), 16);
   return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
+
+/**
+ * Encoded sRGB -> HSL, the form RENDER's `wallHSL` uniform expects (the
+ * shader turns it back into RGB with hsl2rgb). The round trip is exact up to
+ * float precision.
+ * @param {string} hex  "#rrggbb".
+ * @returns {[number, number, number]} [hue in degrees 0..360, saturation 0..1, lightness 0..1].
+ */
 function hexToHsl(hex) {   // hue in degrees, S and L in 0..1
   const [r, g, b] = hexToRgb(hex).map(c => c / 255);
   const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, l = (mx + mn) / 2;
   let h = 0, s = 0;
+  // Greys (d = 0) keep hue 0 and saturation 0.
   if (d > 0) {
+    // HSL saturation: chroma relative to the largest chroma possible at this lightness.
     s = d / (1 - Math.abs(2 * l - 1));
+    // The hue sector is chosen by the largest channel (as in rgb2hsv in COMMON).
     if      (mx === r) h = ((g - b) / d) % 6;
     else if (mx === g) h = (b - r) / d + 2;
     else               h = (r - g) / d + 4;
@@ -806,6 +1364,17 @@ function hexToHsl(hex) {   // hue in degrees, S and L in 0..1
   }
   return [h, s, l];
 }
+
+/**
+ * Light reflectance value: the share of visible light a paint reflects, on
+ * a 0 (black) to 100 (perfect white) scale, as printed on paint charts. It is
+ * the colour's relative luminance Y x 100, where Y comes from linearised sRGB
+ * and the Rec. 709 weights, the same as lum() in COMMON. It is not perceptual
+ * lightness: LRV 50 looks much lighter than "halfway".
+ * Example: #e3d4b9 -> linear (0.768, 0.658, 0.485) -> Y ≈ 0.669 -> LRV 67.
+ * @param {string} hex  "#rrggbb".
+ * @returns {number} Integer 0..100.
+ */
 function lrv(hex) {        // light reflectance value = relative luminance x 100
   const lin = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
   const [r, g, b] = hexToRgb(hex).map(lin);
@@ -813,6 +1382,9 @@ function lrv(hex) {        // light reflectance value = relative luminance x 100
 }
 
 // ---------------------------------------------------------------- markup
+// The static HTML holds only empty containers. Rooms, chips and tiles are built
+// here from ROOMS / PAINT_COLORS / TIMES, so the config is the single source of
+// truth. All interpolated values are trusted constants from the config above.
 const app = document.getElementById("app");
 const renderer = document.getElementById("renderer");
 const modelFieldset = document.getElementById("model");
@@ -820,10 +1392,15 @@ const notice = document.getElementById("notice");
 const readoutHex = document.getElementById("readoutHex");
 const readoutLrv = document.getElementById("readoutLrv");
 
+// Room switch: one native radio per room (arrow keys work natively). The
+// visible text is the large room name.
 document.getElementById("rooms").innerHTML = Object.entries(ROOMS).map(([key, room]) =>
   `<label class="room"><input class="vh" type="radio" name="room" value="${key}"${key === activeRoom ? " checked" : ""}><span>${room.label}</span></label>`
 ).join("");
 
+// Palette: one radio per paint. The label's accessible name is
+// "#RRGGBB, LRV nn". The hex text is visible only on desktop; elsewhere it is
+// visually hidden but still read out.
 document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
   `<li><label class="chip-option">` +
     `<input class="vh" type="radio" name="paint" value="${hex}"${hex === activePaintColor ? " checked" : ""}>` +
@@ -832,6 +1409,28 @@ document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
   `</label></li>`
 ).join("");
 
+/**
+ * Updates everything in the UI that shows the active paint: the --active-paint
+ * CSS variable, the checked chip, and the hex + LRV readout. No rendering.
+ * @param {string} hex  Normalised "#rrggbb".
+ */
+function syncPaintUi(hex) {
+  document.documentElement.style.setProperty("--active-paint", hex);
+  syncRadio("paint", hex);
+  readoutHex.textContent = hex.toUpperCase();
+  readoutLrv.textContent = `LRV ${lrv(hex)}`;
+}
+syncPaintUi(activePaintColor);   // the readout is empty in the HTML, so it can't go stale
+
+// Tiles, one figure per time of day:
+//  - view-transition-name gives each frame its own cross-fade on room switches.
+//  - The bottom layer holds the base + incoming canvases (N x N; CSS scales them).
+//  - The top layer holds one photo per room. The hidden room's photos use
+//    visibility (not display: none), so they and their masks load and decode
+//    up front and a room switch never shows a half-loaded mask.
+//  - --mask carries each photo's mask URL. CSS applies it only under
+//    .is-painted, and it never changes afterwards.
+//  - Photos of rooms that start hidden load with fetchpriority="low".
 renderer.dataset.room = shownRoom;
 renderer.innerHTML = TIMES.map(time => `
   <figure class="scene" data-time="${time.key}">
@@ -851,6 +1450,12 @@ renderer.innerHTML = TIMES.map(time => `
     <figcaption>${time.label}</figcaption>
   </figure>`).join("");
 
+/**
+ * Visitor-facing text for each PaintErrorKind, telling them what to do.
+ * Trusted constant HTML (it is assigned with innerHTML), so never put
+ * untrusted input here.
+ * @type {Record<PaintErrorKind, string>}
+ */
 const NOTICES = {
   nogl:   "Paint previews are turned off. Remove <b>?nogl</b> from the address to turn them on.",
   origin: "Paint previews need http. Run <b>bash serve.sh</b> in this folder and open " +
@@ -860,32 +1465,78 @@ const NOTICES = {
   load:   "Some photos didn't load. Check the images folder, then reload the page.",
   error:  "Paint previews stopped working. Reload the page to try again."
 };
+/**
+ * Shows a notice in the role="status" live region (screen readers announce it).
+ * @param {PaintErrorKind} kind
+ */
 function showNotice(kind) { notice.innerHTML = NOTICES[kind] || NOTICES.error; }
 
 // ======================================================================
 // Scene tiles: base canvas + incoming canvas under the masked photo
 // ======================================================================
+
+/** @type {WallShader | null} Created lazily by startPainting(). */
 let shader = null;
+/**
+ * True once the paint is live (.is-painted is on and the canvases hold paint).
+ * While it is false, nothing renders and visitors see the plain photos.
+ */
 let painting = false;
+/** Set when a failure was caused by context loss, so the restore should retry booting. */
 let resumeOnRestore = false;
+/** Read on every change, so the OS setting can change while the page is open. */
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
+/**
+ * Controls one tile's two canvases.
+ *
+ *   base      the committed image the visitor sees under the masked photo
+ *   incoming  stacked above base at opacity 0. A new paint is rendered here
+ *             and faded in; when the fade ends it is copied into base and
+ *             hidden again.
+ *
+ * Fade state machine: `anim` is null when idle, or the running Animation.
+ * Only incoming fades. If both canvases cross-faded, the frame's background
+ * would show through at the midpoint (about 25 %).
+ */
 class SceneTile {
+  /** @param {HTMLElement} figure  A .scene figure built above. */
   constructor(figure) {
+    /** @type {TimeKey} */
     this.time = figure.dataset.time;
     [this.base, this.incoming] = figure.querySelectorAll("canvas");
     this.baseCtx = this.base.getContext("2d");
     this.inCtx = this.incoming.getContext("2d");
+    /** @type {Record<string, HTMLImageElement>} This tile's photo for each room key. */
     this.imgs = Object.fromEntries([...figure.querySelectorAll("img")].map(img => [img.dataset.room, img]));
+    /** @type {Animation | null} The running fade of `incoming`, if any. */
     this.anim = null;
   }
 
   // Base starts as the original photo, so turning masks on changes nothing
+  /**
+   * Draws the room's original photo into base. Under the mask, the walls then
+   * look exactly like the plain photo until the first paint fades in.
+   * @param {string} room  ROOMS key.
+   */
   seed(room) {
     this.baseCtx.imageSmoothingQuality = "high";
     this.baseCtx.drawImage(this.imgs[room], 0, 0, N, N);
   }
 
+  /**
+   * Shows `entry` painted with the current activePaintColor and activeModel.
+   *  - animate = false: finish any fade, then render straight into base (instant).
+   *  - animate = true: render into incoming and fade it in after `delay` ms.
+   *    If a fade is already running, incoming is simply redrawn with the newer
+   *    paint and the same fade carries on. Rapid clicks never restart or stack
+   *    fades.
+   * @param {Entry} entry  Must already be analysed for activeModel.
+   * @param {boolean} animate
+   * @param {number} [delay=0]  Stagger, in ms.
+   * @returns {Promise<void>} Resolves when the tile has settled. Never rejects,
+   *   even when the fade is cancelled.
+   */
   present(entry, animate, delay = 0) {
     if (!animate) {
       this.settle();
@@ -894,8 +1545,11 @@ class SceneTile {
     }
     shader.renderTo(entry, activeModel, activePaintColor, this.inCtx);
     if (!this.anim) {      // mid-fade changes just redraw incoming and let the fade continue
+      // fill "both": incoming holds opacity 0 during the delay and 1 at the
+      // end, until settle() commits it and cancels the animation.
       const anim = this.incoming.animate([{ opacity: 0 }, { opacity: 1 }],
         { duration: FADE_MS, delay, easing: "cubic-bezier(.2, 0, 0, 1)", fill: "both" });
+      // Ignore stale animations: settle() may already have replaced this one.
       anim.onfinish = () => { if (this.anim === anim) this.settle(); };
       this.anim = anim;
     }
@@ -903,6 +1557,11 @@ class SceneTile {
   }
 
   // Finish now: commit incoming to base and drop incoming back to opacity 0
+  /**
+   * Ends any running fade at once. Copying incoming into base BEFORE cancel()
+   * (which drops incoming back to its CSS opacity of 0), in the same task,
+   * means no frame ever shows the old paint. Safe to call when idle.
+   */
   settle() {
     const anim = this.anim;
     if (!anim) return;
@@ -911,14 +1570,35 @@ class SceneTile {
     anim.cancel();
   }
 }
+/** The three tiles, in TIMES order (index = stagger position). */
 const tiles = [...renderer.querySelectorAll(".scene")].map(f => new SceneTile(f));
 
 // ---------------------------------------------------------------- rooms
+
+/**
+ * roomEntries[room]: the room's entries in TIMES order, once created.
+ * roomLoading[room]: the in-flight or finished promise of those entries
+ * (deduplicates concurrent prepareRoom calls).
+ * @type {Record<string, Entry[]>}
+ */
 const roomEntries = {}, roomLoading = {};
 
+/**
+ * Gets a room ready to show: waits for its three photos to decode, uploads
+ * them (once per room, memoised), and makes sure every entry is analysed for
+ * the CURRENT activeModel. That last step runs on every call, which is how a
+ * hidden room catches up lazily after a model toggle.
+ * If loading fails, the memo is cleared so a later call can retry.
+ * @param {string} room  ROOMS key.
+ * @returns {Promise<Entry[]>} The entries, in TIMES order.
+ * @throws {PaintError} "load" when a photo can't be decoded; others from createEntry.
+ */
 function prepareRoom(room) {
   roomLoading[room] ??= (async () => {
     const imgs = tiles.map(t => t.imgs[room]);
+    // decode() can reject for benign reasons (for example, the image is
+    // already decoded in some engines). It counts as a failure only if the
+    // image really has no pixels.
     await Promise.all(imgs.map(img => img.decode().catch(() => {
       if (!img.naturalWidth) throw new PaintError("load", `Couldn't load ${img.src}`);
     })));
@@ -930,36 +1610,71 @@ function prepareRoom(room) {
   });
 }
 
+/**
+ * Fetches and decodes an image off-DOM. It is used to have the masks fully
+ * decoded before .is-painted turns them on, so a mask never pops in late. This
+ * avoids <link rel=preload>, which warns in the console if the resource isn't
+ * used soon enough.
+ * @param {string} src
+ * @returns {Promise<void>}
+ * @throws {PaintError} "load" when the image fails.
+ */
 function decodeImage(src) {
   const img = new Image();
   img.src = src;
   return img.decode().catch(() => { throw new PaintError("load", `Couldn't load ${src}`); });
 }
 
+/**
+ * Runs `cb` when the main thread is idle (at the latest after 2 s). Safari has
+ * no requestIdleCallback, so there a short timeout is used instead.
+ * @param {() => void} cb
+ */
 function whenIdle(cb) {
   if ("requestIdleCallback" in window) requestIdleCallback(cb, { timeout: 2000 });
   else setTimeout(cb, 200);
 }
 
 // ---------------------------------------------------------------- rendering
+
+/** @type {Promise<void> | null} The pending frame's promise, shared by every caller in that frame. */
 let frame = null;
+/**
+ * Requests a paint/model update on the next animation frame. Any number of
+ * calls before that frame collapse into one flush(), which uses the state as
+ * it is then (so the last setPaint wins).
+ * @returns {Promise<void>} Resolves when that frame's fades have finished.
+ */
 function scheduleRender() {      // coalesced per animation frame
   frame ??= new Promise(resolve => requestAnimationFrame(() => { frame = null; resolve(flush()); }));
   return frame;
 }
 
+/**
+ * Renders the shown room with the current paint and model, fading the tiles
+ * in morning -> noon -> night (each STAGGER_MS after the previous one), or
+ * instantly with reduced motion. Does nothing before painting starts or
+ * while the context is lost.
+ * @returns {Promise<void[]> | undefined}
+ */
 function flush() {
   if (!painting || shader.lost) return;
   try {
     const list = roomEntries[shownRoom];
     const animate = !reducedMotion.matches;
     return Promise.all(tiles.map((tile, i) => {
+      // Re-analyse the visible photos if the model has changed since the last render.
       shader.ensureAnalysed(list[i], activeModel);
       return tile.present(list[i], animate, i * STAGGER_MS);
     }));
   } catch (err) { fail(err); }
 }
 
+/**
+ * Renders the shown room into every base canvas instantly, with no fade.
+ * Used for room swaps (inside the view transition) and after a context restore.
+ * @throws {Error} GL errors, which callers route to fail().
+ */
 function repaint() {             // instant, no fade
   const list = roomEntries[shownRoom];
   tiles.forEach((tile, i) => {
@@ -968,6 +1683,16 @@ function repaint() {             // instant, no fade
   });
 }
 
+/**
+ * The single error policy.
+ *  - Context lost: most GL calls fail while the context is gone. Don't treat
+ *    that as fatal; wait for webglcontextrestored (onRestored retries the
+ *    boot if needed).
+ *  - Anything else: stop painting, remove the masks (visitors see the plain
+ *    photos), disable the shader toggle and show a notice. Unexpected errors
+ *    are also logged.
+ * @param {unknown} err
+ */
 function fail(err) {
   if (shader && shader.lost) { resumeOnRestore = true; return; }   // wait for webglcontextrestored
   painting = false;
@@ -979,6 +1704,11 @@ function fail(err) {
   showNotice(kind);
 }
 
+/**
+ * WallShader hook, called after the context and every entry are rebuilt.
+ * Repaints instantly if the paint was live; if the context was lost during
+ * boot, starts the boot again.
+ */
 function onRestored() {
   try {
     if (painting) repaint();
@@ -987,20 +1717,39 @@ function onRestored() {
 }
 
 // ---------------------------------------------------------------- public setters
+
+/**
+ * Checks the radio in group `name` whose value is `value` and unchecks the
+ * others. If no radio matches (e.g. a paint that isn't in the palette), all
+ * of them end up unchecked.
+ * @param {"paint" | "room" | "model"} name
+ * @param {string} value
+ */
 function syncRadio(name, value) {
   for (const input of document.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value;
 }
 
+/**
+ * Sets the wall paint. Any #rrggbb is accepted, not only the palette colours.
+ * The UI updates at once; the walls update on the next frame.
+ * @param {string} hex
+ * @returns {Promise<void>} Resolves when the walls have faded to the new paint.
+ * @throws {TypeError} When `hex` isn't #rrggbb.
+ */
 function setPaint(hex) {
   hex = normalizeHex(hex);
   activePaintColor = hex;
-  document.documentElement.style.setProperty("--active-paint", hex);
-  syncRadio("paint", hex);
-  readoutHex.textContent = hex.toUpperCase();
-  readoutLrv.textContent = `LRV ${lrv(hex)}`;
+  syncPaintUi(hex);
   return scheduleRender();
 }
 
+/**
+ * Switches the lighting model. Visible photos are re-analysed on the next
+ * frame; hidden rooms catch up in prepareRoom() when they are shown.
+ * @param {"v1" | "v2"} model
+ * @returns {Promise<void>} Resolves when the walls have faded to the new model.
+ * @throws {RangeError} For an unknown model.
+ */
 function setModel(model) {
   if (model !== "v1" && model !== "v2") throw new RangeError(`Unknown shader model "${model}"`);
   activeModel = model;
@@ -1008,7 +1757,26 @@ function setModel(model) {
   return scheduleRender();
 }
 
+/** Bumped on every setRoom call; only the latest call may swap rooms. */
 let roomToken = 0;
+/**
+ * Shows another room.
+ *  1. Updates the requested room and the radios at once.
+ *  2. Prepares the room's entries (load, upload, analyse) while the old room
+ *     stays on screen.
+ *  3. If a newer setRoom call started in the meantime, stops here
+ *     (last call wins).
+ *  4. Settles running fades, so the view transition snapshots a stable image.
+ *  5. Runs swap() inside document.startViewTransition: flip data-room (which
+ *     shows the other photos and masks via CSS) and repaint the canvases
+ *     synchronously, so the "new" snapshot is complete. The browser
+ *     cross-fades each frame (240 ms, set in CSS). Without the API, or with
+ *     reduced motion, swap() runs directly.
+ * If painting has failed, only the photos are swapped.
+ * @param {string} room  ROOMS key.
+ * @returns {Promise<void>} Resolves when the switch (and its transition) is done.
+ * @throws {RangeError} For an unknown room.
+ */
 async function setRoom(room) {
   if (!(room in ROOMS)) throw new RangeError(`Unknown room "${room}"`);
   activeRoom = room;
@@ -1030,6 +1798,8 @@ async function setRoom(room) {
   await document.startViewTransition(swap).finished;
 }
 
+// One delegated listener for all three radio groups. "change" fires for
+// clicks, taps and arrow keys alike, but not for programmatic syncRadio().
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.name === "paint") setPaint(t.value);
@@ -1038,6 +1808,21 @@ document.addEventListener("change", e => {
 });
 
 // ---------------------------------------------------------------- boot
+
+/**
+ * Turns paint previews on. Any throw ends up in fail(), which leaves the
+ * plain photos and a notice.
+ *  1. Gates, cheapest first: ?nogl, file://, CSS luminance mask support.
+ *  2. Create the WallShader (it can throw "webgl").
+ *  3. Prepare the shown room and decode both masks in parallel. If the
+ *     visitor switched rooms meanwhile, loop and prepare the new one.
+ *  4. Seed each base canvas with the original photo, THEN add .is-painted.
+ *     The masks reveal canvases that look identical to the photos, so turning
+ *     them on is invisible.
+ *  5. Fade the paint in, and prepare the other rooms when the browser is idle.
+ * @returns {Promise<void>} Resolves once the first paint has faded in.
+ * @throws {PaintError | Error}
+ */
 async function startPainting() {
   if (new URLSearchParams(location.search).has("nogl")) throw new PaintError("nogl");
   if (location.protocol === "file:") throw new PaintError("origin");
@@ -1060,13 +1845,39 @@ async function startPainting() {
   await scheduleRender();        // the paint fades in
 }
 
+/**
+ * Settles when boot is finished, whether the paint is live or the page fell
+ * back to plain photos. Never rejects.
+ * @type {Promise<void>}
+ */
 const ready = startPainting().catch(fail);
 
 // ---------------------------------------------------------------- handle
+
+// 1 x 1 readback canvas for sample(). willReadFrequently keeps it on the CPU,
+// so getImageData is cheap. Reading from the tile canvases directly would push
+// THEM to the CPU and slow every later drawImage into them.
 const sampler = Object.assign(document.createElement("canvas"), { width: 1, height: 1 })
   .getContext("2d", { willReadFrequently: true });
 sampler.imageSmoothingEnabled = false;
 
+/**
+ * Scripting and testing handle, exposed as window.sceneRenderer.
+ * @typedef {Object} SceneRenderer
+ * @property {string} activePaintColor  Current paint, lowercase #rrggbb (read-only).
+ * @property {string} activeRoom        Requested room key (read-only); may run
+ *   ahead of what is on screen while the room loads.
+ * @property {"v1" | "v2"} activeModel  Current lighting model (read-only).
+ * @property {number} size              Tile canvas size in pixels (N), for sample().
+ * @property {(hex: string) => Promise<void>} setPaint   See setPaint().
+ * @property {(room: string) => Promise<void>} setRoom   See setRoom().
+ * @property {(model: "v1" | "v2") => Promise<void>} setModel  See setModel().
+ * @property {Promise<void>} ready  Settles after boot (painted or fallback).
+ * @property {(tile: TimeKey | number, x: number, y: number) => number[]} sample
+ *   One pixel of a tile's painted canvas.
+ */
+
+/** @type {SceneRenderer} */
 window.sceneRenderer = {
   get activePaintColor() { return activePaintColor; },
   get activeRoom() { return activeRoom; },
@@ -1075,6 +1886,16 @@ window.sceneRenderer = {
   setPaint, setRoom, setModel, ready,
   // Pixel [r, g, b] of a tile's painted canvas; tile = "morning" | "noon" | "night" | 0..2,
   // x and y in canvas pixels (0..size-1, top-left origin)
+  /**
+   * Reads one pixel of the painted canvas UNDER the mask: the wall paint
+   * everywhere, not what the visitor sees outside the walls. During a fade it
+   * reads incoming (the newest paint); otherwise base.
+   * @param {TimeKey | number} tile  Tile name, or index 0..2.
+   * @param {number} x  Canvas pixel column, 0..size-1 (rounded).
+   * @param {number} y  Canvas pixel row, 0..size-1, from the top (rounded).
+   * @returns {number[]} [r, g, b], 0..255, encoded sRGB.
+   * @throws {RangeError} For an unknown tile.
+   */
   sample(tile, x, y) {
     const t = typeof tile === "number" ? tiles[tile] : tiles.find(s => s.time === tile);
     if (!t) throw new RangeError(`Unknown tile "${tile}"`);
