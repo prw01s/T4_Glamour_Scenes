@@ -44,9 +44,10 @@
     display: grid;
     gap: var(--gap);
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto 1fr auto;
+    grid-template-rows: auto auto auto 1fr auto;
     grid-template-areas:
       "rooms   model"
+      "about   about"
       "intro   intro"
       "stage   stage"
       "palette palette";
@@ -54,22 +55,31 @@
   }
   .booth > * { min-width: 0; }
 
-  /* ---- room switch (the one bold move) ------------------------------------- */
-  .rooms { grid-area: rooms; }
-  .rooms__list { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 28px; row-gap: 4px; }
+  /* ---- room switch ----------------------------------------------------------- */
+  .rooms { grid-area: rooms; margin-inline-end: var(--gap); }   /* + the grid gap = 2x the space on its right */
+  .rooms__row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .rooms__label { font-size: 14px; color: var(--slate); white-space: nowrap; }
+  .rooms__list { display: flex; flex-direction: column; align-items: flex-start; row-gap: 4px; }
   .room { position: relative; cursor: pointer; }
   .room span {
     display: inline-block;
-    font-size: 48px; line-height: 1.1;
-    color: var(--slate);
+    font-size: 28.8px; line-height: 1.1;
+    font-weight: 600;
+    color: #2F3D4C;
     text-decoration: underline transparent;
     text-decoration-thickness: 2px;
     text-underline-offset: 0.14em;
-    transition: color .15s, text-decoration-color .15s;
+    transition: text-decoration-color .15s;
   }
-  .room:hover span { color: var(--graphite); }
-  .room input:checked + span { color: var(--graphite); text-decoration-color: currentColor; }
+  /* All rooms share one colour; the underline marks the active room (faint on hover) */
+  .room:hover span { text-decoration-color: rgb(47 61 76 / .35); }
+  .room input:checked + span { text-decoration-color: currentColor; }
   .room input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 4px; border-radius: 2px; }
+
+  /* ---- about: three paragraphs, side by side ------------------------------- */
+  .about { grid-area: about; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 28px; }
+  .about p { margin: 0; font-size: 16px; line-height: 1.5; color: var(--slate); max-width: 60ch; }
+  .about .about__lead { font-size: 18.9px; line-height: 1.4; font-weight: 600; color: var(--graphite); }
 
   /* ---- intro + notice ------------------------------------------------------ */
   .intro { grid-area: intro; }
@@ -109,7 +119,7 @@
     justify-content: start;
   }
   .scene { margin: 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-  .scene figcaption { font-size: 14px; line-height: 24px; }
+  .scene figcaption { font-size: 16px; line-height: 24px; font-weight: 600; }
   .scene__frame {
     position: relative;
     isolation: isolate;
@@ -186,6 +196,20 @@
     .chip__hex { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
   }
 
+  /* ---- wide (>=1600): paragraphs sit between the room names and the toggle - */
+  @media (min-width: 1600px) {
+    .booth {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto 1fr auto;
+      grid-template-areas:
+        "rooms   about   model"
+        "intro   intro   intro"
+        "stage   stage   stage"
+        "palette palette palette";
+    }
+    .rooms, .model { align-self: start; }
+  }
+
   /* Tall enough to fit: definite height, tiles shrink, nothing scrolls */
   @media (min-width: 640px) and (min-height: 600px) {
     .booth { height: 97vh; height: 97dvh; min-height: 0; }
@@ -199,17 +223,18 @@
   @media (min-width: 640px) and (max-width: 1023.98px) and (max-aspect-ratio: 5/4) {
     .booth {
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-rows: auto auto 1fr 1fr;
+      grid-template-rows: auto auto auto 1fr 1fr;
       grid-template-areas:
         "rooms rooms"
+        "about about"
         "intro model"
         ".     ."
         ".     .";
     }
     .model { align-self: start; }
     .stage { display: contents; }
-    .renderer { grid-area: 3 / 1 / 5 / 3; grid-template: subgrid / subgrid; }
-    .palette { grid-area: 4 / 2 / 5 / 3; align-self: start; }
+    .renderer { grid-area: 4 / 1 / 6 / 3; grid-template: subgrid / subgrid; }
+    .palette { grid-area: 5 / 2 / 6 / 3; align-self: start; }
     .palette__body { flex-direction: column; gap: 12px; }
     .palette__label, .readout { line-height: 1.5; }
     .readout { margin: 0; }
@@ -222,7 +247,8 @@
   /* ---- mobile (<640) ------------------------------------------------------- */
   @media (max-width: 639.98px) {
     .booth { display: flex; flex-direction: column; }
-    .room span { font-size: 36px; }
+    .room span { font-size: 21.6px; }
+    .about { grid-template-columns: minmax(0, 1fr); }
     .intro__text { font-size: 16px; }
     .model { justify-self: auto; align-self: flex-start; }
     .renderer { grid-template-columns: minmax(0, 1fr); }
@@ -250,19 +276,33 @@
   <h1 class="vh">Paint color visualizer</h1>
 
   <fieldset class="rooms">
-    <legend class="vh">Room</legend>
-    <div class="rooms__list" id="rooms"></div>
+    <legend class="vh">Room type</legend>
+    <div class="rooms__row">
+      <span class="rooms__label" aria-hidden="true">Room Type:</span>
+      <div class="rooms__list" id="rooms"></div>
+    </div>
   </fieldset>
 
+  <div class="about">
+    <p class="about__lead">This demo proves out two important milestones on the path to supporting rich
+      Glamour Scene lighting variations with a performant and scalable approach.</p>
+    <p>The scene tinting uses a client-side, C-like shading language (GLSL) that maximizes the device’s GPU.
+      No GenAI is used, and there is absolutely no cost associated with this tinting method.</p>
+    <p>The implementation gives us precise control over how paint colors are blended with the inherent color
+      lighting within the room scene, including the ability to use algorithms that reflect the actual science
+      of human color perception. As an example of the sophisticated control we have over the tinting logic,
+      the “Tinting algo” control (upper right) shows the results of subtly changing that logic.</p>
+  </div>
+
   <div class="intro">
-    <p class="intro__text">See how one paint color looks on the walls in morning, noon and night light.</p>
+    <p class="intro__text">See our colors in morning, noon and night light.</p>
     <p class="notice" id="notice" role="status"></p>
   </div>
 
   <fieldset class="model" id="model">
     <legend class="vh">Shader model</legend>
     <div class="model__row">
-      <span class="model__label" aria-hidden="true">Shader</span>
+      <span class="model__label" aria-hidden="true">Tinting algo</span>
       <div class="segmented">
         <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
         <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
@@ -312,7 +352,7 @@ const { createRenderer, lrv, N } = engine;
  * is the paint on screen when the page loads.
  * @type {string[]}
  */
-const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#dda27a", "#e3d4b9", "#58679d"];
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#D0BA94", "#DEE0DE", "#2F3D4C"];
 
 /**
  * Every room and its assets (see the Room typedef in js/shaderSceneRender.js).
@@ -323,7 +363,7 @@ const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#dda27a", "#e3d4b9", "#58679d"];
  */
 const ROOMS = {
   livingRoom: {
-    label: "Living room",
+    label: "Living Room",
     mask: "images/masks/living_room_mask.jpg",
     photos: {
       morning: "images/lighting_variants/living_room/living-room_morning.jpg",
