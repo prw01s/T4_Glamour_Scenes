@@ -194,18 +194,33 @@
   /* ---- desktop (>=1024, and landscape 640-1023) ---------------------------- */
   @media (min-width: 1024px), (min-width: 640px) and (min-aspect-ratio: 5/4) {
     .chip__hex { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
+    /* The palette is a vertical list left of the first scene, level with the images */
+    .booth {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto auto 1fr;
+      grid-template-areas:
+        "rooms   rooms   model"
+        "about   about   about"
+        "intro   intro   intro"
+        "palette stage   stage";
+    }
+    .palette { align-self: start; }
+    .palette__body { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .palette__label { line-height: 1.5; }
+    .chips { flex-direction: column; gap: 14px; }
+    .chip-option { flex-direction: row; gap: 10px; }   /* hex beside the chip, not under it */
+    .readout { display: none; }   /* stays in the DOM: syncPaintUi() still writes to it */
   }
 
   /* ---- wide (>=1600): paragraphs sit between the room names and the toggle - */
   @media (min-width: 1600px) {
     .booth {
       grid-template-columns: auto minmax(0, 1fr) auto;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto 1fr;
       grid-template-areas:
         "rooms   about   model"
         "intro   intro   intro"
-        "stage   stage   stage"
-        "palette palette palette";
+        "palette stage   stage";
     }
     .rooms, .model { align-self: start; }
   }
