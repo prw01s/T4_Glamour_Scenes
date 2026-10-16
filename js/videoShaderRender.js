@@ -5,7 +5,8 @@
  * few still photos once, it analyses EVERY frame of a playing video and paints
  * the walls of that frame, so the paint follows the light as it changes.
  *
- * It runs the same shaders (glsl/shaderSceneRender.glsl, unchanged) and reuses
+ * It runs the same shaders (glsl/shaderSceneRender.glsl, plus its video-only
+ * ADJUST section) and reuses
  * the shader loader, GL helpers and colour functions exported by
  * js/shaderSceneRender.js, which must be loaded first.
  *
@@ -34,16 +35,25 @@
  *     ▼
  *   texA            RGBA8, W x H
  *     │  P0  DECODE   sRGB -> linear light                    -> lin
+ *     │  P0a ADJUST   contrast + saturation sliders            -> adj
+ *     │               (skipped when both are centred: lin is used as-is)
  *     │  P0b BLUR     separable Gaussian, v2 only              -> tmp -> blurred
  *     │  P1  ANALYSE  light minus white light, per pixel       -> theArray
  *     ▼
- *   theArray        RGBA16F, W x H; kept until the next frame or a model change
+ *   theArray        RGBA16F, W x H; kept until the next frame, or a model or
+ *                   slider change
  *     │  P2  RENDER   wall paint lit by theArray
  *     ▼
  *   the visible canvas's drawing buffer
  *
- * Paint changes and paint fades only re-run RENDER, so they also work while
- * the video is paused.
+ * Paint changes and paint fades only re-run RENDER, and slider changes re-run
+ * the passes from DECODE on the frame already in texA, so all of them also
+ * work while the video is paused.
+ *
+ * STATISTICS: ADJUST compares each pixel with the whole video: the median
+ * luminance (the contrast's fixed point) and the median difference from white
+ * (the saturation's reference; one median per way of measuring it). VideoStats measures them on the CPU from a
+ * small copy of the frames during the first loop, then stops.
  *
  * TIMING: new frames arrive through requestVideoFrameCallback, which runs in
  * the same rendering step that puts the frame on screen, so the painted
@@ -84,6 +94,11 @@
   /** Largest playback-rate change used to catch up (0.1 = 0.9x .. 1.1x). */
   const MAX_RATE_NUDGE = 0.1;
 
+  /** VideoStats: frames are measured at 1/STATS_DOWNSCALE of their size... */
+  const STATS_DOWNSCALE = 20;
+  /** ...once per STATS_BUCKET_S seconds of the video, until all are covered. */
+  const STATS_BUCKET_S = 0.1;
+
   /**
    * Visitor-facing text for each PaintErrorKind. Trusted constant HTML (it is
    * assigned with innerHTML). Same as js/shaderSceneRender.js, with this
@@ -123,12 +138,14 @@
      * @param {import("./shaderSceneRender.js").ShaderSources} sources  From loadShaders().
      * @param {{ onRestored: () => void, onError: (err: unknown) => void }} hooks
      * @throws {PaintError} "webgl" when WebGL2 or float render targets are missing.
+     * @throws {PaintError} "load" when the shader file has no ADJUST section.
      * @throws {Error} When a shader fails to compile or link.
      */
     constructor(canvas, w, h, sources, hooks) {
       this.canvas = canvas;
       this.w = canvas.width = w;
       this.h = canvas.height = h;
+      if (!sources.adjust) throw new PaintError("load", "The shader file has no //@@ADJUST section.");
       this.#sources = sources;
       this.#hooks = hooks;
       canvas.addEventListener("webglcontextlost", e => e.preventDefault());
@@ -164,10 +181,13 @@
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
       this.progs = { decode: makeProgram(gl, src.vert, src.decode), blur: makeProgram(gl, src.vert, src.blur),
-                     analyse: makeProgram(gl, src.vert, src.analyse), render: makeProgram(gl, src.vert, src.render) };
+                     analyse: makeProgram(gl, src.vert, src.analyse), render: makeProgram(gl, src.vert, src.render),
+                     adjust: makeProgram(gl, src.vert, src.adjust) };
       // texA is allocated once; each frame overwrites it with texSubImage2D.
+      // adj is LINEAR-filtered like lin, because BLUR may read either.
       this.texA = makeTexture(gl, w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, false);
       this.lin = makeTarget(gl, w, h, true);
+      this.adj = makeTarget(gl, w, h, true);
       this.tmp = makeTarget(gl, w, h, true);
       this.blurred = makeTarget(gl, w, h, true);
       this.theArray = makeTarget(gl, w, h, false);
@@ -214,7 +234,7 @@
       gl.bindTexture(gl.TEXTURE_2D, tex);
       for (const [k, v] of Object.entries(uniforms)) {
         const l = prog.loc[k]; if (!l) continue;
-        if (typeof v === "number") (INT_UNIFORMS.has(k) ? gl.uniform1i : gl.uniform1f).call(gl, l, v);
+        if (typeof v === "number") (VIDEO_INT_UNIFORMS.has(k) ? gl.uniform1i : gl.uniform1f).call(gl, l, v);
         else if (v.length === 2) gl.uniform2fv(l, v);
         else if (v.length === 3) gl.uniform3fv(l, v);
         else gl.uniform4fv(l, v);
@@ -226,26 +246,32 @@
     #sigma() { return Math.max(0, SHADER_DEFAULTS.penumbra) / 100 * this.w; }
 
     /**
-     * P0 decode -> P0b blur (v2) -> P1 theArray, for the frame in texA. Skipped
-     * when theArray already holds this frame analysed for `model`.
+     * P0 decode -> P0a adjust (if any) -> P0b blur (v2) -> P1 theArray, for the
+     * frame in texA. Skipped when theArray already holds this frame analysed
+     * with the same model and adjustment.
      * @param {"v1" | "v2"} model
+     * @param {Adjustment | null} adjust  null = leave the light as decoded.
      */
-    ensureAnalysed(model) {
-      if (this.analysedFor === model) return;
+    ensureAnalysed(model, adjust) {
+      const key = adjust ? [model, ...Object.values(adjust)].join("|") : model;
+      if (this.analysedFor === key) return;
       const gl = this.gl, P = this.progs, isV1 = model === "v1", sigma = this.#sigma();
       this.#draw(P.decode, this.lin, this.texA, { src: 0 });
-      let lightTex = this.lin.tex;
+      // `light` is the unblurred linear light that BLUR and ANALYSE read.
+      let light = this.lin;
+      if (adjust) { this.#draw(P.adjust, this.adj, this.lin.tex, { src: 0, ...adjust }); light = this.adj; }
+      let lightTex = light.tex;
       if (!isV1 && sigma >= 0.3) {
-        this.#draw(P.blur, this.tmp, this.lin.tex, { src: 0, dir: [1, 0], sigma });
+        this.#draw(P.blur, this.tmp, light.tex, { src: 0, dir: [1, 0], sigma });
         this.#draw(P.blur, this.blurred, this.tmp.tex, { src: 0, dir: [0, 1], sigma });
         lightTex = this.blurred.tex;
       }
       // lightLin on unit 0, sharpLin on unit 1; unbind unit 1 afterwards so
-      // `lin` is never bound while the next frame's DECODE renders into it.
-      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lin.tex); gl.activeTexture(gl.TEXTURE0);
+      // lin/adj is never bound while the next DECODE/ADJUST renders into it.
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, light.tex); gl.activeTexture(gl.TEXTURE0);
       this.#draw(P.analyse, this.theArray, lightTex, { lightLin: 0, sharpLin: 1, model: isV1 ? 1 : 2 });
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
-      this.analysedFor = model;
+      this.analysedFor = key;
     }
 
     /**
@@ -288,6 +314,135 @@
 
   /** Ease-out cubic: fast start, gentle landing (close to the tiles' fade curve). */
   const easeOut = t => 1 - (1 - t) ** 3;
+
+  /** INT_UNIFORMS plus ADJUST's integer uniform. */
+  const VIDEO_INT_UNIFORMS = new Set([...INT_UNIFORMS, "satMeasure"]);
+
+  /** Encoded sRGB byte -> linear, as a lookup table (VideoStats runs it per pixel). */
+  const LINEAR_LUT = Float32Array.from({ length: 256 }, (_, i) => toLinear(i));
+
+  /**
+   * Linear sRGB -> Oklab, the same matrices as oklab() in the shader's COMMON.
+   * @returns {[number, number, number]} [L, a, b].
+   */
+  function oklab(r, g, b) {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+  }
+
+  // ======================================================================
+  // VideoStats — whole-video medians for the ADJUST pass
+  // ======================================================================
+
+  /**
+   * The settings ADJUST runs with (uniform names in the .glsl file).
+   * @typedef {Object} Adjustment
+   * @property {number} contrastK  Exponent on luminance; 1 = unchanged.
+   * @property {number} satAmount  -1..1; 0 = unchanged.
+   * @property {0 | 1} satMeasure  0 = distance from white, 1 = chroma only (see SatMeasure).
+   * @property {number} pivotY     VideoStats#pivotY.
+   * @property {number} medianDiff VideoStats#medianDE or #medianChroma, per satMeasure.
+   */
+
+  /**
+   * How the saturation slider measures a pixel's "difference from pure white":
+   *   "full"    Oklab distance from white: lightness and colour both count, so
+   *             dark pixels count as far from white even when they are grey.
+   *   "chroma"  Oklab chroma only: just the colour cast, whatever the lightness.
+   * @typedef {"full" | "chroma"} SatMeasure
+   */
+  const SAT_MEASURES = { full: 0, chroma: 1 };
+
+  /**
+   * Histogram resolution, and the largest values counted: Oklab distance from
+   * white (black is 1.0) and Oklab chroma (the sRGB gamut reaches about 0.32).
+   */
+  const STATS_BINS = 1024, DE_MAX = 1.5, CHROMA_MAX = 0.4;
+
+  /**
+   * Measures the medians ADJUST compares each pixel with, over ALL frames of
+   * the video, not just the current one, so the sliders' effect doesn't
+   * flicker as the light changes.
+   *
+   * During the first loop, sample() copies the frame at 1/STATS_DOWNSCALE size
+   * into a CPU canvas, once per STATS_BUCKET_S of video time, and adds every
+   * pixel to three histograms. Once every bucket has been seen it does nothing.
+   * Until then the medians cover the part of the video seen so far.
+   */
+  class VideoStats {
+    #ctx;
+    /** @type {Uint8Array} 1 for each STATS_BUCKET_S slice of the video already measured. */
+    #seen;
+    #left;
+    #lum = new Float64Array(STATS_BINS);
+    #de = new Float64Array(STATS_BINS);
+    #chroma = new Float64Array(STATS_BINS);
+
+    /** @param {HTMLVideoElement} video  With metadata loaded. */
+    constructor(video) {
+      const w = Math.max(1, Math.round(video.videoWidth / STATS_DOWNSCALE));
+      const h = Math.max(1, Math.round(video.videoHeight / STATS_DOWNSCALE));
+      // willReadFrequently keeps this canvas on the CPU, so getImageData is cheap.
+      this.#ctx = Object.assign(document.createElement("canvas"), { width: w, height: h })
+        .getContext("2d", { willReadFrequently: true });
+      this.#ctx.imageSmoothingQuality = "high";
+      const d = video.duration;
+      this.#seen = new Uint8Array(d > 0 && isFinite(d) ? Math.ceil(d / STATS_BUCKET_S) : 1);
+      this.#left = this.#seen.length;
+      /** Median relative luminance (linear, 0..1). Placeholder until the first sample. */
+      this.pivotY = 0.18;
+      /** Median Oklab distance from pure white. Placeholder until the first sample. */
+      this.medianDE = 0.5;
+      /** Median Oklab chroma. Placeholder until the first sample. */
+      this.medianChroma = 0.02;
+    }
+
+    /** True once every part of the video has been measured. */
+    get complete() { return this.#left === 0; }
+
+    /**
+     * Adds the video's current frame, unless its slice was already measured.
+     * @param {HTMLVideoElement} video
+     */
+    sample(video) {
+      if (this.#left === 0) return;
+      const i = Math.min(this.#seen.length - 1, Math.floor(video.currentTime / STATS_BUCKET_S));
+      if (this.#seen[i]) return;
+      this.#seen[i] = 1;
+      this.#left--;
+      const ctx = this.#ctx, { width: w, height: h } = ctx.canvas;
+      ctx.drawImage(video, 0, 0, w, h);
+      const px = ctx.getImageData(0, 0, w, h).data;
+      for (let p = 0; p < px.length; p += 4) {
+        const r = LINEAR_LUT[px[p]], g = LINEAR_LUT[px[p + 1]], b = LINEAR_LUT[px[p + 2]];
+        const [L, A, B] = oklab(r, g, b);
+        this.#lum[binOf(0.2126729 * r + 0.7151522 * g + 0.0721750 * b, 1)]++;
+        this.#de[binOf(Math.hypot(1 - L, A, B), DE_MAX)]++;
+        this.#chroma[binOf(Math.hypot(A, B), CHROMA_MAX)]++;
+      }
+      this.pivotY = medianOf(this.#lum, 1);
+      this.medianDE = medianOf(this.#de, DE_MAX);
+      this.medianChroma = medianOf(this.#chroma, CHROMA_MAX);
+    }
+  }
+
+  /** Histogram bin of `v` in 0..max (out-of-range values go to the end bins). */
+  function binOf(v, max) { return Math.min(STATS_BINS - 1, Math.max(0, Math.floor(v / max * STATS_BINS))); }
+
+  /** Median of a histogram over 0..max, as the centre of the bin holding it. */
+  function medianOf(hist, max) {
+    let total = 0;
+    for (const n of hist) total += n;
+    for (let i = 0, run = 0; i < STATS_BINS; i++) {
+      run += hist[i];
+      if (run >= total / 2) return (i + 0.5) / STATS_BINS * max;
+    }
+    return max / 2;
+  }
 
   // ---------------------------------------------------------------- small utilities
 
@@ -345,7 +500,7 @@
    * @property {HTMLVideoElement} elements.source  The processed video (frame source).
    * @property {HTMLVideoElement} elements.top     The unprocessed, masked video.
    * @property {HTMLCanvasElement} elements.canvas The painted frames.
-   * @property {HTMLFieldSetElement} elements.modelFieldset  Disabled on failure.
+   * @property {HTMLFieldSetElement} elements.controls  Tinting algo + sliders; disabled on failure.
    * @property {HTMLElement} elements.notice       role="status" region for notices.
    */
 
@@ -356,6 +511,13 @@
    * @property {"v1" | "v2"} activeModel  Current lighting model (read-only).
    * @property {(hex: string) => void} setPaint  Sets the paint (fades unless reduced motion).
    * @property {(model: "v1" | "v2") => void} setModel  Switches the lighting model.
+   * @property {(amount: number) => void} setContrast    -1..1, 0 = unchanged (see ADJUST).
+   * @property {(amount: number) => void} setSaturation  -1..1, 0 = unchanged (see ADJUST).
+   * @property {number} contrast    Current contrast amount (read-only).
+   * @property {number} saturation  Current saturation amount (read-only).
+   * @property {(measure: SatMeasure) => void} setSatMeasure  How saturation measures difference from white.
+   * @property {SatMeasure} satMeasure  Current measure (read-only).
+   * @property {VideoStats | null} stats  The whole-video medians, once measuring has started.
    * @property {() => void} play  Starts both videos (for when autoplay was blocked).
    * @property {() => Promise<void>} start  Boots paint previews (repeat calls return the same promise).
    * @property {Promise<void> | null} ready  start()'s promise; never rejects.
@@ -368,7 +530,7 @@
    * @returns {VideoRenderer}
    */
   function createVideoRenderer(options) {
-    const { app, source, top, canvas, modelFieldset, notice } = options.elements;
+    const { app, source, top, canvas, controls, notice } = options.elements;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
 
     // ------------------------------------------------------------ state
@@ -377,6 +539,10 @@
     let activePaintColor = normalizeHex(options.initialPaint);
     /** Lighting model: "v2" (perceptual) or "v1" (HSV). Written by setModel(). */
     let activeModel = options.initialModel || "v2";
+    /** Slider amounts, -1..1; 0 (the default) leaves the video's light as it is. */
+    let contrast = 0, saturation = 0;
+    /** @type {SatMeasure} Written by setSatMeasure(). */
+    let satMeasure = "full";
     /**
      * The running paint fade, or null. `from` is the linear colour on screen
      * when it started; it always ends at activePaintColor.
@@ -386,6 +552,8 @@
 
     /** @type {VideoShader | null} */
     let shader = null;
+    /** @type {VideoStats | null} Created by startPainting(). */
+    let stats = null;
     /** True once the canvas holds painted frames and .is-painted is on. */
     let painting = false;
     /** Set when a failure was caused by context loss, so the restore retries the boot. */
@@ -431,18 +599,31 @@
     }
 
     /**
+     * The ADJUST settings for the current sliders, or null when both are
+     * centred (ADJUST is then skipped and the light is used as decoded).
+     * @returns {Adjustment | null}
+     */
+    function adjustment() {
+      if (contrast === 0 && saturation === 0) return null;
+      return {
+        contrastK: 2 ** contrast, satAmount: saturation, satMeasure: SAT_MEASURES[satMeasure], pivotY: stats.pivotY,
+        medianDiff: satMeasure === "chroma" ? stats.medianChroma : stats.medianDE
+      };
+    }
+
+    /**
      * Paints the canvas. With `newFrame`, first copies the source video's
      * current frame to the GPU (it is then analysed); otherwise only RENDER
-     * runs, on the frame already analysed.
+     * runs, unless the model or sliders changed since the last analysis.
      * @param {number} now  Frame timestamp (rVFC / rAF), or performance.now().
      * @param {boolean} newFrame
      */
     function render(now, newFrame) {
       if (!painting || shader.lost) return;
-      if (newFrame) { shader.upload(source); framesPainted++; }
+      if (newFrame) { stats.sample(source); shader.upload(source); framesPainted++; }
       else if (now === lastRenderAt) return;     // this frame is already drawn
       lastRenderAt = now;
-      shader.ensureAnalysed(activeModel);
+      shader.ensureAnalysed(activeModel, adjustment());
       shader.render(activeModel, hexToHsl(paintAt(now)));
     }
 
@@ -450,8 +631,8 @@
     let rafId = null;
     /**
      * Re-renders on the next animation frame, and keeps doing so while a paint
-     * fade runs. Used for paint and model changes, which must show even when
-     * the video is paused.
+     * fade runs. Used for paint, model and slider changes, which must show even
+     * when the video is paused.
      */
     function requestRender() {
       rafId ??= requestAnimationFrame(now => {
@@ -490,14 +671,14 @@
     /**
      * The single error policy (same as js/shaderSceneRender.js): wait out a
      * context loss; otherwise stop painting, show the plain video, disable the
-     * model toggle and show a notice.
+     * controls and show a notice.
      */
     function fail(err) {
       if (shader && shader.lost) { resumeOnRestore = true; return; }
       painting = false;
       fade = null;
       app.classList.remove("is-painted");
-      modelFieldset.disabled = true;
+      controls.disabled = true;
       const kind = err instanceof PaintError ? err.kind : "error";
       if (kind === "error" || kind === "webgl") console.warn("videoShaderRender:", err);
       showNotice(kind);
@@ -542,6 +723,48 @@
       requestRender();
     }
 
+    /**
+     * Validates a slider amount.
+     * @param {number} amount
+     * @returns {number} `amount`, clamped to -1..1.
+     * @throws {RangeError} When it isn't a finite number.
+     */
+    function toAmount(amount) {
+      amount = Number(amount);
+      if (!Number.isFinite(amount)) throw new RangeError(`Expected a number from -1 to 1, got "${amount}"`);
+      return Math.max(-1, Math.min(1, amount));
+    }
+
+    /**
+     * Contrast of the video's light before the paint is applied. 0 = as shot;
+     * -1..1 maps to a luminance exponent of 0.5..2 around the video's median
+     * luminance. Re-analyses the current frame on the next render.
+     * @param {number} amount  -1..1.
+     */
+    function setContrast(amount) { contrast = toAmount(amount); requestRender(); }
+
+    /**
+     * Saturation of the video's light before the paint is applied. 0 = as shot;
+     * each pixel's chroma is scaled by 2^(amount x its distance from white /
+     * the video's median distance), so -1 flattens and +1 strengthens the
+     * colour of the light, most where it differs most from white.
+     * @param {number} amount  -1..1.
+     */
+    function setSaturation(amount) { saturation = toAmount(amount); requestRender(); }
+
+    /**
+     * Chooses how the saturation slider measures each pixel's difference from
+     * pure white (see SatMeasure). No visible change while saturation is 0.
+     * @param {SatMeasure} measure
+     * @throws {RangeError} For an unknown measure.
+     */
+    function setSatMeasure(measure) {
+      if (!(measure in SAT_MEASURES)) throw new RangeError(`Unknown saturation measure "${measure}"`);
+      satMeasure = measure;
+      syncRadio("satMeasure", measure);
+      requestRender();
+    }
+
     /** Starts both videos; needed only if the browser blocked autoplay. */
     function play() {
       for (const video of [source, top]) if (video.paused) video.play().catch(() => {});
@@ -554,7 +777,7 @@
      * plain video and a notice.
      *  1. Gates, cheapest first: ?nogl, file://, CSS luminance mask support.
      *  2. In parallel: load the shaders, decode the mask, wait for the first frame.
-     *  3. Create the VideoShader at the video's own size.
+     *  3. Create the VideoShader at the video's own size, and the VideoStats.
      *  4. Paint the current frame, THEN add .is-painted. CSS switches the mask
      *     on and fades the canvas in over the source video, which shows the
      *     same frame unpainted, so the paint fades in over the original walls.
@@ -568,9 +791,10 @@
       if (!CSS.supports("mask-mode", "luminance")) throw new PaintError("mask");
       const [sources] = await Promise.all([loadShaders(glslUrl), decodeImage(options.mask), videoReady(source)]);
       shader ??= new VideoShader(canvas, source.videoWidth, source.videoHeight, sources, { onRestored, onError: fail });
+      stats ??= new VideoStats(source);
       painting = true;
       render(performance.now(), true);
-      modelFieldset.disabled = false;
+      controls.disabled = false;
       notice.textContent = "";
       app.classList.add("is-painted");
       if (!watching) { watching = true; onEveryFrame(source, onFrame); }
@@ -584,15 +808,19 @@
       get activeModel() { return activeModel; },
       get ready() { return ready; },
       get framesPainted() { return framesPainted; },
-      setPaint, setModel, play,
+      get contrast() { return contrast; },
+      get saturation() { return saturation; },
+      get satMeasure() { return satMeasure; },
+      get stats() { return stats; },
+      setPaint, setModel, setContrast, setSaturation, setSatMeasure, play,
       start() { return (ready ??= startPainting().catch(fail)); }
     };
   }
 
   // ---------------------------------------------------------------- export
   window.VideoShaderRender = {
-    createVideoRenderer, VideoShader,
+    createVideoRenderer, VideoShader, VideoStats, oklab,
     hexToLinear, linearToHex,
-    NOTICES, DEFAULT_GLSL_URL, HOLD_DRIFT, SEEK_DRIFT, MAX_RATE_NUDGE
+    SAT_MEASURES, NOTICES, DEFAULT_GLSL_URL, HOLD_DRIFT, SEEK_DRIFT, MAX_RATE_NUDGE
   };
 })();

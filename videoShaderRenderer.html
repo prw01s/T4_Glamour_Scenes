@@ -30,8 +30,10 @@
     overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
   }
 
-  /* ---- booth: header, video, palette, top to bottom ------------------------ */
+  /* ---- booth: video + palette on the left, a side column on the right ----- */
   .booth {
+    --side: 340px;          /* side column width */
+    --palette-h: 72px;      /* chip + hex label, kept free under the video */
     width: min(97%, 1800px);
     margin: 1.5vh auto;
     margin: 1.5dvh auto;
@@ -41,18 +43,21 @@
     background: var(--booth);
     border-radius: 16px;
     display: grid;
-    gap: var(--gap);
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto 1fr auto;
-    grid-template-areas: "head" "stage" "palette";
+    gap: var(--gap) calc(2 * var(--gap));
+    grid-template-columns: auto var(--side);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "stage   side"
+      "palette side";
+    justify-content: center;
+    align-content: start;
   }
   .booth > * { min-width: 0; }
 
-  /* ---- header: intro + shader toggle --------------------------------------- */
-  .head { grid-area: head; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 28px; }
-  .intro__text { margin: 0; max-width: 62ch; font-size: 18px; color: var(--slate); }
+  /* ---- side column: intro, tinting algo, video sliders --------------------- */
+  .side { grid-area: side; align-self: start; display: flex; flex-direction: column; gap: 28px; }
+  .intro__text { margin: 0; font-size: 18px; color: var(--slate); }
   .notice {
-    flex: 1 1 100%;
     margin: 0;
     padding: 10px 14px;
     font-size: 14px;
@@ -63,7 +68,11 @@
   .notice b { font-weight: 600; }
   .notice a { color: inherit; }
 
-  .model__row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .controls { display: flex; flex-direction: column; gap: 28px; }
+  .controls:disabled { opacity: .45; }
+  .controls:disabled label, .controls:disabled input { cursor: default; }
+
+  .model__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
   .model__label { color: var(--slate); }
   .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
   .segmented label { position: relative; cursor: pointer; }
@@ -71,15 +80,33 @@
   .segmented label:hover span { color: var(--graphite); }
   .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
   .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
-  .model:disabled { opacity: .45; }
-  .model:disabled label { cursor: default; }
 
-  /* ---- video: centred at the top, the whole frame, up to its native size ---- */
-  .stage { grid-area: stage; display: flex; justify-content: center; align-items: flex-start; min-height: 0; }
+  .sliders { display: flex; flex-direction: column; gap: 20px; }
+  .sliders__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
+  .sliders__title { color: var(--slate); }
+  .sliders__reset {
+    padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
+    text-decoration: underline; text-underline-offset: 0.14em; cursor: pointer;
+  }
+  .sliders__reset:disabled { color: var(--slate); text-decoration: none; cursor: default; opacity: .6; }
+  .slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .slider__label { font-weight: 600; }
+  .slider__value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
+  .slider__input { display: block; width: 100%; margin: 6px 0 0; accent-color: var(--graphite); cursor: pointer; }
+  .slider__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
+  .slider__hint { margin: 6px 0 0; font-size: 14px; line-height: 1.45; color: var(--slate); }
+  .slider__measure { margin-top: 10px; }
+
+  /* ---- video: the whole frame, up to its native size ------------------------
+     As tall as fits: the height left once the palette has room under it, and
+     the width left beside the side column, whichever is smaller. */
+  .stage { grid-area: stage; display: flex; justify-content: center; }
   .video {
+    --fit-h: max(320px, calc(97dvh - 2 * var(--pad) - var(--gap) - var(--palette-h)));
+    --fit-w: calc(min(97vw - 16px, 1800px) - 2 * var(--pad) - 2 * var(--gap) - var(--side));
     position: relative;
     isolation: isolate;
-    width: min(100%, calc(var(--w) * 1px));
+    height: min(calc(var(--h) * 1px), var(--fit-h), calc(var(--fit-w) * var(--h) / var(--w)));
     aspect-ratio: var(--w) / var(--h);
     border-radius: 3px;
     overflow: hidden;
@@ -109,16 +136,8 @@
   }
   @media (prefers-reduced-motion: reduce) { .video__canvas { transition: none; } }
 
-  /* Tall enough to fit: definite height; the video shrinks so it and the
-     palette fit on one screen, and nothing scrolls */
-  @media (min-height: 600px) {
-    .booth { height: 97vh; height: 97dvh; min-height: 0; }
-    .stage { container-type: size; }
-    .video { width: auto; height: min(100cqb, calc(100cqi * var(--h) / var(--w)), calc(var(--h) * 1px)); }
-  }
-
   /* ---- palette: five chips under the video --------------------------------- */
-  .palette { grid-area: palette; justify-self: center; }
+  .palette { grid-area: palette; justify-self: center; align-self: start; }
   .chips { list-style: none; margin: 0; padding: 0; display: flex; justify-content: center; gap: 14px; }
   .chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
   .chip {
@@ -142,6 +161,16 @@
   .chip__hex { font-size: 12px; line-height: 16px; color: var(--slate); }
   .chip-option input:checked ~ .chip__hex { color: var(--graphite); }
 
+  /* ---- narrow (<760): one column; the side column moves under the palette -- */
+  @media (max-width: 759.98px) {
+    .booth {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto auto;
+      grid-template-areas: "stage" "palette" "side";
+    }
+    .video { height: auto; width: min(100%, calc(var(--w) * 1px), calc(var(--fit-h) * var(--w) / var(--h))); }
+  }
+
   /* ---- mobile (<640) ------------------------------------------------------- */
   @media (max-width: 639.98px) {
     .intro__text { font-size: 16px; }
@@ -154,22 +183,65 @@
 <main class="booth" id="app">
   <h1 class="vh">Paint color visualizer, video</h1>
 
-  <div class="head">
-    <p class="intro__text">The walls are repainted on every frame as the video plays, so the paint follows the light.</p>
-    <fieldset class="model" id="model">
-      <legend class="vh">Shader model</legend>
-      <div class="model__row">
-        <span class="model__label" aria-hidden="true">Tinting algo</span>
-        <div class="segmented">
-          <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
-          <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
-        </div>
-      </div>
-    </fieldset>
-    <p class="notice" id="notice" role="status"></p>
-  </div>
-
   <div class="stage" id="stage"></div>
+
+  <aside class="side">
+    <p class="intro__text">The walls are repainted on every frame as the video plays, so the paint follows the light.</p>
+    <p class="notice" id="notice" role="status"></p>
+
+    <fieldset class="controls" id="controls">
+      <legend class="vh">Tinting controls</legend>
+
+      <fieldset class="model">
+        <legend class="vh">Shader model</legend>
+        <div class="model__row">
+          <span class="model__label" aria-hidden="true">Tinting algo</span>
+          <div class="segmented">
+            <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
+            <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="sliders">
+        <legend class="vh">Video adjustments, applied before the paint color</legend>
+        <div class="sliders__head">
+          <span class="sliders__title" aria-hidden="true">Video, before tinting</span>
+          <button class="sliders__reset" type="button" id="resetSliders" disabled>Reset</button>
+        </div>
+
+        <div class="slider">
+          <div class="slider__head">
+            <label class="slider__label" for="contrast">Contrast</label>
+            <output class="slider__value" id="contrastValue" for="contrast">0</output>
+          </div>
+          <input class="slider__input" type="range" id="contrast" name="contrast"
+            min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="contrastHint">
+          <div class="slider__ends" aria-hidden="true"><span>Flatter</span><span>As filmed</span><span>Punchier</span></div>
+          <p class="slider__hint" id="contrastHint">Spreads the video's light and shade apart or pulls them together, around its median brightness.</p>
+        </div>
+
+        <div class="slider">
+          <div class="slider__head">
+            <label class="slider__label" for="saturation">Saturation</label>
+            <output class="slider__value" id="saturationValue" for="saturation">0</output>
+          </div>
+          <input class="slider__input" type="range" id="saturation" name="saturation"
+            min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="saturationHint">
+          <div class="slider__ends" aria-hidden="true"><span>Muted</span><span>As filmed</span><span>Richer</span></div>
+          <p class="slider__hint" id="saturationHint">Strength of the light's color. Each pixel changes in proportion to how far it is from pure white, compared with the median pixel of the video.</p>
+          <div class="model__row slider__measure">
+            <span class="model__label" id="satMeasureLabel">Difference from white</span>
+            <div class="segmented" role="radiogroup" aria-labelledby="satMeasureLabel">
+              <label><input class="vh" type="radio" name="satMeasure" value="full" checked><span>Color + brightness</span></label>
+              <label><input class="vh" type="radio" name="satMeasure" value="chroma"><span>Color only</span></label>
+            </div>
+          </div>
+        </div>
+        <datalist id="sliderCentre"><option value="0"></option></datalist>
+      </fieldset>
+    </fieldset>
+  </aside>
 
   <fieldset class="palette">
     <legend class="vh">Paint color</legend>
@@ -255,28 +327,61 @@ document.getElementById("stage").innerHTML = `
 const videoRenderer = createVideoRenderer({
   mask: VIDEO.mask,
   initialPaint: PAINT_COLORS[0],
-  initialModel: "v2",                       // matches the checked model radio
+  // The checked radio, which the browser may have restored on a reload
+  initialModel: document.querySelector('input[name="model"]:checked').value,
   glslUrl: "glsl/shaderSceneRender.glsl",
   elements: {
     app: document.getElementById("app"),
     source: document.getElementById("sourceVideo"),
     top: document.getElementById("topVideo"),
     canvas: document.getElementById("paintCanvas"),
-    modelFieldset: document.getElementById("model"),
+    controls: document.getElementById("controls"),
     notice: document.getElementById("notice")
   }
 });
 
-// One delegated listener for both radio groups. A pick also starts the videos
-// in case the browser blocked autoplay.
+// One delegated listener for the radio groups. Any pick also starts the
+// videos in case the browser blocked autoplay.
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.name === "paint") videoRenderer.setPaint(t.value);
   else if (t.name === "model") videoRenderer.setModel(t.value);
+  else if (t.name === "satMeasure") videoRenderer.setSatMeasure(t.value);
   videoRenderer.play();
 });
 
-// Scripting and testing handle: setPaint / setModel / play, ready, framesPainted.
+// ---------------------------------------------------------------- sliders
+// Each runs -100..100; the centre (0) leaves the video as filmed. "input"
+// fires while dragging, so the walls follow the thumb. Values within SNAP of
+// the centre snap to it, so the default is easy to find again.
+const SNAP = 3;
+const SLIDERS = {
+  contrast:   amount => videoRenderer.setContrast(amount),
+  saturation: amount => videoRenderer.setSaturation(amount)
+};
+const sliderInputs = Object.keys(SLIDERS).map(name => document.getElementById(name));
+const resetButton = document.getElementById("resetSliders");
+
+/** Applies one slider's value: snap, show it, send it to the renderer (as -1..1). */
+function applySlider(input) {
+  let value = Math.round(+input.value);
+  if (Math.abs(value) <= SNAP) value = 0;
+  input.value = value;
+  document.getElementById(`${input.id}Value`).textContent = value > 0 ? `+${value}` : value < 0 ? `\u2212${-value}` : "0";
+  SLIDERS[input.name](value / 100);
+  resetButton.disabled = sliderInputs.every(i => +i.value === 0);
+}
+
+document.addEventListener("input", e => { if (sliderInputs.includes(e.target)) applySlider(e.target); });
+resetButton.addEventListener("click", () => {
+  for (const input of sliderInputs) { input.value = 0; applySlider(input); }
+});
+// The browser may restore slider positions and toggles on a reload; start from them.
+sliderInputs.forEach(applySlider);
+videoRenderer.setSatMeasure(document.querySelector('input[name="satMeasure"]:checked').value);
+
+// Scripting and testing handle: setPaint / setModel / setContrast /
+// setSaturation / play, ready, framesPainted, stats.
 window.videoRenderer = videoRenderer;
 
 // Boot: load the shaders, mask and first frame, then fade the paint in (or

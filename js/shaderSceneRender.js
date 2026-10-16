@@ -190,6 +190,8 @@
    * @property {string} blur     P0b fragment shader (COMMON + BLUR).
    * @property {string} analyse  P1 fragment shader (COMMON + ANALYSE).
    * @property {string} render   P2 fragment shader (COMMON + RENDER).
+   * @property {string | null} adjust  Optional P0a shader (COMMON + ADJUST), or
+   *   null when the file has no ADJUST section. Only the video page uses it.
    */
 
   /**
@@ -229,7 +231,8 @@
       decode: fragment(parts.DECODE),
       blur: fragment(parts.BLUR),
       analyse: fragment(parts.ANALYSE),
-      render: fragment(parts.RENDER)
+      render: fragment(parts.RENDER),
+      adjust: "ADJUST" in parts ? fragment(parts.ADJUST) : null
     };
   }
 

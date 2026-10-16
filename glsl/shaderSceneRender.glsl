@@ -17,6 +17,9 @@
 //     BLUR     P0b  fragment body: separable Gaussian blur (v2 only)
 //     ANALYSE  P1   fragment body: light minus white light -> theArray
 //     RENDER   P2   fragment body: the wall paint lit by theArray
+//     ADJUST   P0a  fragment body, optional: contrast + saturation of the
+//                   linear light before BLUR/ANALYSE. Used only by
+//                   videoShaderRenderer.html (js/videoShaderRender.js).
 //
 //   Each fragment program is built in JS as COMMON + "\n" + section, so only
 //   VERT and COMMON start with "#version 300 es". That line must remain the
@@ -31,6 +34,7 @@
 // PIPELINE (per photo; every surface is N x N, see js/shaderSceneRender.js)
 //   texA (RGBA8 sRGB) --DECODE--> lin --BLUR x2--> blurred --ANALYSE--> theArray
 //   theArray (RGBA16F) --RENDER--> canvas drawing buffer (8-bit sRGB)
+//   The video page can insert ADJUST after DECODE: lin --ADJUST--> adj.
 // ============================================================================
 
 //@@VERT
@@ -465,4 +469,42 @@ void main() {
     enc += n / 255.0;
   }
   fragOut = vec4(clamp(enc, 0.0, 1.0), 1.0);
+}
+
+//@@ADJUST
+// P0a (video page only): adjust the video's light before it is analysed.
+// Input: src = lin (linear light). Output: the "adj" target (RGBA16F), which
+// then replaces lin as the input of BLUR and ANALYSE. JS skips this pass when
+// both settings are neutral, so the default output is exactly unchanged.
+// contrastK    exponent on luminance around pivotY (1 = unchanged, > 1 = more contrast)
+// pivotY       median luminance of the video (linear), the contrast's fixed point
+// satAmount    -1..1 (0 = unchanged): per-pixel saturation, see below
+// satMeasure   how "difference from pure white" is measured:
+//                0 = Oklab distance from white (lightness and colour both count)
+//                1 = Oklab chroma only (the colour cast; lightness is ignored)
+// medianDiff   the video's median of that same measure, over all its pixels
+uniform sampler2D src;
+uniform int   satMeasure;
+uniform float contrastK, pivotY, satAmount, medianDiff;
+void main() {
+  vec3 c = texelFetch(src, ivec2(gl_FragCoord.xy), 0).rgb;
+  // 1. Saturation. diff = how far this pixel is from pure white, measured per
+  // satMeasure: the full Oklab distance (so a dark grey counts as far from
+  // white), or only the chroma (so only a colour cast counts). Its ratio to the
+  // video's median diff sets the strength: chroma is scaled by
+  // 2^(satAmount * ratio), so pixels far from white change most, near-white
+  // pixels hardly at all, and greys (no chroma) not at all. The ratio is
+  // capped at 3 (gain <= 8x).
+  vec3  lab   = oklab(c);
+  float diff  = satMeasure == 1 ? length(lab.yz) : distance(lab, vec3(1.0, 0.0, 0.0));
+  float ratio = clamp(diff / max(medianDiff, 1e-4), 0.0, 3.0);
+  lab.yz *= exp2(satAmount * ratio);
+  // Boosted chroma can leave the gamut (negative channels); clamp to real light.
+  c = max(oklabToRGB(lab), 0.0);
+  // 2. Contrast, on luminance only (the chromaticity is kept): in log space
+  // around the median, Y' = pivotY * (Y / pivotY)^contrastK. Multiplying the
+  // colour by Y' / Y = (Y / pivotY)^(contrastK - 1) applies that.
+  float Y = lum(c);
+  if (Y > 1e-6) c *= pow(Y / max(pivotY, 1e-4), contrastK - 1.0);
+  fragOut = vec4(c, 1.0);
 }
