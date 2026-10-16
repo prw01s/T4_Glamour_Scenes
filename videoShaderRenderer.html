@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>videoShaderRenderer</title>
+<style>
+  :root {
+    --booth: #ECECEC;      /* container surface */
+    --surround: #D4D4D4;   /* page band around the container */
+    --graphite: #242424;   /* text, rings */
+    --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
+    --rule: #C6C6C6;       /* hairlines */
+    --active-paint: #e3d4b9;   /* placeholder; syncPaintUi() sets it from PAINT_COLORS[0] at startup */
+    --pad: clamp(20px, 3vw, 40px);
+    --gap: 20px;
+    color-scheme: light;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { background: var(--surround); }
+  body {
+    margin: 0;
+    font: 16px/1.5 Optima, Candara, "Segoe UI", system-ui, sans-serif;
+    color: var(--graphite);
+    -webkit-font-smoothing: antialiased;
+  }
+  fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
+  .vh {
+    position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+
+  /* ---- booth: header, video, palette, top to bottom ------------------------ */
+  .booth {
+    width: min(97%, 1800px);
+    margin: 1.5vh auto;
+    margin: 1.5dvh auto;
+    padding: var(--pad);
+    min-height: 97vh;
+    min-height: 97svh;
+    background: var(--booth);
+    border-radius: 16px;
+    display: grid;
+    gap: var(--gap);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: "head" "stage" "palette";
+  }
+  .booth > * { min-width: 0; }
+
+  /* ---- header: intro + shader toggle --------------------------------------- */
+  .head { grid-area: head; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 28px; }
+  .intro__text { margin: 0; max-width: 62ch; font-size: 18px; color: var(--slate); }
+  .notice {
+    flex: 1 1 100%;
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 14px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .notice:empty { display: none; }
+  .notice b { font-weight: 600; }
+  .notice a { color: inherit; }
+
+  .model__row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .model__label { color: var(--slate); }
+  .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
+  .segmented label { position: relative; cursor: pointer; }
+  .segmented span { display: block; padding: 5px 12px; border-radius: 2px; color: var(--slate); white-space: nowrap; }
+  .segmented label:hover span { color: var(--graphite); }
+  .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
+  .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .model:disabled { opacity: .45; }
+  .model:disabled label { cursor: default; }
+
+  /* ---- video: centred at the top, the whole frame, up to its native size ---- */
+  .stage { grid-area: stage; display: flex; justify-content: center; align-items: flex-start; min-height: 0; }
+  .video {
+    position: relative;
+    isolation: isolate;
+    width: min(100%, calc(var(--w) * 1px));
+    aspect-ratio: var(--w) / var(--h);
+    border-radius: 3px;
+    overflow: hidden;
+    background: #DADADA;
+  }
+  .video__layer { position: absolute; inset: 0; }
+  .video__layer--bottom { z-index: 1; }
+  .video__layer--top { z-index: 2; }
+  .video__media, .video__canvas {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  /* The canvas holds the painted frames and replaces the source video on
+     screen. It stays hidden until .is-painted, then fades in over the source
+     video (which shows the same frame, unpainted). */
+  .video__canvas { opacity: 0; transition: opacity 360ms cubic-bezier(.2, 0, 0, 1); }
+  .is-painted .video__canvas { opacity: 1; }
+  /* Masks are opt-in: until .is-painted, visitors see the plain video.
+     Black in the mask is wall, so luminance mode hides exactly the walls. */
+  .is-painted .video__media--top {
+    mask-image: var(--mask);
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: 100% 100%;   /* the mask has the video's framing, at a slightly different size */
+    mask-mode: luminance;
+  }
+  @media (prefers-reduced-motion: reduce) { .video__canvas { transition: none; } }
+
+  /* Tall enough to fit: definite height; the video shrinks so it and the
+     palette fit on one screen, and nothing scrolls */
+  @media (min-height: 600px) {
+    .booth { height: 97vh; height: 97dvh; min-height: 0; }
+    .stage { container-type: size; }
+    .video { width: auto; height: min(100cqb, calc(100cqi * var(--h) / var(--w)), calc(var(--h) * 1px)); }
+  }
+
+  /* ---- palette: five chips under the video --------------------------------- */
+  .palette { grid-area: palette; justify-self: center; }
+  .chips { list-style: none; margin: 0; padding: 0; display: flex; justify-content: center; gap: 14px; }
+  .chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+  .chip {
+    display: block; width: 44px; height: 44px;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
+    transition: transform .15s, box-shadow .15s;
+  }
+  .chip-option:hover .chip { transform: translateY(-1px); }
+  .chip-option input:checked + .chip {
+    outline: 2px solid var(--graphite);
+    outline-offset: 3px;
+    transform: translateY(-2px);
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 3px 6px rgb(0 0 0 / .16);
+  }
+  .chip-option input:focus-visible + .chip {
+    outline: 2px solid var(--graphite);
+    outline-offset: 3px;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 0 0 7px var(--booth), 0 0 0 9px var(--slate);
+  }
+  .chip__hex { font-size: 12px; line-height: 16px; color: var(--slate); }
+  .chip-option input:checked ~ .chip__hex { color: var(--graphite); }
+
+  /* ---- mobile (<640) ------------------------------------------------------- */
+  @media (max-width: 639.98px) {
+    .intro__text { font-size: 16px; }
+    .chips { gap: 10px; }
+    .chip__hex { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+<main class="booth" id="app">
+  <h1 class="vh">Paint color visualizer, video</h1>
+
+  <div class="head">
+    <p class="intro__text">The walls are repainted on every frame as the video plays, so the paint follows the light.</p>
+    <fieldset class="model" id="model">
+      <legend class="vh">Shader model</legend>
+      <div class="model__row">
+        <span class="model__label" aria-hidden="true">Tinting algo</span>
+        <div class="segmented">
+          <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
+          <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
+        </div>
+      </div>
+    </fieldset>
+    <p class="notice" id="notice" role="status"></p>
+  </div>
+
+  <div class="stage" id="stage"></div>
+
+  <fieldset class="palette">
+    <legend class="vh">Paint color</legend>
+    <ul class="chips" id="chips"></ul>
+  </fieldset>
+</main>
+
+<script src="js/shaderSceneRender.js"></script>
+<script src="js/videoShaderRender.js"></script>
+<script type="module">
+/* ==========================================================================
+ * Page setup for videoShaderRenderer.html.
+ *
+ * The page's config (paints, video, mask), the markup built from it, the
+ * event wiring and the boot call. The engine (per-frame WebGL pipeline, video
+ * sync, paint fades) is in js/videoShaderRender.js, which builds on
+ * js/shaderSceneRender.js; the shaders are in glsl/shaderSceneRender.glsl.
+ * ======================================================================== */
+
+// Both engine files are classic scripts loaded just above. If either is
+// missing, keep the static page and say what's wrong.
+const engine = window.VideoShaderRender;
+if (!window.ShaderSceneRender || !engine) {
+  document.getElementById("notice").textContent =
+    "Paint previews couldn't start because js/shaderSceneRender.js or js/videoShaderRender.js didn't load. Check the js folder, then reload the page.";
+  throw new Error("videoShaderRenderer: an engine script is missing");
+}
+const { createVideoRenderer } = engine;
+const { lrv } = window.ShaderSceneRender;
+
+// ---------------------------------------------------------------- config
+
+/**
+ * Paint swatches shown in the palette, as #rrggbb. The first entry is the
+ * paint on screen when the page loads.
+ * @type {string[]}
+ */
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#D0BA94", "#DEE0DE", "#2F3D4C"];
+
+/**
+ * The video and its wall mask (black = wall, same framing as the video).
+ * width/height are the video's native size; they set the frame's aspect ratio
+ * and largest size before the video's metadata has loaded.
+ */
+const VIDEO = {
+  src: "images/videos/hero_mobile_4k_warm-light.mp4",
+  mask: "images/masks/video_4K_mask_.png",
+  label: "Room with warm light changing over time",
+  width: 1080,
+  height: 1920
+};
+
+// ---------------------------------------------------------------- markup
+// Palette: one radio per paint, labelled "#RRGGBB, LRV nn" (see shaderSceneRenderer.html).
+document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
+  `<li><label class="chip-option">` +
+    `<input class="vh" type="radio" name="paint" value="${hex.toLowerCase()}">` +
+    `<span class="chip" style="background:${hex}"></span>` +
+    `<span class="chip__hex">${hex.toUpperCase()}</span><span class="vh">, LRV ${lrv(hex.toLowerCase())}</span>` +
+  `</label></li>`
+).join("");
+
+// The video frame (the structure js/videoShaderRender.js expects):
+//  - bottom: the processed source video, covered by the canvas that shows its
+//    painted frames (the canvas size is set from the video by the engine).
+//  - top: the unprocessed copy; --mask is applied only under .is-painted.
+// Both videos loop, are muted and play inline; neither shows controls.
+const media = `src="${VIDEO.src}" muted loop autoplay playsinline preload="auto" disablepictureinpicture`;
+document.getElementById("stage").innerHTML = `
+  <div class="video" style="--w: ${VIDEO.width}; --h: ${VIDEO.height}">
+    <div class="video__layer video__layer--bottom" aria-hidden="true">
+      <video class="video__media video__media--source" id="sourceVideo" ${media} tabindex="-1"></video>
+      <canvas class="video__canvas" id="paintCanvas" width="${VIDEO.width}" height="${VIDEO.height}"></canvas>
+    </div>
+    <div class="video__layer video__layer--top">
+      <video class="video__media video__media--top" id="topVideo" ${media} aria-label="${VIDEO.label}"
+        style="--mask: url('${VIDEO.mask}')"></video>
+    </div>
+  </div>`;
+
+// ---------------------------------------------------------------- renderer
+
+const videoRenderer = createVideoRenderer({
+  mask: VIDEO.mask,
+  initialPaint: PAINT_COLORS[0],
+  initialModel: "v2",                       // matches the checked model radio
+  glslUrl: "glsl/shaderSceneRender.glsl",
+  elements: {
+    app: document.getElementById("app"),
+    source: document.getElementById("sourceVideo"),
+    top: document.getElementById("topVideo"),
+    canvas: document.getElementById("paintCanvas"),
+    modelFieldset: document.getElementById("model"),
+    notice: document.getElementById("notice")
+  }
+});
+
+// One delegated listener for both radio groups. A pick also starts the videos
+// in case the browser blocked autoplay.
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.name === "paint") videoRenderer.setPaint(t.value);
+  else if (t.name === "model") videoRenderer.setModel(t.value);
+  videoRenderer.play();
+});
+
+// Scripting and testing handle: setPaint / setModel / play, ready, framesPainted.
+window.videoRenderer = videoRenderer;
+
+// Boot: load the shaders, mask and first frame, then fade the paint in (or
+// fall back to the plain video with a notice).
+videoRenderer.start();
+</script>
+</body>
+</html>

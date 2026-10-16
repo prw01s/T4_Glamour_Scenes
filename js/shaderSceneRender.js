@@ -1205,11 +1205,13 @@
   /**
    * The library's global namespace. Pages normally only need createRenderer,
    * lrv (for palette labels) and N (for the tile canvases' size). The rest is
-   * exposed for testing and reuse.
+   * exposed for testing and reuse (js/videoShaderRender.js builds on the
+   * shader loader, GL helpers and colour functions).
    */
   window.ShaderSceneRender = {
     createRenderer, loadShaders,
     WallShader, SceneTile, PaintError,
+    makeProgram, makeTexture, makeTarget, INT_UNIFORMS, decodeImage,
     normalizeHex, hexToRgb, hexToHsl, lrv,
     N, FADE_MS, STAGGER_MS, SHADER_DEFAULTS, NOTICES, DEFAULT_GLSL_URL
   };
