@@ -77,7 +77,7 @@
   .room input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 4px; border-radius: 2px; }
 
   /* ---- about: three paragraphs, side by side ------------------------------- */
-  /* Up to three columns; fewer when the tuning controls leave less room */
+  /* Up to three columns; fewer when there isn't room */
   .about { grid-area: about; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15em), 1fr)); gap: 12px 28px; }
   .about p { margin: 0; font-size: 16px; line-height: 1.5; color: var(--slate); max-width: 60ch; }
   .about .about__lead { font-size: 18.9px; line-height: 1.4; font-weight: 600; color: var(--graphite); }
@@ -212,46 +212,62 @@
   }
   .readout__lrv { color: var(--slate); }
 
-  /* ---- desktop (>=1024, and landscape 640-1023) ---------------------------- */
+  /* ---- desktop (>=1024, and landscape 640-1023) ----------------------------
+     The three scenes span the full width of the viewport: the booth goes edge
+     to edge and the stage cancels its side padding. The header (room names +
+     paragraphs, then the intro) sits above the scenes; the paint chips and
+     the tuning controls form a row below them. The page scrolls if needed. */
   @media (min-width: 1024px), (min-width: 640px) and (min-aspect-ratio: 5/4) {
-    .chip__hex { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
-    /* The palette is a vertical list left of the first scene, level with the images */
     .booth {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      grid-template-rows: auto auto auto 1fr;
+      width: 100%;
+      margin: 0;
+      border-radius: 0;
+      min-height: 100vh;
+      min-height: 100svh;
+      column-gap: calc(2 * var(--gap));
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: auto auto auto auto;
       grid-template-areas:
-        "rooms   rooms   model"
-        "about   about   model"
-        "intro   intro   model"
-        "palette stage   stage";
-    }
-    .palette { align-self: start; }
-    .palette__body { flex-direction: column; align-items: flex-start; gap: 12px; }
-    .palette__label { line-height: 1.5; }
-    .chips { flex-direction: column; gap: 14px; }
-    .chip-option { flex-direction: row; gap: 10px; }   /* hex beside the chip, not under it */
-    .readout { display: none; }   /* stays in the DOM: syncPaintUi() still writes to it */
-  }
-
-  /* ---- wide (>=1600): paragraphs sit between the room names and the toggle - */
-  @media (min-width: 1600px) {
-    .booth {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      grid-template-rows: auto auto 1fr;
-      grid-template-areas:
-        "rooms   about   model"
-        "intro   intro   model"
-        "palette stage   stage";
+        "rooms   about"
+        "intro   intro"
+        "stage   stage"
+        "palette model";
     }
     .rooms { align-self: start; }
+    .stage { margin-inline: calc(-1 * var(--pad)); }
+    .scene__frame { border-radius: 0; }
+    .scene figcaption { padding-inline: var(--pad); }   /* in line with the text above, not the viewport edge */
+
+    /* Paint chips: a row, hex under each chip */
+    .chip__hex { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
+    .palette { align-self: start; }
+    .palette__body { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .palette__label { line-height: 1.5; }
+    .readout { display: none; }   /* stays in the DOM: syncPaintUi() still writes to it */
+
+    /* Tuning controls: the toggle beside the sliders, and the two sliders side
+       by side; each pair wraps onto two lines when the row is too narrow. */
+    .controls {
+      justify-self: stretch; width: auto;
+      flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 24px 48px;
+    }
+    .controls > .model { flex: 0 0 auto; }
+    .controls > .sliders { flex: 1 1 520px; flex-direction: row; flex-wrap: wrap; gap: 14px 32px; }
+    .sliders__head { flex: 1 1 100%; }
+    .slider { flex: 1 1 240px; min-width: 0; }
   }
 
-  /* Tall enough to fit: definite height, tiles shrink, nothing scrolls */
-  @media (min-width: 640px) and (min-height: 600px) {
-    .booth { height: 97vh; height: 97dvh; min-height: 0; }
-    .stage { container-type: size; min-height: 0; }
-    .renderer {
-      grid-template-columns: repeat(3, min(calc((100cqi - 2 * var(--gap)) / 3), calc(100cqb - var(--cap))));
+  /* Desktop, but too narrow for chips and controls side by side: stack them */
+  @media (min-width: 1024px) and (max-width: 1199.98px),
+         (min-width: 640px) and (max-width: 1199.98px) and (min-aspect-ratio: 5/4) {
+    .booth {
+      grid-template-rows: auto auto auto auto auto;
+      grid-template-areas:
+        "rooms   about"
+        "intro   intro"
+        "stage   stage"
+        "palette palette"
+        "model   model";
     }
   }
 
@@ -275,7 +291,9 @@
     .palette__label, .readout { line-height: 1.5; }
     .readout { margin: 0; }
   }
+  /* Tablet, tall enough to fit: definite height, tiles shrink, nothing scrolls */
   @media (min-width: 640px) and (max-width: 1023.98px) and (max-aspect-ratio: 5/4) and (min-height: 600px) {
+    .booth { height: 97vh; height: 97dvh; min-height: 0; }
     .scene { container-type: size; }
     .scene__frame { width: min(100cqi, calc(100cqb - var(--cap))); }
   }
@@ -327,7 +345,7 @@
     <p>The implementation gives us precise control over how paint colors are blended with the inherent color
       lighting within the room scene, including the ability to use algorithms that reflect the actual science
       of human color perception. As an example of the sophisticated control we have over the tinting logic,
-      the “Tinting algo” control (upper right) shows the results of subtly changing that logic.</p>
+      the “Tinting algo” control shows the results of subtly changing that logic.</p>
   </div>
 
   <div class="intro">
