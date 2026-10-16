@@ -4,31 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>T4 Scene Visualization - Video</title>
+<link rel="stylesheet" href="css/visualizer.css">
 <style>
-  :root {
-    --booth: #ECECEC;      /* container surface */
-    --surround: #D4D4D4;   /* page band around the container */
-    --graphite: #242424;   /* text, rings */
-    --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
-    --rule: #C6C6C6;       /* hairlines */
-    --active-paint: #e3d4b9;   /* placeholder; syncPaintUi() sets it from PAINT_COLORS[0] at startup */
-    --pad: clamp(20px, 3vw, 40px);
-    --gap: 20px;
-    color-scheme: light;
-  }
-  *, *::before, *::after { box-sizing: border-box; }
-  html { background: var(--surround); }
-  body {
-    margin: 0;
-    font: 16px/1.5 Optima, Candara, "Segoe UI", system-ui, sans-serif;
-    color: var(--graphite);
-    -webkit-font-smoothing: antialiased;
-  }
-  fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
-  .vh {
-    position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
-    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
-  }
+  /* Shared tokens, base, controls and chips: css/visualizer.css. This page's layout: */
 
   /* ---- booth: video + palette on the left, a side column on the right ----- */
   .booth {
@@ -69,33 +47,7 @@
   .notice a { color: inherit; }
 
   .controls { display: flex; flex-direction: column; gap: 28px; }
-  .controls:disabled { opacity: .45; }
-  .controls:disabled label, .controls:disabled input { cursor: default; }
-
-  .model__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
-  .model__label { color: var(--slate); }
-  .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
-  .segmented label { position: relative; cursor: pointer; }
-  .segmented span { display: block; padding: 5px 12px; border-radius: 2px; color: var(--slate); white-space: nowrap; }
-  .segmented label:hover span { color: var(--graphite); }
-  .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
-  .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
-
-  .sliders { display: flex; flex-direction: column; gap: 20px; }
-  .sliders__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
-  .sliders__title { color: var(--slate); }
-  .sliders__reset {
-    padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
-    text-decoration: underline; text-underline-offset: 0.14em; cursor: pointer;
-  }
-  .sliders__reset:disabled { color: var(--slate); text-decoration: none; cursor: default; opacity: .6; }
-  .slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-  .slider__label { font-weight: 600; }
-  .slider__value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
-  .slider__input { display: block; width: 100%; margin: 6px 0 0; accent-color: var(--graphite); cursor: pointer; }
-  .slider__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
-  .slider__hint { margin: 6px 0 0; font-size: 14px; line-height: 1.45; color: var(--slate); }
-  .slider__measure { margin-top: 10px; }
+  .slider__hint { font-size: 14px; }
 
   /* ---- video: the whole frame, up to its native size ------------------------
      As tall as fits: the height left once the palette has room under it, and
@@ -138,28 +90,9 @@
 
   /* ---- palette: five chips under the video --------------------------------- */
   .palette { grid-area: palette; justify-self: center; align-self: start; }
-  .chips { list-style: none; margin: 0; padding: 0; display: flex; justify-content: center; gap: 14px; }
-  .chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
-  .chip {
-    display: block; width: 44px; height: 44px;
-    border-radius: 2px;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
-    transition: transform .15s, box-shadow .15s;
-  }
-  .chip-option:hover .chip { transform: translateY(-1px); }
-  .chip-option input:checked + .chip {
-    outline: 2px solid var(--graphite);
-    outline-offset: 3px;
-    transform: translateY(-2px);
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 3px 6px rgb(0 0 0 / .16);
-  }
-  .chip-option input:focus-visible + .chip {
-    outline: 2px solid var(--graphite);
-    outline-offset: 3px;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 0 0 7px var(--booth), 0 0 0 9px var(--slate);
-  }
+  .chips { justify-content: center; }
+  .chip { width: 44px; height: 44px; }
   .chip__hex { font-size: 12px; line-height: 16px; color: var(--slate); }
-  .chip-option input:checked ~ .chip__hex { color: var(--graphite); }
 
   /* ---- narrow (<760): one column; the side column moves under the palette -- */
   @media (max-width: 759.98px) {
@@ -189,58 +122,8 @@
     <p class="intro__text">The walls are repainted on every frame as the video plays, so the paint follows the light.</p>
     <p class="notice" id="notice" role="status"></p>
 
-    <fieldset class="controls" id="controls">
-      <legend class="vh">Tinting controls</legend>
-
-      <fieldset class="model">
-        <legend class="vh">Shader model</legend>
-        <div class="model__row">
-          <span class="model__label" aria-hidden="true">Tinting algo</span>
-          <div class="segmented">
-            <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
-            <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
-          </div>
-        </div>
-      </fieldset>
-
-      <fieldset class="sliders">
-        <legend class="vh">Video adjustments, applied before the paint color</legend>
-        <div class="sliders__head">
-          <span class="sliders__title" aria-hidden="true">Video, before tinting</span>
-          <button class="sliders__reset" type="button" id="resetSliders" disabled>Reset</button>
-        </div>
-
-        <div class="slider">
-          <div class="slider__head">
-            <label class="slider__label" for="contrast">Contrast</label>
-            <output class="slider__value" id="contrastValue" for="contrast">0</output>
-          </div>
-          <input class="slider__input" type="range" id="contrast" name="contrast"
-            min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="contrastHint">
-          <div class="slider__ends" aria-hidden="true"><span>Flatter</span><span>As filmed</span><span>Punchier</span></div>
-          <p class="slider__hint" id="contrastHint">Spreads the video's light and shade apart or pulls them together, around its median brightness.</p>
-        </div>
-
-        <div class="slider">
-          <div class="slider__head">
-            <label class="slider__label" for="saturation">Saturation</label>
-            <output class="slider__value" id="saturationValue" for="saturation">0</output>
-          </div>
-          <input class="slider__input" type="range" id="saturation" name="saturation"
-            min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="saturationHint">
-          <div class="slider__ends" aria-hidden="true"><span>Muted</span><span>As filmed</span><span>Richer</span></div>
-          <p class="slider__hint" id="saturationHint">Strength of the light's color. Each pixel changes in proportion to how far it is from pure white, compared with the median pixel of the video.</p>
-          <div class="model__row slider__measure">
-            <span class="model__label" id="satMeasureLabel">Difference from white</span>
-            <div class="segmented" role="radiogroup" aria-labelledby="satMeasureLabel">
-              <label><input class="vh" type="radio" name="satMeasure" value="full" checked><span>Color + brightness</span></label>
-              <label><input class="vh" type="radio" name="satMeasure" value="chroma"><span>Color only</span></label>
-            </div>
-          </div>
-        </div>
-        <datalist id="sliderCentre"><option value="0"></option></datalist>
-      </fieldset>
-    </fieldset>
+    <!-- Tinting algo, Contrast / Saturation, Difference from white: built by js/tuningControls.js -->
+    <fieldset class="controls" id="controls"></fieldset>
   </aside>
 
   <fieldset class="palette">
@@ -249,28 +132,29 @@
   </fieldset>
 </main>
 
-<script src="js/shaderSceneRender.js"></script>
+<script src="js/paintPipeline.js"></script>
 <script src="js/videoShaderRender.js"></script>
+<script src="js/tuningControls.js"></script>
 <script type="module">
 /* ==========================================================================
  * Page setup for videoShaderRenderer.html.
  *
  * The page's config (paints, video, mask), the markup built from it, the
- * event wiring and the boot call. The engine (per-frame WebGL pipeline, video
- * sync, paint fades) is in js/videoShaderRender.js, which builds on
- * js/shaderSceneRender.js; the shaders are in glsl/shaderSceneRender.glsl.
+ * event wiring and the boot call. The controller (per-frame painting, video
+ * sync, paint fades) is js/videoShaderRender.js; the GPU pipeline and colour
+ * science are js/paintPipeline.js; the shaders are glsl/shaderSceneRender.glsl;
+ * the tinting controls are js/tuningControls.js.
  * ======================================================================== */
 
-// Both engine files are classic scripts loaded just above. If either is
+// The scripts above are classic scripts, so they have already run. If one is
 // missing, keep the static page and say what's wrong.
-const engine = window.VideoShaderRender;
-if (!window.ShaderSceneRender || !engine) {
+if (!window.PaintPipeline || !window.VideoShaderRender || !window.TuningControls) {
   document.getElementById("notice").textContent =
-    "Paint previews couldn't start because js/shaderSceneRender.js or js/videoShaderRender.js didn't load. Check the js folder, then reload the page.";
-  throw new Error("videoShaderRenderer: an engine script is missing");
+    "Paint previews couldn't start because a file in the js folder didn't load. Check the js folder, then reload the page.";
+  throw new Error("videoShaderRenderer: a script in js/ is missing");
 }
-const { createVideoRenderer } = engine;
-const { lrv } = window.ShaderSceneRender;
+const { createVideoRenderer } = window.VideoShaderRender;
+const { lrv } = window.PaintPipeline;
 
 // ---------------------------------------------------------------- config
 
@@ -279,7 +163,7 @@ const { lrv } = window.ShaderSceneRender;
  * paint on screen when the page loads.
  * @type {string[]}
  */
-const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#D0BA94", "#DEE0DE", "#2F3D4C"];
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#2f3d4c"];
 
 /**
  * The video and its wall mask (black = wall, same framing as the video).
@@ -298,9 +182,9 @@ const VIDEO = {
 // Palette: one radio per paint, labelled "#RRGGBB, LRV nn" (see shaderSceneRenderer.html).
 document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
   `<li><label class="chip-option">` +
-    `<input class="vh" type="radio" name="paint" value="${hex.toLowerCase()}">` +
+    `<input class="vh" type="radio" name="paint" value="${hex}">` +
     `<span class="chip" style="background:${hex}"></span>` +
-    `<span class="chip__hex">${hex.toUpperCase()}</span><span class="vh">, LRV ${lrv(hex.toLowerCase())}</span>` +
+    `<span class="chip__hex">${hex.toUpperCase()}</span><span class="vh">, LRV ${lrv(hex)}</span>` +
   `</label></li>`
 ).join("");
 
@@ -314,7 +198,7 @@ document.getElementById("stage").innerHTML = `
   <div class="video" style="--w: ${VIDEO.width}; --h: ${VIDEO.height}">
     <div class="video__layer video__layer--bottom" aria-hidden="true">
       <video class="video__media video__media--source" id="sourceVideo" ${media} tabindex="-1"></video>
-      <canvas class="video__canvas" id="paintCanvas" width="${VIDEO.width}" height="${VIDEO.height}"></canvas>
+      <canvas class="video__canvas" id="paintCanvas"></canvas>
     </div>
     <div class="video__layer video__layer--top">
       <video class="video__media video__media--top" id="topVideo" ${media} aria-label="${VIDEO.label}"
@@ -324,11 +208,12 @@ document.getElementById("stage").innerHTML = `
 
 // ---------------------------------------------------------------- renderer
 
+const controls = TuningControls.mount(document.getElementById("controls"), { subject: "video" });
+
 const videoRenderer = createVideoRenderer({
   mask: VIDEO.mask,
   initialPaint: PAINT_COLORS[0],
-  // The checked radio, which the browser may have restored on a reload
-  initialModel: document.querySelector('input[name="model"]:checked').value,
+  initialModel: controls.model,
   glslUrl: "glsl/shaderSceneRender.glsl",
   elements: {
     app: document.getElementById("app"),
@@ -340,48 +225,16 @@ const videoRenderer = createVideoRenderer({
   }
 });
 
-// One delegated listener for the radio groups. Any pick also starts the
-// videos in case the browser blocked autoplay.
-document.addEventListener("change", e => {
-  const t = e.target;
-  if (t.name === "paint") videoRenderer.setPaint(t.value);
-  else if (t.name === "model") videoRenderer.setModel(t.value);
-  else if (t.name === "satMeasure") videoRenderer.setSatMeasure(t.value);
+// Paint chips. Any pick (here or in the controls) also starts the videos, in
+// case the browser blocked autoplay.
+document.getElementById("chips").addEventListener("change", e => {
+  videoRenderer.setPaint(e.target.value);
   videoRenderer.play();
 });
-
-// ---------------------------------------------------------------- sliders
-// Each runs -100..100; the centre (0) leaves the video as filmed. "input"
-// fires while dragging, so the walls follow the thumb. Values within SNAP of
-// the centre snap to it, so the default is easy to find again.
-const SNAP = 3;
-const SLIDERS = {
-  contrast:   amount => videoRenderer.setContrast(amount),
-  saturation: amount => videoRenderer.setSaturation(amount)
-};
-const sliderInputs = Object.keys(SLIDERS).map(name => document.getElementById(name));
-const resetButton = document.getElementById("resetSliders");
-
-/** Applies one slider's value: snap, show it, send it to the renderer (as -1..1). */
-function applySlider(input) {
-  let value = Math.round(+input.value);
-  if (Math.abs(value) <= SNAP) value = 0;
-  input.value = value;
-  document.getElementById(`${input.id}Value`).textContent = value > 0 ? `+${value}` : value < 0 ? `\u2212${-value}` : "0";
-  SLIDERS[input.name](value / 100);
-  resetButton.disabled = sliderInputs.every(i => +i.value === 0);
-}
-
-document.addEventListener("input", e => { if (sliderInputs.includes(e.target)) applySlider(e.target); });
-resetButton.addEventListener("click", () => {
-  for (const input of sliderInputs) { input.value = 0; applySlider(input); }
-});
-// The browser may restore slider positions and toggles on a reload; start from them.
-sliderInputs.forEach(applySlider);
-videoRenderer.setSatMeasure(document.querySelector('input[name="satMeasure"]:checked').value);
+controls.bind(videoRenderer, { onChange: () => videoRenderer.play() });
 
 // Scripting and testing handle: setPaint / setModel / setContrast /
-// setSaturation / play, ready, framesPainted, stats.
+// setSaturation / setSatMeasure / play, ready, framesPainted, stats.
 window.videoRenderer = videoRenderer;
 
 // Boot: load the shaders, mask and first frame, then fade the paint in (or

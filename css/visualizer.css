@@ -1,0 +1,88 @@
+/* ==========================================================================
+ * visualizer.css — styles shared by shaderSceneRenderer.html and
+ * videoShaderRenderer.html: design tokens, base styles, the visually hidden
+ * helper, the tinting controls (markup from js/tuningControls.js) and the
+ * paint chips. Each page keeps its own layout in its <style> block.
+ * ======================================================================== */
+
+/* ---- tokens ---------------------------------------------------------------- */
+:root {
+  --booth: #ECECEC;      /* container surface */
+  --surround: #D4D4D4;   /* page band around the container */
+  --graphite: #242424;   /* text, rings */
+  --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
+  --rule: #C6C6C6;       /* hairlines */
+  --active-paint: #e3d4b9;   /* placeholder; the renderer sets it from the first paint at startup */
+  --pad: clamp(20px, 3vw, 40px);
+  --gap: 20px;
+  color-scheme: light;
+}
+
+/* ---- base ------------------------------------------------------------------ */
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--surround); }
+body {
+  margin: 0;
+  font: 16px/1.5 Optima, Candara, "Segoe UI", system-ui, sans-serif;
+  color: var(--graphite);
+  -webkit-font-smoothing: antialiased;
+}
+fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
+/* Visually hidden, still read by screen readers */
+.vh {
+  position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* ---- tinting controls (js/tuningControls.js) ------------------------------- */
+.controls:disabled { opacity: .45; }
+.controls:disabled label, .controls:disabled input { cursor: default; }
+
+/* A label + segmented radio group on one line (wraps when narrow) */
+.model__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
+.model__label { color: var(--slate); }
+.segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
+.segmented label { position: relative; cursor: pointer; }
+.segmented span { display: block; padding: 5px 12px; border-radius: 2px; color: var(--slate); white-space: nowrap; }
+.segmented label:hover span { color: var(--graphite); }
+.segmented input:checked + span { background: var(--graphite); color: var(--booth); }
+.segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
+
+.sliders { display: flex; flex-direction: column; gap: 18px; }
+.sliders__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
+.sliders__title { color: var(--slate); }
+.sliders__reset {
+  padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
+  text-decoration: underline; text-underline-offset: 0.14em; cursor: pointer;
+}
+.sliders__reset:disabled { color: var(--slate); text-decoration: none; cursor: default; opacity: .6; }
+.slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.slider__label { font-weight: 600; }
+.slider__value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
+.slider__input { display: block; width: 100%; margin: 6px 0 0; accent-color: var(--graphite); cursor: pointer; }
+.slider__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
+.slider__hint { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--slate); }
+.slider__measure { margin-top: 10px; }
+
+/* ---- paint chips ----------------------------------------------------------- */
+.chips { list-style: none; margin: 0; padding: 0; display: flex; gap: 14px; }
+.chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+.chip {
+  display: block; width: 40px; height: 40px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
+  transition: transform .15s, box-shadow .15s;
+}
+.chip-option:hover .chip { transform: translateY(-1px); }
+.chip-option input:checked + .chip {
+  outline: 2px solid var(--graphite);
+  outline-offset: 3px;
+  transform: translateY(-2px);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 3px 6px rgb(0 0 0 / .16);
+}
+.chip-option input:focus-visible + .chip {
+  outline: 2px solid var(--graphite);
+  outline-offset: 3px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 0 0 7px var(--booth), 0 0 0 9px var(--slate);
+}
+.chip-option input:checked ~ .chip__hex { color: var(--graphite); }

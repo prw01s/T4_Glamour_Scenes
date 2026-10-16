@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paint pipeline tests</title>
+<style>
+  body { margin: 24px; font: 14px/1.5 system-ui, sans-serif; color: #242424; background: #ECECEC; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { margin: 0 0 16px; color: #5C5C5C; }
+  #summary { font-weight: 600; margin-bottom: 12px; }
+  table { border-collapse: collapse; width: 100%; max-width: 1100px; background: #fff; }
+  td, th { padding: 6px 10px; border-bottom: 1px solid #ddd; text-align: left; vertical-align: top; }
+  td:first-child { width: 4em; font-weight: 600; }
+  .pass { color: #1d6b2c; }
+  .fail { color: #b3261e; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Paint pipeline tests</h1>
+<p>Unit tests of the colour science in <code>js/paintPipeline.js</code>, and GPU tests of the shaders in
+  <code>glsl/shaderSceneRender.glsl</code> on small synthetic images. Serve the project over http
+  (<code>bash serve.sh</code>) and open <code>/tests/</code>.</p>
+<div id="summary">Running…</div>
+<table><thead><tr><th>Result</th><th>Test</th><th>Detail</th></tr></thead><tbody id="results"></tbody></table>
+
+<script src="../js/paintPipeline.js"></script>
+<script src="tests.js"></script>
+</body>
+</html>

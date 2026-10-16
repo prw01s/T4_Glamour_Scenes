@@ -4,31 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>T4 Scene Visualization</title>
+<link rel="stylesheet" href="css/visualizer.css">
 <style>
+  /* Shared tokens, base, controls and chips: css/visualizer.css. This page's layout: */
   :root {
-    --booth: #ECECEC;      /* container surface */
-    --surround: #D4D4D4;   /* page band around the container */
-    --graphite: #242424;   /* text, rings */
-    --slate: #5C5C5C;      /* secondary text, 5.6:1 on booth */
-    --rule: #C6C6C6;       /* hairlines */
-    --active-paint: #e3d4b9;   /* placeholder; syncPaintUi() sets it from PAINT_COLORS[0] at startup */
-    --pad: clamp(20px, 3vw, 40px);
-    --gap: 20px;
     --cap: 32px;           /* figcaption line + gap above it */
-    color-scheme: light;
-  }
-  *, *::before, *::after { box-sizing: border-box; }
-  html { background: var(--surround); }
-  body {
-    margin: 0;
-    font: 16px/1.5 Optima, Candara, "Segoe UI", system-ui, sans-serif;
-    color: var(--graphite);
-    -webkit-font-smoothing: antialiased;
-  }
-  fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
-  .vh {
-    position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0;
-    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
   }
 
   /* ---- booth ---------------------------------------------------------------- */
@@ -97,38 +77,12 @@
   .notice b { font-weight: 600; }
   .notice a { color: inherit; }
 
-  /* ---- tuning controls: shader toggle, then the video-light sliders --------- */
+  /* ---- tuning controls (js/tuningControls.js; shared styles in css/visualizer.css) */
   .controls {
     grid-area: model; justify-self: end; align-self: start;
     width: min(100%, 320px);
     display: flex; flex-direction: column; gap: 22px;
   }
-  .model__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
-  .model__label { color: var(--slate); }
-  .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
-  .segmented label { position: relative; cursor: pointer; }
-  .segmented span { display: block; padding: 5px 12px; border-radius: 2px; color: var(--slate); white-space: nowrap; }
-  .segmented label:hover span { color: var(--graphite); }
-  .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
-  .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
-  .controls:disabled { opacity: .45; }
-  .controls:disabled label, .controls:disabled input { cursor: default; }
-
-  .sliders { display: flex; flex-direction: column; gap: 18px; }
-  .sliders__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
-  .sliders__title { color: var(--slate); }
-  .sliders__reset {
-    padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
-    text-decoration: underline; text-underline-offset: 0.14em; cursor: pointer;
-  }
-  .sliders__reset:disabled { color: var(--slate); text-decoration: none; cursor: default; opacity: .6; }
-  .slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-  .slider__label { font-weight: 600; }
-  .slider__value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
-  .slider__input { display: block; width: 100%; margin: 6px 0 0; accent-color: var(--graphite); cursor: pointer; }
-  .slider__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
-  .slider__hint { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--slate); }
-  .slider__measure { margin-top: 10px; }
 
   /* ---- scenes -------------------------------------------------------------- */
   .stage { grid-area: stage; }
@@ -178,26 +132,6 @@
   .palette { grid-area: palette; }
   .palette__body { display: flex; align-items: flex-start; gap: 16px 28px; }
   .palette__label { font-size: 14px; line-height: 40px; color: var(--slate); white-space: nowrap; }
-  .chips { list-style: none; margin: 0; padding: 0; display: flex; gap: 14px; }
-  .chip-option { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
-  .chip {
-    display: block; width: 40px; height: 40px;
-    border-radius: 2px;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14);
-    transition: transform .15s, box-shadow .15s;
-  }
-  .chip-option:hover .chip { transform: translateY(-1px); }
-  .chip-option input:checked + .chip {
-    outline: 2px solid var(--graphite);
-    outline-offset: 3px;
-    transform: translateY(-2px);
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 3px 6px rgb(0 0 0 / .16);
-  }
-  .chip-option input:focus-visible + .chip {
-    outline: 2px solid var(--graphite);
-    outline-offset: 3px;
-    box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14), 0 0 0 7px var(--booth), 0 0 0 9px var(--slate);
-  }
   .chip__hex {   /* visually hidden except on desktop */
     position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
     overflow: hidden; clip-path: inset(50%); white-space: nowrap;
@@ -353,58 +287,8 @@
     <p class="notice" id="notice" role="status"></p>
   </div>
 
-  <fieldset class="controls" id="controls">
-    <legend class="vh">Tinting controls</legend>
-
-    <fieldset class="model">
-      <legend class="vh">Shader model</legend>
-      <div class="model__row">
-        <span class="model__label" aria-hidden="true">Tinting algo</span>
-        <div class="segmented">
-          <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
-          <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
-        </div>
-      </div>
-    </fieldset>
-
-    <fieldset class="sliders">
-      <legend class="vh">Photo adjustments, applied before the paint color</legend>
-      <div class="sliders__head">
-        <span class="sliders__title" aria-hidden="true">Photo light, before tinting</span>
-        <button class="sliders__reset" type="button" id="resetSliders" disabled>Reset</button>
-      </div>
-
-      <div class="slider">
-        <div class="slider__head">
-          <label class="slider__label" for="contrast">Contrast</label>
-          <output class="slider__value" id="contrastValue" for="contrast">0</output>
-        </div>
-        <input class="slider__input" type="range" id="contrast" name="contrast"
-          min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="contrastHint">
-        <div class="slider__ends" aria-hidden="true"><span>Flatter</span><span>As shot</span><span>Punchier</span></div>
-        <p class="slider__hint" id="contrastHint">Spreads the photos' light and shade apart or pulls them together, around the room's median brightness.</p>
-      </div>
-
-      <div class="slider">
-        <div class="slider__head">
-          <label class="slider__label" for="saturation">Saturation</label>
-          <output class="slider__value" id="saturationValue" for="saturation">0</output>
-        </div>
-        <input class="slider__input" type="range" id="saturation" name="saturation"
-          min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="saturationHint">
-        <div class="slider__ends" aria-hidden="true"><span>Muted</span><span>As shot</span><span>Richer</span></div>
-        <p class="slider__hint" id="saturationHint">Strength of the light's color. Each pixel changes in proportion to how far it is from pure white, compared with the median pixel of the room's photos.</p>
-        <div class="model__row slider__measure">
-          <span class="model__label" id="satMeasureLabel">Difference from white</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="satMeasureLabel">
-            <label><input class="vh" type="radio" name="satMeasure" value="full" checked><span>Color + brightness</span></label>
-            <label><input class="vh" type="radio" name="satMeasure" value="chroma"><span>Color only</span></label>
-          </div>
-        </div>
-      </div>
-      <datalist id="sliderCentre"><option value="0"></option></datalist>
-    </fieldset>
-  </fieldset>
+  <!-- Tinting algo, Contrast / Saturation, Difference from white: built by js/tuningControls.js -->
+  <fieldset class="controls" id="controls"></fieldset>
 
   <div class="stage">
     <div class="renderer" id="renderer" data-room="livingRoom"></div>
@@ -420,26 +304,30 @@
   </fieldset>
 </main>
 
+<script src="js/paintPipeline.js"></script>
 <script src="js/shaderSceneRender.js"></script>
+<script src="js/tuningControls.js"></script>
 <script type="module">
 /* ==========================================================================
  * Page setup for shaderSceneRenderer.html.
  *
  * Everything that runs at page load lives here: the page's config (paints,
  * rooms, times of day), the markup built from it, the event wiring and the
- * boot call. The engine (WebGL pipeline, tiles, fades, room switching) is in
- * js/shaderSceneRender.js, and the shaders are in glsl/shaderSceneRender.glsl.
+ * boot call. The controller (tiles, fades, room switching) is
+ * js/shaderSceneRender.js; the GPU pipeline and colour science are
+ * js/paintPipeline.js; the shaders are glsl/shaderSceneRender.glsl; the
+ * tinting controls are js/tuningControls.js.
  * ======================================================================== */
 
-// js/shaderSceneRender.js is a classic script loaded just above, so it has
-// already run. If it is missing, keep the static page and say what's wrong.
-const engine = window.ShaderSceneRender;
-if (!engine) {
+// The scripts above are classic scripts, so they have already run. If one is
+// missing, keep the static page and say what's wrong.
+if (!window.PaintPipeline || !window.ShaderSceneRender || !window.TuningControls) {
   document.getElementById("notice").textContent =
-    "Paint previews couldn't start because js/shaderSceneRender.js didn't load. Check the js folder, then reload the page.";
-  throw new Error("shaderSceneRenderer: js/shaderSceneRender.js is missing");
+    "Paint previews couldn't start because a file in the js folder didn't load. Check the js folder, then reload the page.";
+  throw new Error("shaderSceneRenderer: a script in js/ is missing");
 }
-const { createRenderer, lrv, N } = engine;
+const { createRenderer } = window.ShaderSceneRender;
+const { lrv } = window.PaintPipeline;
 
 // ---------------------------------------------------------------- config
 
@@ -448,7 +336,7 @@ const { createRenderer, lrv, N } = engine;
  * is the paint on screen when the page loads.
  * @type {string[]}
  */
-const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#D0BA94", "#DEE0DE", "#2F3D4C"];
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#2f3d4c"];
 
 /**
  * Every room and its assets (see the Room typedef in js/shaderSceneRender.js).
@@ -516,7 +404,8 @@ document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
 
 // Tiles, one figure per time of day (the structure js/shaderSceneRender.js expects):
 //  - view-transition-name gives each frame its own cross-fade on room switches.
-//  - The bottom layer holds the base + incoming canvases (N x N; CSS scales them).
+//  - The bottom layer holds the base + incoming canvases (the renderer sizes
+//    them to its render size at boot; CSS scales them).
 //  - The top layer holds one photo per room. The hidden room's photos use
 //    visibility (not display: none), so they and their masks load and decode
 //    up front and a room switch never shows a half-loaded mask.
@@ -528,8 +417,8 @@ renderer.innerHTML = TIMES.map(time => `
   <figure class="scene" data-time="${time.key}">
     <div class="scene__frame" style="view-transition-name: scene-${time.key}">
       <div class="scene__layer scene__layer--bottom" aria-hidden="true">
-        <canvas class="scene__canvas" width="${N}" height="${N}"></canvas>
-        <canvas class="scene__canvas scene__canvas--incoming" width="${N}" height="${N}"></canvas>
+        <canvas class="scene__canvas"></canvas>
+        <canvas class="scene__canvas scene__canvas--incoming"></canvas>
       </div>
       <div class="scene__layer scene__layer--top">
         ${Object.entries(ROOMS).map(([key, room]) =>
@@ -545,11 +434,12 @@ renderer.innerHTML = TIMES.map(time => `
 // ---------------------------------------------------------------- renderer
 
 /** The SceneRenderer handle (typedef in js/shaderSceneRender.js). */
+const controls = TuningControls.mount(document.getElementById("controls"), { subject: "photos" });
+
 const sceneRenderer = createRenderer({
   rooms: ROOMS,
   initialPaint: PAINT_COLORS[0],
-  // The checked radio, which the browser may have restored on a reload
-  initialModel: document.querySelector('input[name="model"]:checked').value,
+  initialModel: controls.model,
   glslUrl: "glsl/shaderSceneRender.glsl",
   elements: {
     app: document.getElementById("app"),
@@ -561,50 +451,18 @@ const sceneRenderer = createRenderer({
   }
 });
 
-// One delegated listener for all the radio groups. "change" fires for
-// clicks, taps and arrow keys alike, but not when the renderer checks a
-// radio itself.
+// One delegated listener for the paint and room radios. "change" fires for
+// clicks, taps and arrow keys alike, but not when the renderer checks a radio
+// itself. The tinting controls wire themselves.
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.name === "paint") sceneRenderer.setPaint(t.value);
   else if (t.name === "room") sceneRenderer.setRoom(t.value);
-  else if (t.name === "model") sceneRenderer.setModel(t.value);
-  else if (t.name === "satMeasure") sceneRenderer.setSatMeasure(t.value);
 });
-
-// ---------------------------------------------------------------- sliders
-// Same controls as videoShaderRenderer.html. Each runs -100..100; the centre
-// (0) leaves the photos as shot. "input" fires while dragging, so the walls
-// follow the thumb. Values within SNAP of the centre snap to it, so the
-// default is easy to find again.
-const SNAP = 3;
-const SLIDERS = {
-  contrast:   amount => sceneRenderer.setContrast(amount),
-  saturation: amount => sceneRenderer.setSaturation(amount)
-};
-const sliderInputs = Object.keys(SLIDERS).map(name => document.getElementById(name));
-const resetButton = document.getElementById("resetSliders");
-
-/** Applies one slider's value: snap, show it, send it to the renderer (as -1..1). */
-function applySlider(input) {
-  let value = Math.round(+input.value);
-  if (Math.abs(value) <= SNAP) value = 0;
-  input.value = value;
-  document.getElementById(`${input.id}Value`).textContent = value > 0 ? `+${value}` : value < 0 ? `\u2212${-value}` : "0";
-  SLIDERS[input.name](value / 100);
-  resetButton.disabled = sliderInputs.every(i => +i.value === 0);
-}
-
-document.addEventListener("input", e => { if (sliderInputs.includes(e.target)) applySlider(e.target); });
-resetButton.addEventListener("click", () => {
-  for (const input of sliderInputs) { input.value = 0; applySlider(input); }
-});
-// The browser may restore slider positions and toggles on a reload; start from them.
-sliderInputs.forEach(applySlider);
-sceneRenderer.setSatMeasure(document.querySelector('input[name="satMeasure"]:checked').value);
+controls.bind(sceneRenderer);
 
 // Scripting and testing handle: setPaint / setRoom / setModel / setContrast /
-// setSaturation / setSatMeasure, sliders, stats, ready, sample().
+// setSaturation / setSatMeasure, sliders, roomInfo(), ready, sample().
 window.sceneRenderer = sceneRenderer;
 
 // Boot: load the shaders and photos, then fade the paint in (or fall back to
