@@ -52,7 +52,8 @@
  *
  * STATISTICS: ADJUST compares each pixel with the whole video: the median
  * luminance (the contrast's fixed point) and the median difference from white
- * (the saturation's reference; one median per way of measuring it). VideoStats measures them on the CPU from a
+ * (the saturation's reference; one median per way of measuring it). VideoStats
+ * (a LightStats from js/shaderSceneRender.js) measures them on the CPU from a
  * small copy of the frames during the first loop, then stops.
  *
  * TIMING: new frames arrive through requestVideoFrameCallback, which runs in
@@ -76,7 +77,8 @@
   const {
     loadShaders, makeProgram, makeTexture, makeTarget, INT_UNIFORMS, decodeImage,
     PaintError, SHADER_DEFAULTS, NOTICES: BASE_NOTICES, FADE_MS,
-    normalizeHex, hexToRgb, hexToHsl, lrv
+    LightStats, makeAdjustment, toAmount, toSatMeasure,
+    normalizeHex, hexToRgb, hexToHsl
   } = base;
 
   // ---------------------------------------------------------------- constants
@@ -234,7 +236,7 @@
       gl.bindTexture(gl.TEXTURE_2D, tex);
       for (const [k, v] of Object.entries(uniforms)) {
         const l = prog.loc[k]; if (!l) continue;
-        if (typeof v === "number") (VIDEO_INT_UNIFORMS.has(k) ? gl.uniform1i : gl.uniform1f).call(gl, l, v);
+        if (typeof v === "number") (INT_UNIFORMS.has(k) ? gl.uniform1i : gl.uniform1f).call(gl, l, v);
         else if (v.length === 2) gl.uniform2fv(l, v);
         else if (v.length === 3) gl.uniform3fv(l, v);
         else gl.uniform4fv(l, v);
@@ -250,7 +252,7 @@
      * frame in texA. Skipped when theArray already holds this frame analysed
      * with the same model and adjustment.
      * @param {"v1" | "v2"} model
-     * @param {Adjustment | null} adjust  null = leave the light as decoded.
+     * @param {import("./shaderSceneRender.js").Adjustment | null} adjust  null = leave the light as decoded.
      */
     ensureAnalysed(model, adjust) {
       const key = adjust ? [model, ...Object.values(adjust)].join("|") : model;
@@ -315,90 +317,32 @@
   /** Ease-out cubic: fast start, gentle landing (close to the tiles' fade curve). */
   const easeOut = t => 1 - (1 - t) ** 3;
 
-  /** INT_UNIFORMS plus ADJUST's integer uniform. */
-  const VIDEO_INT_UNIFORMS = new Set([...INT_UNIFORMS, "satMeasure"]);
-
-  /** Encoded sRGB byte -> linear, as a lookup table (VideoStats runs it per pixel). */
-  const LINEAR_LUT = Float32Array.from({ length: 256 }, (_, i) => toLinear(i));
-
-  /**
-   * Linear sRGB -> Oklab, the same matrices as oklab() in the shader's COMMON.
-   * @returns {[number, number, number]} [L, a, b].
-   */
-  function oklab(r, g, b) {
-    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
-  }
-
   // ======================================================================
   // VideoStats — whole-video medians for the ADJUST pass
   // ======================================================================
 
   /**
-   * The settings ADJUST runs with (uniform names in the .glsl file).
-   * @typedef {Object} Adjustment
-   * @property {number} contrastK  Exponent on luminance; 1 = unchanged.
-   * @property {number} satAmount  -1..1; 0 = unchanged.
-   * @property {0 | 1} satMeasure  0 = distance from white, 1 = chroma only (see SatMeasure).
-   * @property {number} pivotY     VideoStats#pivotY.
-   * @property {number} medianDiff VideoStats#medianDE or #medianChroma, per satMeasure.
-   */
-
-  /**
-   * How the saturation slider measures a pixel's "difference from pure white":
-   *   "full"    Oklab distance from white: lightness and colour both count, so
-   *             dark pixels count as far from white even when they are grey.
-   *   "chroma"  Oklab chroma only: just the colour cast, whatever the lightness.
-   * @typedef {"full" | "chroma"} SatMeasure
-   */
-  const SAT_MEASURES = { full: 0, chroma: 1 };
-
-  /**
-   * Histogram resolution, and the largest values counted: Oklab distance from
-   * white (black is 1.0) and Oklab chroma (the sRGB gamut reaches about 0.32).
-   */
-  const STATS_BINS = 1024, DE_MAX = 1.5, CHROMA_MAX = 0.4;
-
-  /**
-   * Measures the medians ADJUST compares each pixel with, over ALL frames of
-   * the video, not just the current one, so the sliders' effect doesn't
-   * flicker as the light changes.
+   * The medians ADJUST compares each pixel with (LightStats, shared with the
+   * photo page), measured over ALL frames of the video, not just the current
+   * one, so the sliders' effect doesn't flicker as the light changes.
    *
-   * During the first loop, sample() copies the frame at 1/STATS_DOWNSCALE size
-   * into a CPU canvas, once per STATS_BUCKET_S of video time, and adds every
-   * pixel to three histograms. Once every bucket has been seen it does nothing.
-   * Until then the medians cover the part of the video seen so far.
+   * During the first loop, sample() adds the frame (at 1/STATS_DOWNSCALE
+   * size) once per STATS_BUCKET_S of video time. Once every bucket has been
+   * seen it does nothing. Until then the medians cover the part of the video
+   * seen so far.
    */
-  class VideoStats {
-    #ctx;
+  class VideoStats extends LightStats {
     /** @type {Uint8Array} 1 for each STATS_BUCKET_S slice of the video already measured. */
     #seen;
     #left;
-    #lum = new Float64Array(STATS_BINS);
-    #de = new Float64Array(STATS_BINS);
-    #chroma = new Float64Array(STATS_BINS);
 
     /** @param {HTMLVideoElement} video  With metadata loaded. */
     constructor(video) {
-      const w = Math.max(1, Math.round(video.videoWidth / STATS_DOWNSCALE));
-      const h = Math.max(1, Math.round(video.videoHeight / STATS_DOWNSCALE));
-      // willReadFrequently keeps this canvas on the CPU, so getImageData is cheap.
-      this.#ctx = Object.assign(document.createElement("canvas"), { width: w, height: h })
-        .getContext("2d", { willReadFrequently: true });
-      this.#ctx.imageSmoothingQuality = "high";
+      super(Math.max(1, Math.round(video.videoWidth / STATS_DOWNSCALE)),
+            Math.max(1, Math.round(video.videoHeight / STATS_DOWNSCALE)));
       const d = video.duration;
       this.#seen = new Uint8Array(d > 0 && isFinite(d) ? Math.ceil(d / STATS_BUCKET_S) : 1);
       this.#left = this.#seen.length;
-      /** Median relative luminance (linear, 0..1). Placeholder until the first sample. */
-      this.pivotY = 0.18;
-      /** Median Oklab distance from pure white. Placeholder until the first sample. */
-      this.medianDE = 0.5;
-      /** Median Oklab chroma. Placeholder until the first sample. */
-      this.medianChroma = 0.02;
     }
 
     /** True once every part of the video has been measured. */
@@ -414,34 +358,8 @@
       if (this.#seen[i]) return;
       this.#seen[i] = 1;
       this.#left--;
-      const ctx = this.#ctx, { width: w, height: h } = ctx.canvas;
-      ctx.drawImage(video, 0, 0, w, h);
-      const px = ctx.getImageData(0, 0, w, h).data;
-      for (let p = 0; p < px.length; p += 4) {
-        const r = LINEAR_LUT[px[p]], g = LINEAR_LUT[px[p + 1]], b = LINEAR_LUT[px[p + 2]];
-        const [L, A, B] = oklab(r, g, b);
-        this.#lum[binOf(0.2126729 * r + 0.7151522 * g + 0.0721750 * b, 1)]++;
-        this.#de[binOf(Math.hypot(1 - L, A, B), DE_MAX)]++;
-        this.#chroma[binOf(Math.hypot(A, B), CHROMA_MAX)]++;
-      }
-      this.pivotY = medianOf(this.#lum, 1);
-      this.medianDE = medianOf(this.#de, DE_MAX);
-      this.medianChroma = medianOf(this.#chroma, CHROMA_MAX);
+      this.add(video);
     }
-  }
-
-  /** Histogram bin of `v` in 0..max (out-of-range values go to the end bins). */
-  function binOf(v, max) { return Math.min(STATS_BINS - 1, Math.max(0, Math.floor(v / max * STATS_BINS))); }
-
-  /** Median of a histogram over 0..max, as the centre of the bin holding it. */
-  function medianOf(hist, max) {
-    let total = 0;
-    for (const n of hist) total += n;
-    for (let i = 0, run = 0; i < STATS_BINS; i++) {
-      run += hist[i];
-      if (run >= total / 2) return (i + 0.5) / STATS_BINS * max;
-    }
-    return max / 2;
   }
 
   // ---------------------------------------------------------------- small utilities
@@ -539,10 +457,12 @@
     let activePaintColor = normalizeHex(options.initialPaint);
     /** Lighting model: "v2" (perceptual) or "v1" (HSV). Written by setModel(). */
     let activeModel = options.initialModel || "v2";
-    /** Slider amounts, -1..1; 0 (the default) leaves the video's light as it is. */
-    let contrast = 0, saturation = 0;
-    /** @type {SatMeasure} Written by setSatMeasure(). */
-    let satMeasure = "full";
+    /**
+     * Slider settings, written by setContrast / setSaturation / setSatMeasure.
+     * Amounts are -1..1; 0 (the default) leaves the video's light as it is.
+     * @type {{ contrast: number, saturation: number, satMeasure: SatMeasure }}
+     */
+    const sliders = { contrast: 0, saturation: 0, satMeasure: "full" };
     /**
      * The running paint fade, or null. `from` is the linear colour on screen
      * when it started; it always ends at activePaintColor.
@@ -599,19 +519,6 @@
     }
 
     /**
-     * The ADJUST settings for the current sliders, or null when both are
-     * centred (ADJUST is then skipped and the light is used as decoded).
-     * @returns {Adjustment | null}
-     */
-    function adjustment() {
-      if (contrast === 0 && saturation === 0) return null;
-      return {
-        contrastK: 2 ** contrast, satAmount: saturation, satMeasure: SAT_MEASURES[satMeasure], pivotY: stats.pivotY,
-        medianDiff: satMeasure === "chroma" ? stats.medianChroma : stats.medianDE
-      };
-    }
-
-    /**
      * Paints the canvas. With `newFrame`, first copies the source video's
      * current frame to the GPU (it is then analysed); otherwise only RENDER
      * runs, unless the model or sliders changed since the last analysis.
@@ -623,7 +530,7 @@
       if (newFrame) { stats.sample(source); shader.upload(source); framesPainted++; }
       else if (now === lastRenderAt) return;     // this frame is already drawn
       lastRenderAt = now;
-      shader.ensureAnalysed(activeModel, adjustment());
+      shader.ensureAnalysed(activeModel, makeAdjustment(sliders, stats));
       shader.render(activeModel, hexToHsl(paintAt(now)));
     }
 
@@ -724,24 +631,12 @@
     }
 
     /**
-     * Validates a slider amount.
-     * @param {number} amount
-     * @returns {number} `amount`, clamped to -1..1.
-     * @throws {RangeError} When it isn't a finite number.
-     */
-    function toAmount(amount) {
-      amount = Number(amount);
-      if (!Number.isFinite(amount)) throw new RangeError(`Expected a number from -1 to 1, got "${amount}"`);
-      return Math.max(-1, Math.min(1, amount));
-    }
-
-    /**
      * Contrast of the video's light before the paint is applied. 0 = as shot;
      * -1..1 maps to a luminance exponent of 0.5..2 around the video's median
      * luminance. Re-analyses the current frame on the next render.
      * @param {number} amount  -1..1.
      */
-    function setContrast(amount) { contrast = toAmount(amount); requestRender(); }
+    function setContrast(amount) { sliders.contrast = toAmount(amount); requestRender(); }
 
     /**
      * Saturation of the video's light before the paint is applied. 0 = as shot;
@@ -750,7 +645,7 @@
      * colour of the light, most where it differs most from white.
      * @param {number} amount  -1..1.
      */
-    function setSaturation(amount) { saturation = toAmount(amount); requestRender(); }
+    function setSaturation(amount) { sliders.saturation = toAmount(amount); requestRender(); }
 
     /**
      * Chooses how the saturation slider measures each pixel's difference from
@@ -759,8 +654,7 @@
      * @throws {RangeError} For an unknown measure.
      */
     function setSatMeasure(measure) {
-      if (!(measure in SAT_MEASURES)) throw new RangeError(`Unknown saturation measure "${measure}"`);
-      satMeasure = measure;
+      sliders.satMeasure = toSatMeasure(measure);
       syncRadio("satMeasure", measure);
       requestRender();
     }
@@ -808,9 +702,10 @@
       get activeModel() { return activeModel; },
       get ready() { return ready; },
       get framesPainted() { return framesPainted; },
-      get contrast() { return contrast; },
-      get saturation() { return saturation; },
-      get satMeasure() { return satMeasure; },
+      get contrast() { return sliders.contrast; },
+      get saturation() { return sliders.saturation; },
+      get satMeasure() { return sliders.satMeasure; },
+      get sliders() { return { ...sliders }; },
       get stats() { return stats; },
       setPaint, setModel, setContrast, setSaturation, setSatMeasure, play,
       start() { return (ready ??= startPainting().catch(fail)); }
@@ -819,8 +714,8 @@
 
   // ---------------------------------------------------------------- export
   window.VideoShaderRender = {
-    createVideoRenderer, VideoShader, VideoStats, oklab,
+    createVideoRenderer, VideoShader, VideoStats,
     hexToLinear, linearToHex,
-    SAT_MEASURES, NOTICES, DEFAULT_GLSL_URL, HOLD_DRIFT, SEEK_DRIFT, MAX_RATE_NUDGE
+    NOTICES, DEFAULT_GLSL_URL, HOLD_DRIFT, SEEK_DRIFT, MAX_RATE_NUDGE
   };
 })();

@@ -24,10 +24,13 @@
  *     ▼
  *   texA            RGBA8, N x N, one per photo ("entry")
  *     │  P0  DECODE   sRGB -> linear light                    -> lin
+ *     │  P0a ADJUST   contrast + saturation sliders            -> adj
+ *     │               (skipped when both are centred: lin is used as-is)
  *     │  P0b BLUR     separable Gaussian, v2 only              -> tmp -> blurred
  *     │  P1  ANALYSE  light minus white light, per pixel       -> entry.theArray
  *     ▼
- *   theArray        RGBA16F, N x N, one per photo; cached until the model changes
+ *   theArray        RGBA16F, N x N, one per photo; cached until the model or
+ *                   the sliders change
  *     │  P2  RENDER   wall paint lit by theArray               -> drawing buffer
  *     ▼
  *   WebGL canvas    copied with drawImage, in the same task, into a tile's 2D canvas
@@ -35,8 +38,13 @@
  * N is fixed for every surface because DECODE reads texA with texelFetch at
  * gl_FragCoord, and RENDER walks theArray with row * W + col: texA, the
  * scratch targets, theArray and the drawing buffer must all be N x N.
- * Memory at N = 1024: 3 shared RGBA16F targets (24 MB) + 6 x (RGBA8 texA
- * 4 MB + RGBA16F theArray 8 MB) + drawing buffer ≈ 135 MB.
+ * Memory at N = 1024: 4 shared RGBA16F targets (32 MB) + 6 x (RGBA8 texA
+ * 4 MB + RGBA16F theArray 8 MB) + drawing buffer ≈ 145 MB.
+ *
+ * SLIDERS: ADJUST compares each pixel with the medians of ALL photos of the
+ * room (LightStats): the median luminance (the contrast's fixed point) and the
+ * median difference from white (the saturation's reference). The same code
+ * drives videoShaderRenderer.html, where the medians cover every video frame.
  *
  * --------------------------------------------------------------------------
  * TILES (one per time of day). The page builds this markup:
@@ -53,7 +61,7 @@
  *   the walls are. renderer[data-room] picks which room's photos are visible.
  *
  * STATE (inside createRenderer): activePaintColor / activeModel / activeRoom
- * are what the visitor asked for. shownRoom is the room actually on screen;
+ * and the slider settings are what the visitor asked for. shownRoom is the room actually on screen;
  * it lags activeRoom while the new room's photos load and analyse.
  *
  * LIFECYCLE
@@ -63,6 +71,9 @@
  *                 prepare other rooms when idle.
  *   paint/model   setPaint() / setModel() -> scheduleRender() (one per frame)
  *                 -> flush() -> staggered fades.
+ *   sliders       setContrast() / setSaturation() / setSatMeasure() ->
+ *                 scheduleRender(false) -> flush() -> instant repaint, so the
+ *                 walls follow the thumb while dragging.
  *   room switch   setRoom() -> prepareRoom() -> settle fades -> view
  *                 transition around swap(): data-room + instant repaint().
  *   context loss  WallShader rebuilds itself on webglcontextrestored, then
@@ -342,7 +353,7 @@
    * doesn't say which one it is, hence this list.
    * @type {Set<string>}
    */
-  const INT_UNIFORMS = new Set(["src", "lightLin", "sharpLin", "theArray", "W", "H", "model", "dither"]);
+  const INT_UNIFORMS = new Set(["src", "lightLin", "sharpLin", "theArray", "W", "H", "model", "dither", "satMeasure"]);
 
   /**
    * Settings merge from the source file (shallow, plus a one-level merge of
@@ -370,7 +381,7 @@
    * @property {WebGLTexture} texA  The photo, downscaled to N x N, RGBA8 sRGB.
    * @property {{ tex: WebGLTexture, fbo: WebGLFramebuffer }} theArray  The P1
    *   output for this photo (RGBA16F, NEAREST).
-   * @property {string | null} analysedFor  Cache key ("model|sigma") of the
+   * @property {string | null} analysedFor  Cache key ("model|sigma|adjustment") of the
    *   analysis currently in theArray, or null when it must be re-run.
    */
 
@@ -379,7 +390,7 @@
    * whole pipeline for any number of photos.
    *
    * Resources:
-   *   shared     lin, tmp, blurred: RGBA16F scratch targets, reused by every
+   *   shared     lin, adj, tmp, blurred: RGBA16F scratch targets, reused by every
    *              analyse(). They only hold data during a single analyse() call.
    *   per entry  texA (RGBA8) + theArray (RGBA16F). Keeping theArray per photo
    *              means that changing the paint only costs one RENDER pass.
@@ -403,9 +414,11 @@
      * @param {{ onRestored: () => void, onError: (err: unknown) => void }} hooks
      *   Called after a lost context has been rebuilt, or when rebuilding fails.
      * @throws {PaintError} "webgl" when WebGL2 or float render targets are missing.
+     * @throws {PaintError} "load" when the shader file has no ADJUST section.
      * @throws {Error} When a shader fails to compile or link.
      */
     constructor(n, sources, hooks) {
+      if (!sources.adjust) throw new PaintError("load", "The shader file has no //@@ADJUST section.");
       this.n = n;
       this.#sources = sources;
       this.#hooks = hooks;
@@ -456,10 +469,13 @@
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
       this.progs = { decode: makeProgram(gl, src.vert, src.decode), blur: makeProgram(gl, src.vert, src.blur),
-                     analyse: makeProgram(gl, src.vert, src.analyse), render: makeProgram(gl, src.vert, src.render) };
+                     analyse: makeProgram(gl, src.vert, src.analyse), render: makeProgram(gl, src.vert, src.render),
+                     adjust: makeProgram(gl, src.vert, src.adjust) };
       // Shared scratch targets; each entry keeps only texA and its own theArray.
-      // lin, tmp and blurred are LINEAR-filtered so BLUR's spaced taps interpolate.
+      // lin, adj, tmp and blurred are LINEAR-filtered so BLUR's spaced taps
+      // interpolate (BLUR reads lin or adj).
       this.lin = makeTarget(gl, n, n, true);
+      this.adj = makeTarget(gl, n, n, true);
       this.tmp = makeTarget(gl, n, n, true);
       this.blurred = makeTarget(gl, n, n, true);
       // VERT reads no attributes, but WebGL2 still wants a VAO bound to draw.
@@ -554,45 +570,53 @@
      * Cache key for theArray's contents. It covers everything the analysis
      * depends on except the photo itself, which is fixed per entry.
      * @param {"v1" | "v2"} model
+     * @param {Adjustment | null} adjust
      */
-    #key(model) { return model + "|" + this.#sigma().toFixed(3); }
+    #key(model, adjust) {
+      return [model, this.#sigma().toFixed(3), ...(adjust ? Object.values(adjust) : [])].join("|");
+    }
 
-    // P0 decode -> P0b blur (v2) -> P1 theArray
+    // P0 decode -> P0a adjust (sliders) -> P0b blur (v2) -> P1 theArray
     /**
-     * Fills entry.theArray for `model`. The shared targets hold whichever
-     * photo was analysed last, so the decode is redone for every call; it is
-     * one cheap pass.
+     * Fills entry.theArray for `model` and `adjust`. The shared targets hold
+     * whichever photo was analysed last, so the decode is redone for every
+     * call; it is one cheap pass.
      * @param {Entry} entry
      * @param {"v1" | "v2"} model
+     * @param {Adjustment | null} [adjust=null]  null = leave the light as decoded.
      */
-    analyse(entry, model) {
+    analyse(entry, model, adjust = null) {
       const gl = this.gl, P = this.progs, isV1 = model === "v1", sigma = this.#sigma();
       this.#draw(P.decode, this.lin, entry.texA, { src: 0 });
-      let lightTex = this.lin.tex;
+      // `light` is the unblurred linear light that BLUR and ANALYSE read.
+      let light = this.lin;
+      if (adjust) { this.#draw(P.adjust, this.adj, this.lin.tex, { src: 0, ...adjust }); light = this.adj; }
+      let lightTex = light.tex;
       // Only v2 blurs. Below about 0.3 px the Gaussian is effectively a single tap.
       if (!isV1 && sigma >= 0.3) {
-        this.#draw(P.blur, this.tmp, this.lin.tex, { src: 0, dir: [1, 0], sigma });
+        this.#draw(P.blur, this.tmp, light.tex, { src: 0, dir: [1, 0], sigma });
         this.#draw(P.blur, this.blurred, this.tmp.tex, { src: 0, dir: [0, 1], sigma });
         lightTex = this.blurred.tex;
       }
       // lightLin on unit 0, sharpLin on unit 1
-      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lin.tex); gl.activeTexture(gl.TEXTURE0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, light.tex); gl.activeTexture(gl.TEXTURE0);
       this.#draw(P.analyse, entry.theArray, lightTex, { lightLin: 0, sharpLin: 1, model: isV1 ? 1 : 2 });
-      // Unbind unit 1 so `lin` is never left bound while the next analyse()
+      // Unbind unit 1 so lin/adj is never left bound while the next analyse()
       // renders into it (a feedback loop WebGL rejects). TEXTURE0 stays the
       // active unit, as #draw() assumes.
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null); gl.activeTexture(gl.TEXTURE0);
-      entry.analysedFor = this.#key(model);
+      entry.analysedFor = this.#key(model, adjust);
     }
 
     /**
-     * Re-runs analyse() only if theArray was built for a different model or
-     * blur, or has been invalidated by a context restore.
+     * Re-runs analyse() only if theArray was built for a different model,
+     * blur or adjustment, or has been invalidated by a context restore.
      * @param {Entry} entry
      * @param {"v1" | "v2"} model
+     * @param {Adjustment | null} [adjust=null]
      */
-    ensureAnalysed(entry, model) {
-      if (entry.analysedFor !== this.#key(model)) this.analyse(entry, model);
+    ensureAnalysed(entry, model, adjust = null) {
+      if (entry.analysedFor !== this.#key(model, adjust)) this.analyse(entry, model, adjust);
     }
 
     // P2: light the wall, then copy the drawing buffer out in the same task
@@ -680,6 +704,158 @@
     const lin = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
     const [r, g, b] = hexToRgb(hex).map(lin);
     return Math.round(100 * (0.2126729 * r + 0.7151522 * g + 0.0721750 * b));
+  }
+
+  // ======================================================================
+  // Sliders — LightStats and the ADJUST settings (shared with
+  // js/videoShaderRender.js)
+  // ======================================================================
+
+  /** Encoded sRGB byte -> linear, as a lookup table (LightStats runs it per pixel). */
+  const LINEAR_LUT = Float32Array.from({ length: 256 }, (_, i) => {
+    const c = i / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+
+  /**
+   * Linear sRGB -> Oklab, the same matrices as oklab() in the shader's COMMON.
+   * @returns {[number, number, number]} [L, a, b].
+   */
+  function oklab(r, g, b) {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+  }
+
+  /**
+   * How the saturation slider measures a pixel's "difference from pure white":
+   *   "full"    Oklab distance from white: lightness and colour both count, so
+   *             dark pixels count as far from white even when they are grey.
+   *   "chroma"  Oklab chroma only: just the colour cast, whatever the lightness.
+   * @typedef {"full" | "chroma"} SatMeasure
+   */
+  /** SatMeasure -> the shader's satMeasure uniform. */
+  const SAT_MEASURES = { full: 0, chroma: 1 };
+
+  /**
+   * Histogram resolution, and the largest values counted: Oklab distance from
+   * white (black is 1.0) and Oklab chroma (the sRGB gamut reaches about 0.32).
+   */
+  const STATS_BINS = 1024, DE_MAX = 1.5, CHROMA_MAX = 0.4;
+
+  /**
+   * Medians over every pixel of a set of images (a room's photos, or a video's
+   * frames), which ADJUST compares each pixel with. add() draws an image into
+   * a small CPU canvas and adds its pixels to three histograms.
+   */
+  class LightStats {
+    #ctx;
+    #lum = new Float64Array(STATS_BINS);
+    #de = new Float64Array(STATS_BINS);
+    #chroma = new Float64Array(STATS_BINS);
+
+    /**
+     * @param {number} w  Measuring size: images are downscaled to w x h first.
+     * @param {number} h
+     */
+    constructor(w, h) {
+      // willReadFrequently keeps this canvas on the CPU, so getImageData is cheap.
+      this.#ctx = Object.assign(document.createElement("canvas"), { width: w, height: h })
+        .getContext("2d", { willReadFrequently: true });
+      this.#ctx.imageSmoothingQuality = "high";
+      /** Median relative luminance (linear, 0..1). Placeholder until add(). */
+      this.pivotY = 0.18;
+      /** Median Oklab distance from pure white. Placeholder until add(). */
+      this.medianDE = 0.5;
+      /** Median Oklab chroma. Placeholder until add(). */
+      this.medianChroma = 0.02;
+    }
+
+    /**
+     * Adds every pixel of `source` and updates the medians.
+     * @param {CanvasImageSource} source  Decoded, same-origin.
+     */
+    add(source) {
+      const ctx = this.#ctx, { width: w, height: h } = ctx.canvas;
+      ctx.drawImage(source, 0, 0, w, h);
+      const px = ctx.getImageData(0, 0, w, h).data;
+      for (let p = 0; p < px.length; p += 4) {
+        const r = LINEAR_LUT[px[p]], g = LINEAR_LUT[px[p + 1]], b = LINEAR_LUT[px[p + 2]];
+        const [L, A, B] = oklab(r, g, b);
+        this.#lum[binOf(0.2126729 * r + 0.7151522 * g + 0.0721750 * b, 1)]++;
+        this.#de[binOf(Math.hypot(1 - L, A, B), DE_MAX)]++;
+        this.#chroma[binOf(Math.hypot(A, B), CHROMA_MAX)]++;
+      }
+      this.pivotY = medianOf(this.#lum, 1);
+      this.medianDE = medianOf(this.#de, DE_MAX);
+      this.medianChroma = medianOf(this.#chroma, CHROMA_MAX);
+    }
+  }
+
+  /** Histogram bin of `v` in 0..max (out-of-range values go to the end bins). */
+  function binOf(v, max) { return Math.min(STATS_BINS - 1, Math.max(0, Math.floor(v / max * STATS_BINS))); }
+
+  /** Median of a histogram over 0..max, as the centre of the bin holding it. */
+  function medianOf(hist, max) {
+    let total = 0;
+    for (const n of hist) total += n;
+    for (let i = 0, run = 0; i < STATS_BINS; i++) {
+      run += hist[i];
+      if (run >= total / 2) return (i + 0.5) / STATS_BINS * max;
+    }
+    return max / 2;
+  }
+
+  /**
+   * The settings ADJUST runs with (uniform names in the .glsl file).
+   * @typedef {Object} Adjustment
+   * @property {number} contrastK   Exponent on luminance; 1 = unchanged.
+   * @property {number} satAmount   -1..1; 0 = unchanged.
+   * @property {0 | 1} satMeasure   SAT_MEASURES value.
+   * @property {number} pivotY      LightStats#pivotY.
+   * @property {number} medianDiff  LightStats#medianDE or #medianChroma, per satMeasure.
+   */
+
+  /**
+   * The ADJUST settings for the sliders, or null when both amounts are 0
+   * (ADJUST is then skipped, so the output is exactly as without sliders).
+   * @param {{ contrast: number, saturation: number, satMeasure: SatMeasure }} sliders
+   *   contrast and saturation in -1..1. Contrast maps to a luminance exponent
+   *   of 0.5..2 around the median luminance.
+   * @param {LightStats} stats
+   * @returns {Adjustment | null}
+   */
+  function makeAdjustment({ contrast, saturation, satMeasure }, stats) {
+    if (contrast === 0 && saturation === 0) return null;
+    return {
+      contrastK: 2 ** contrast, satAmount: saturation, satMeasure: SAT_MEASURES[satMeasure], pivotY: stats.pivotY,
+      medianDiff: satMeasure === "chroma" ? stats.medianChroma : stats.medianDE
+    };
+  }
+
+  /**
+   * Validates a slider amount.
+   * @param {number} amount
+   * @returns {number} `amount`, clamped to -1..1.
+   * @throws {RangeError} When it isn't a finite number.
+   */
+  function toAmount(amount) {
+    const n = Number(amount);
+    if (!Number.isFinite(n)) throw new RangeError(`Expected a number from -1 to 1, got "${amount}"`);
+    return Math.max(-1, Math.min(1, n));
+  }
+
+  /**
+   * @param {string} measure
+   * @returns {SatMeasure}
+   * @throws {RangeError} For an unknown measure.
+   */
+  function toSatMeasure(measure) {
+    if (!Object.hasOwn(SAT_MEASURES, measure)) throw new RangeError(`Unknown saturation measure "${measure}"`);
+    return /** @type {SatMeasure} */ (measure);
   }
 
   // ======================================================================
@@ -830,7 +1006,7 @@
    * @property {HTMLElement} elements.app         Gets the .is-painted class.
    * @property {HTMLElement} elements.renderer    Holds the figure.scene tiles; its
    *   data-room is the initially shown room.
-   * @property {HTMLFieldSetElement} elements.modelFieldset  Disabled on failure.
+   * @property {HTMLFieldSetElement} elements.controls  Tinting algo + sliders; disabled on failure.
    * @property {HTMLElement} elements.notice      role="status" region for notices.
    * @property {HTMLElement} elements.readoutHex  Shows the active paint's hex.
    * @property {HTMLElement} elements.readoutLrv  Shows the active paint's LRV.
@@ -848,6 +1024,12 @@
    * @property {(hex: string) => Promise<void>} setPaint   See setPaint().
    * @property {(room: string) => Promise<void>} setRoom   See setRoom().
    * @property {(model: "v1" | "v2") => Promise<void>} setModel  See setModel().
+   * @property {(amount: number) => Promise<void>} setContrast    See setContrast().
+   * @property {(amount: number) => Promise<void>} setSaturation  See setSaturation().
+   * @property {(measure: SatMeasure) => Promise<void>} setSatMeasure  See setSatMeasure().
+   * @property {{ contrast: number, saturation: number, satMeasure: SatMeasure }} sliders
+   *   Current slider settings (a copy).
+   * @property {Record<string, LightStats>} stats  Each prepared room's medians.
    * @property {() => Promise<void>} start  Boots paint previews (call once; repeat
    *   calls return the same promise).
    * @property {Promise<void> | null} ready  start()'s promise; settles after boot
@@ -865,7 +1047,7 @@
    */
   function createRenderer(options) {
     const { rooms, elements } = options;
-    const { app, renderer, modelFieldset, notice, readoutHex, readoutLrv } = elements;
+    const { app, renderer, controls, notice, readoutHex, readoutLrv } = elements;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
     const notices = Object.assign({}, NOTICES, options.notices);
 
@@ -878,6 +1060,12 @@
     let activeRoom = renderer.dataset.room;
     /** Lighting model: "v2" (perceptual) or "v1" (HSV). Written by setModel(). */
     let activeModel = options.initialModel || "v2";
+    /**
+     * Slider settings, written by setContrast / setSaturation / setSatMeasure.
+     * Amounts are -1..1; 0 (the default) leaves the photos' light as it is.
+     * @type {{ contrast: number, saturation: number, satMeasure: SatMeasure }}
+     */
+    const sliders = { contrast: 0, saturation: 0, satMeasure: "full" };
     /**
      * Room actually on screen. Changes only inside setRoom()'s swap(), once the
      * room's photos are loaded and analysed, so rendering never waits on a load.
@@ -907,7 +1095,7 @@
      * Checks the radio in group `name` whose value is `value` and unchecks the
      * others. If no radio matches (e.g. a paint that isn't in the palette), all
      * of them end up unchecked.
-     * @param {"paint" | "room" | "model"} name
+     * @param {"paint" | "room" | "model" | "satMeasure"} name
      * @param {string} value
      */
     function syncRadio(name, value) {
@@ -941,11 +1129,16 @@
      * @type {Record<string, Entry[]>}
      */
     const roomEntries = {}, roomLoading = {};
+    /** @type {Record<string, LightStats>} roomStats[room]: medians over all the room's photos. */
+    const roomStats = {};
+
+    /** The ADJUST settings for `room`'s photos, or null when the sliders are centred. */
+    function adjustmentFor(room) { return makeAdjustment(sliders, roomStats[room]); }
 
     /**
-     * Gets a room ready to show: waits for its photos to decode, uploads them
-     * (once per room, memoised), and makes sure every entry is analysed for the
-     * CURRENT activeModel. That last step runs on every call, which is how a
+     * Gets a room ready to show: waits for its photos to decode, measures their
+     * LightStats and uploads them (once per room, memoised), and makes sure
+     * every entry is analysed for the CURRENT activeModel and sliders. That last step runs on every call, which is how a
      * hidden room catches up lazily after a model toggle.
      * If loading fails, the memo is cleared so a later call can retry.
      * @param {string} room  Room key.
@@ -961,10 +1154,14 @@
         await Promise.all(imgs.map(img => img.decode().catch(() => {
           if (!img.naturalWidth) throw new PaintError("load", `Couldn't load ${img.src}`);
         })));
+        // Medians over all of the room's photos, measured at 1/16 of N
+        const stats = new LightStats(N / 16, N / 16);
+        for (const img of imgs) stats.add(img);
+        roomStats[room] = stats;
         return (roomEntries[room] = imgs.map(img => shader.createEntry(img)));
       })().catch(err => { delete roomLoading[room]; throw err; });
       return roomLoading[room].then(list => {
-        for (const entry of list) shader.ensureAnalysed(entry, activeModel);
+        for (const entry of list) shader.ensureAnalysed(entry, activeModel, adjustmentFor(room));
         return list;
       });
     }
@@ -973,32 +1170,42 @@
 
     /** @type {Promise<void> | null} The pending frame's promise, shared by every caller in that frame. */
     let frame = null;
+    /** Whether the pending frame fades; true if any caller in that frame asked to. */
+    let frameAnimates = false;
     /**
-     * Requests a paint/model update on the next animation frame. Any number of
-     * calls before that frame collapse into one flush(), which uses the state as
-     * it is then (so the last setPaint wins).
+     * Requests a paint/model/slider update on the next animation frame. Any
+     * number of calls before that frame collapse into one flush(), which uses
+     * the state as it is then (so the last setPaint wins).
+     * @param {boolean} [animate=true]  false = repaint instantly (the sliders,
+     *   so the walls follow the thumb while dragging).
      * @returns {Promise<void>} Resolves when that frame's fades have finished.
      */
-    function scheduleRender() {      // coalesced per animation frame
-      frame ??= new Promise(resolve => requestAnimationFrame(() => { frame = null; resolve(flush()); }));
+    function scheduleRender(animate = true) {      // coalesced per animation frame
+      frameAnimates ||= animate;
+      frame ??= new Promise(resolve => requestAnimationFrame(() => {
+        const fades = frameAnimates;
+        frame = null; frameAnimates = false;
+        resolve(flush(fades));
+      }));
       return frame;
     }
 
     /**
-     * Renders the shown room with the current paint and model, fading the tiles
-     * in one after the other (each STAGGER_MS after the previous one), or
-     * instantly with reduced motion. Does nothing before painting starts or
-     * while the context is lost.
+     * Renders the shown room with the current paint, model and sliders, fading
+     * the tiles in one after the other (each STAGGER_MS after the previous one),
+     * or instantly with reduced motion or `fades` false. Does nothing before
+     * painting starts or while the context is lost.
+     * @param {boolean} fades
      * @returns {Promise<void[]> | undefined}
      */
-    function flush() {
+    function flush(fades) {
       if (!painting || shader.lost) return;
       try {
-        const list = roomEntries[shownRoom];
-        const animate = !reducedMotion.matches;
+        const list = roomEntries[shownRoom], adjust = adjustmentFor(shownRoom);
+        const animate = fades && !reducedMotion.matches;
         return Promise.all(tiles.map((tile, i) => {
-          // Re-analyse the visible photos if the model has changed since the last render.
-          shader.ensureAnalysed(list[i], activeModel);
+          // Re-analyse the visible photos if the model or sliders changed since the last render.
+          shader.ensureAnalysed(list[i], activeModel, adjust);
           return tile.present(shader, list[i], activeModel, activePaintColor, animate, i * STAGGER_MS);
         }));
       } catch (err) { fail(err); }
@@ -1010,9 +1217,9 @@
      * @throws {Error} GL errors, which callers route to fail().
      */
     function repaint() {             // instant, no fade
-      const list = roomEntries[shownRoom];
+      const list = roomEntries[shownRoom], adjust = adjustmentFor(shownRoom);
       tiles.forEach((tile, i) => {
-        shader.ensureAnalysed(list[i], activeModel);
+        shader.ensureAnalysed(list[i], activeModel, adjust);
         tile.present(shader, list[i], activeModel, activePaintColor, false);
       });
     }
@@ -1023,7 +1230,7 @@
      *    that as fatal; wait for webglcontextrestored (onRestored retries the
      *    boot if needed).
      *  - Anything else: stop painting, remove the masks (visitors see the plain
-     *    photos), disable the shader toggle and show a notice. Unexpected errors
+     *    photos), disable the controls and show a notice. Unexpected errors
      *    are also logged.
      * @param {unknown} err
      */
@@ -1032,7 +1239,7 @@
       painting = false;
       app.classList.remove("is-painted");
       for (const tile of tiles) tile.settle();
-      modelFieldset.disabled = true;
+      controls.disabled = true;
       const kind = err instanceof PaintError ? err.kind : "error";
       if (kind === "error" || kind === "webgl") console.warn("shaderSceneRender:", err);
       showNotice(kind);
@@ -1078,6 +1285,46 @@
       activeModel = model;
       syncRadio("model", model);
       return scheduleRender();
+    }
+
+    /**
+     * Contrast of the photos' light before the paint is applied. 0 = as shot;
+     * -1..1 maps to a luminance exponent of 0.5..2 around the room's median
+     * luminance. The walls update instantly on the next frame.
+     * @param {number} amount  -1..1 (clamped).
+     * @returns {Promise<void>}
+     * @throws {RangeError} When `amount` isn't a number.
+     */
+    function setContrast(amount) {
+      sliders.contrast = toAmount(amount);
+      return scheduleRender(false);
+    }
+
+    /**
+     * Saturation of the photos' light before the paint is applied. 0 = as shot;
+     * each pixel's chroma is scaled by 2^(amount x its difference from white /
+     * the room's median difference), so -1 flattens and +1 strengthens the
+     * colour of the light, most where it differs most from white.
+     * @param {number} amount  -1..1 (clamped).
+     * @returns {Promise<void>}
+     * @throws {RangeError} When `amount` isn't a number.
+     */
+    function setSaturation(amount) {
+      sliders.saturation = toAmount(amount);
+      return scheduleRender(false);
+    }
+
+    /**
+     * Chooses how the saturation slider measures each pixel's difference from
+     * pure white (see SatMeasure). No visible change while saturation is 0.
+     * @param {SatMeasure} measure
+     * @returns {Promise<void>}
+     * @throws {RangeError} For an unknown measure.
+     */
+    function setSatMeasure(measure) {
+      sliders.satMeasure = toSatMeasure(measure);
+      syncRadio("satMeasure", measure);
+      return scheduleRender(false);
     }
 
     /** Bumped on every setRoom call; only the latest call may swap rooms. */
@@ -1150,7 +1397,7 @@
       } while (room !== shownRoom);
       for (const tile of tiles) tile.seed(room);
       painting = true;
-      modelFieldset.disabled = false;
+      controls.disabled = false;
       notice.textContent = "";
       app.classList.add("is-painted");
       whenIdle(() => {
@@ -1177,8 +1424,10 @@
       get activeRoom() { return activeRoom; },
       get activeModel() { return activeModel; },
       get ready() { return ready; },
+      get sliders() { return { ...sliders }; },
+      get stats() { return { ...roomStats }; },
       size: N,
-      setPaint, setRoom, setModel,
+      setPaint, setRoom, setModel, setContrast, setSaturation, setSatMeasure,
       start() { return (ready ??= startPainting().catch(fail)); },
       // Pixel [r, g, b] of a tile's painted canvas; tile = its data-time or index,
       // x and y in canvas pixels (0..size-1, top-left origin)
@@ -1215,6 +1464,7 @@
     createRenderer, loadShaders,
     WallShader, SceneTile, PaintError,
     makeProgram, makeTexture, makeTarget, INT_UNIFORMS, decodeImage,
+    LightStats, makeAdjustment, toAmount, toSatMeasure, oklab, SAT_MEASURES,
     normalizeHex, hexToRgb, hexToHsl, lrv,
     N, FADE_MS, STAGGER_MS, SHADER_DEFAULTS, NOTICES, DEFAULT_GLSL_URL
   };

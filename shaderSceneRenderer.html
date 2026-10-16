@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Paint color visualizer</title>
+<title>T4 Scene Visualization</title>
 <style>
   :root {
     --booth: #ECECEC;      /* container surface */
@@ -47,7 +47,7 @@
     grid-template-rows: auto auto auto 1fr auto;
     grid-template-areas:
       "rooms   model"
-      "about   about"
+      "about   model"
       "intro   intro"
       "stage   stage"
       "palette palette";
@@ -77,7 +77,8 @@
   .room input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 4px; border-radius: 2px; }
 
   /* ---- about: three paragraphs, side by side ------------------------------- */
-  .about { grid-area: about; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 28px; }
+  /* Up to three columns; fewer when the tuning controls leave less room */
+  .about { grid-area: about; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15em), 1fr)); gap: 12px 28px; }
   .about p { margin: 0; font-size: 16px; line-height: 1.5; color: var(--slate); max-width: 60ch; }
   .about .about__lead { font-size: 18.9px; line-height: 1.4; font-weight: 600; color: var(--graphite); }
 
@@ -96,9 +97,13 @@
   .notice b { font-weight: 600; }
   .notice a { color: inherit; }
 
-  /* ---- shader toggle ------------------------------------------------------- */
-  .model { grid-area: model; justify-self: end; align-self: center; }
-  .model__row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  /* ---- tuning controls: shader toggle, then the video-light sliders --------- */
+  .controls {
+    grid-area: model; justify-self: end; align-self: start;
+    width: min(100%, 320px);
+    display: flex; flex-direction: column; gap: 22px;
+  }
+  .model__row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
   .model__label { color: var(--slate); }
   .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--rule); border-radius: 3px; }
   .segmented label { position: relative; cursor: pointer; }
@@ -106,8 +111,24 @@
   .segmented label:hover span { color: var(--graphite); }
   .segmented input:checked + span { background: var(--graphite); color: var(--booth); }
   .segmented input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 2px; }
-  .model:disabled { opacity: .45; }
-  .model:disabled label { cursor: default; }
+  .controls:disabled { opacity: .45; }
+  .controls:disabled label, .controls:disabled input { cursor: default; }
+
+  .sliders { display: flex; flex-direction: column; gap: 18px; }
+  .sliders__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 14px; }
+  .sliders__title { color: var(--slate); }
+  .sliders__reset {
+    padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
+    text-decoration: underline; text-underline-offset: 0.14em; cursor: pointer;
+  }
+  .sliders__reset:disabled { color: var(--slate); text-decoration: none; cursor: default; opacity: .6; }
+  .slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .slider__label { font-weight: 600; }
+  .slider__value { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
+  .slider__input { display: block; width: 100%; margin: 6px 0 0; accent-color: var(--graphite); cursor: pointer; }
+  .slider__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
+  .slider__hint { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--slate); }
+  .slider__measure { margin-top: 10px; }
 
   /* ---- scenes -------------------------------------------------------------- */
   .stage { grid-area: stage; }
@@ -200,8 +221,8 @@
       grid-template-rows: auto auto auto 1fr;
       grid-template-areas:
         "rooms   rooms   model"
-        "about   about   about"
-        "intro   intro   intro"
+        "about   about   model"
+        "intro   intro   model"
         "palette stage   stage";
     }
     .palette { align-self: start; }
@@ -219,10 +240,10 @@
       grid-template-rows: auto auto 1fr;
       grid-template-areas:
         "rooms   about   model"
-        "intro   intro   intro"
+        "intro   intro   model"
         "palette stage   stage";
     }
-    .rooms, .model { align-self: start; }
+    .rooms { align-self: start; }
   }
 
   /* Tall enough to fit: definite height, tiles shrink, nothing scrolls */
@@ -246,7 +267,7 @@
         ".     ."
         ".     .";
     }
-    .model { align-self: start; }
+    .controls { justify-self: stretch; width: auto; }
     .stage { display: contents; }
     .renderer { grid-area: 4 / 1 / 6 / 3; grid-template: subgrid / subgrid; }
     .palette { grid-area: 5 / 2 / 6 / 3; align-self: start; }
@@ -265,7 +286,7 @@
     .room span { font-size: 21.6px; }
     .about { grid-template-columns: minmax(0, 1fr); }
     .intro__text { font-size: 16px; }
-    .model { justify-self: auto; align-self: flex-start; }
+    .controls { justify-self: auto; align-self: stretch; width: auto; }
     .renderer { grid-template-columns: minmax(0, 1fr); }
     .palette {
       position: sticky;
@@ -314,15 +335,57 @@
     <p class="notice" id="notice" role="status"></p>
   </div>
 
-  <fieldset class="model" id="model">
-    <legend class="vh">Shader model</legend>
-    <div class="model__row">
-      <span class="model__label" aria-hidden="true">Tinting algo</span>
-      <div class="segmented">
-        <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
-        <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
+  <fieldset class="controls" id="controls">
+    <legend class="vh">Tinting controls</legend>
+
+    <fieldset class="model">
+      <legend class="vh">Shader model</legend>
+      <div class="model__row">
+        <span class="model__label" aria-hidden="true">Tinting algo</span>
+        <div class="segmented">
+          <label><input class="vh" type="radio" name="model" value="v2" checked><span>Perceptual (v2)</span></label>
+          <label><input class="vh" type="radio" name="model" value="v1"><span>HSV (v1)</span></label>
+        </div>
       </div>
-    </div>
+    </fieldset>
+
+    <fieldset class="sliders">
+      <legend class="vh">Photo adjustments, applied before the paint color</legend>
+      <div class="sliders__head">
+        <span class="sliders__title" aria-hidden="true">Photo light, before tinting</span>
+        <button class="sliders__reset" type="button" id="resetSliders" disabled>Reset</button>
+      </div>
+
+      <div class="slider">
+        <div class="slider__head">
+          <label class="slider__label" for="contrast">Contrast</label>
+          <output class="slider__value" id="contrastValue" for="contrast">0</output>
+        </div>
+        <input class="slider__input" type="range" id="contrast" name="contrast"
+          min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="contrastHint">
+        <div class="slider__ends" aria-hidden="true"><span>Flatter</span><span>As shot</span><span>Punchier</span></div>
+        <p class="slider__hint" id="contrastHint">Spreads the photos' light and shade apart or pulls them together, around the room's median brightness.</p>
+      </div>
+
+      <div class="slider">
+        <div class="slider__head">
+          <label class="slider__label" for="saturation">Saturation</label>
+          <output class="slider__value" id="saturationValue" for="saturation">0</output>
+        </div>
+        <input class="slider__input" type="range" id="saturation" name="saturation"
+          min="-100" max="100" step="1" value="0" list="sliderCentre" aria-describedby="saturationHint">
+        <div class="slider__ends" aria-hidden="true"><span>Muted</span><span>As shot</span><span>Richer</span></div>
+        <p class="slider__hint" id="saturationHint">Strength of the light's color. Each pixel changes in proportion to how far it is from pure white, compared with the median pixel of the room's photos.</p>
+        <div class="model__row slider__measure">
+          <span class="model__label" id="satMeasureLabel">Difference from white</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="satMeasureLabel">
+            <label><input class="vh" type="radio" name="satMeasure" value="full" checked><span>Color + brightness</span></label>
+            <label><input class="vh" type="radio" name="satMeasure" value="chroma"><span>Color only</span></label>
+          </div>
+        </div>
+      </div>
+      <datalist id="sliderCentre"><option value="0"></option></datalist>
+    </fieldset>
   </fieldset>
 
   <div class="stage">
@@ -467,19 +530,20 @@ renderer.innerHTML = TIMES.map(time => `
 const sceneRenderer = createRenderer({
   rooms: ROOMS,
   initialPaint: PAINT_COLORS[0],
-  initialModel: "v2",                       // matches the checked model radio
+  // The checked radio, which the browser may have restored on a reload
+  initialModel: document.querySelector('input[name="model"]:checked').value,
   glslUrl: "glsl/shaderSceneRender.glsl",
   elements: {
     app: document.getElementById("app"),
     renderer,
-    modelFieldset: document.getElementById("model"),
+    controls: document.getElementById("controls"),
     notice: document.getElementById("notice"),
     readoutHex: document.getElementById("readoutHex"),
     readoutLrv: document.getElementById("readoutLrv")
   }
 });
 
-// One delegated listener for all three radio groups. "change" fires for
+// One delegated listener for all the radio groups. "change" fires for
 // clicks, taps and arrow keys alike, but not when the renderer checks a
 // radio itself.
 document.addEventListener("change", e => {
@@ -487,9 +551,42 @@ document.addEventListener("change", e => {
   if (t.name === "paint") sceneRenderer.setPaint(t.value);
   else if (t.name === "room") sceneRenderer.setRoom(t.value);
   else if (t.name === "model") sceneRenderer.setModel(t.value);
+  else if (t.name === "satMeasure") sceneRenderer.setSatMeasure(t.value);
 });
 
-// Scripting and testing handle: setPaint / setRoom / setModel, ready, sample().
+// ---------------------------------------------------------------- sliders
+// Same controls as videoShaderRenderer.html. Each runs -100..100; the centre
+// (0) leaves the photos as shot. "input" fires while dragging, so the walls
+// follow the thumb. Values within SNAP of the centre snap to it, so the
+// default is easy to find again.
+const SNAP = 3;
+const SLIDERS = {
+  contrast:   amount => sceneRenderer.setContrast(amount),
+  saturation: amount => sceneRenderer.setSaturation(amount)
+};
+const sliderInputs = Object.keys(SLIDERS).map(name => document.getElementById(name));
+const resetButton = document.getElementById("resetSliders");
+
+/** Applies one slider's value: snap, show it, send it to the renderer (as -1..1). */
+function applySlider(input) {
+  let value = Math.round(+input.value);
+  if (Math.abs(value) <= SNAP) value = 0;
+  input.value = value;
+  document.getElementById(`${input.id}Value`).textContent = value > 0 ? `+${value}` : value < 0 ? `\u2212${-value}` : "0";
+  SLIDERS[input.name](value / 100);
+  resetButton.disabled = sliderInputs.every(i => +i.value === 0);
+}
+
+document.addEventListener("input", e => { if (sliderInputs.includes(e.target)) applySlider(e.target); });
+resetButton.addEventListener("click", () => {
+  for (const input of sliderInputs) { input.value = 0; applySlider(input); }
+});
+// The browser may restore slider positions and toggles on a reload; start from them.
+sliderInputs.forEach(applySlider);
+sceneRenderer.setSatMeasure(document.querySelector('input[name="satMeasure"]:checked').value);
+
+// Scripting and testing handle: setPaint / setRoom / setModel / setContrast /
+// setSaturation / setSatMeasure, sliders, stats, ready, sample().
 window.sceneRenderer = sceneRenderer;
 
 // Boot: load the shaders and photos, then fade the paint in (or fall back to
