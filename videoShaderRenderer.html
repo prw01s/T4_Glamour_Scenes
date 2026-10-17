@@ -67,7 +67,7 @@
   .video__layer { position: absolute; inset: 0; }
   .video__layer--bottom { z-index: 1; }
   .video__layer--top { z-index: 2; }
-  .video__media, .video__canvas {
+  .video__media, .video__canvas, .video__copy {
     position: absolute; inset: 0;
     display: block; width: 100%; height: 100%;
     object-fit: cover;
@@ -77,9 +77,17 @@
      video (which shows the same frame, unpainted). */
   .video__canvas { opacity: 0; transition: opacity 360ms cubic-bezier(.2, 0, 0, 1); }
   .is-painted .video__canvas { opacity: 1; }
-  /* Masks are opt-in: until .is-painted, visitors see the plain video.
+  /* Until .is-painted, visitors see the plain top video (also the fallback).
+     While painting, the top layer is .video__copy instead: a canvas holding a
+     copy of the SOURCE video's current frame, drawn in the same callback that
+     paints the walls, so the unpainted parts and the painted walls always show
+     the same frame. (Two <video> elements decode independently: even with
+     playback-rate correction, 16 % of displayed frames differed by one.)
      Black in the mask is wall, so luminance mode hides exactly the walls. */
-  .is-painted .video__media--top {
+  .video__copy { display: none; }
+  .is-painted .video__media--top { visibility: hidden; }
+  .is-painted .video__copy {
+    display: block;
     mask-image: var(--mask);
     mask-repeat: no-repeat;
     mask-position: center;
@@ -191,7 +199,10 @@ document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
 // The video frame (the structure js/videoShaderRender.js expects):
 //  - bottom: the processed source video, covered by the canvas that shows its
 //    painted frames (the canvas size is set from the video by the engine).
-//  - top: the unprocessed copy; --mask is applied only under .is-painted.
+//  - top: the unprocessed copy, masked under .is-painted. It is the second
+//    <video> until painting starts (and if it fails); while painting it is a
+//    canvas copy of the source video's own frames, so both layers always show
+//    the same frame.
 // Both videos loop, are muted and play inline; neither shows controls.
 const media = `src="${VIDEO.src}" muted loop autoplay playsinline preload="auto" disablepictureinpicture`;
 document.getElementById("stage").innerHTML = `
@@ -201,8 +212,9 @@ document.getElementById("stage").innerHTML = `
       <canvas class="video__canvas" id="paintCanvas"></canvas>
     </div>
     <div class="video__layer video__layer--top">
-      <video class="video__media video__media--top" id="topVideo" ${media} aria-label="${VIDEO.label}"
-        style="--mask: url('${VIDEO.mask}')"></video>
+      <video class="video__media video__media--top" id="topVideo" ${media} aria-label="${VIDEO.label}"></video>
+      <canvas class="video__copy" id="frameCopy" role="img" aria-label="${VIDEO.label}"
+        style="--mask: url('${VIDEO.mask}')"></canvas>
     </div>
   </div>`;
 
@@ -220,6 +232,7 @@ const videoRenderer = createVideoRenderer({
     source: document.getElementById("sourceVideo"),
     top: document.getElementById("topVideo"),
     canvas: document.getElementById("paintCanvas"),
+    copy: document.getElementById("frameCopy"),
     controls: document.getElementById("controls"),
     notice: document.getElementById("notice")
   }

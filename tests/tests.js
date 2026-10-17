@@ -86,11 +86,14 @@
     }
     return `max error ${Math.max(...worst).toFixed(5)} (linear)`;
   });
-  await test("unit: paintSpec bounce scale (white = 1, darker < 1)", () => {
-    near(P.paintSpec("#ffffff").bounceScale, 1, 1e-6, "white");
-    const navy = P.paintSpec("#2f3d4c").bounceScale;
-    assert(navy > 0 && navy < 0.1, `navy ${navy}`);
-    return `navy ${navy.toFixed(4)}`;
+  await test("unit: spectral interreflection (white = 1, dark paint returns less, saturated paint more saturated)", () => {
+    // The fitted spectrum of white tops out at 0.999 (a sigmoid never reaches 1): 0.3 % low, far below one 8-bit level.
+    near(P.paintSpec("#ffffff").bounceRGB, [1, 1, 1], 5e-3, "white");
+    const navy = P.paintSpec("#2f3d4c").bounceRGB;
+    assert(Math.max(...navy) < 0.01, `navy ${fmt(navy)}`);
+    const red = P.paintSpec("#7a1f2b"), a = red.albedo, b = red.bounceRGB;
+    assert(b[0] / Math.max(b[1], 1e-6) > a[0] / a[1], "bounce not more saturated than the paint");
+    return `navy ${fmt(navy)}; burgundy R/G ${(a[0] / a[1]).toFixed(1)} -> ${(b[0] / Math.max(b[1], 1e-6)).toFixed(1)}`;
   });
 
   /** A canvas filled by fn(x, y) -> [r, g, b] (0..255) or [r, g, b, a]. */
@@ -170,8 +173,8 @@
   const encoded = lin => lin.map(v => Math.round(255 * P.encodeSrgb(Math.min(1, Math.max(0, v)))));
 
   /** Analyses + renders `image` (all wall unless a mask is given) and returns the pipeline. */
-  function run(pipe, image, { model, hex, mask = null, sliders = null }) {
-    const src = pipe.createSource(pipe.rw, pipe.rh, { mipmaps: pipe.rw > pipe.aw });
+  function run(pipe, image, { model, hex, mask = null, sliders = null, srgb = false }) {
+    const src = pipe.createSource(pipe.rw, pipe.rh, { mipmaps: pipe.rw > pipe.aw, srgb });
     pipe.upload(src, image);
     const maskImg = mask || makeImage(4, 4, () => [0, 0, 0]);
     const m = pipe.createSource(...P.sizeOf(maskImg), { mipmaps: true });
@@ -206,9 +209,9 @@
     const pipe = makePipeline(64, 64), S = P.SHADER_DEFAULTS.v3, out = [];
     for (const hex of PALETTE) {
       const { stats } = run(pipe, white, { model: "v3", hex });
-      const spec = P.paintSpec(hex), a = spec.albedo, rho = P.luminance(a);
+      const spec = P.paintSpec(hex), a = spec.albedo;
       const ob = S.ambient * S.bounceShare * stats.meanWallY / stats.refY;
-      const expected = a.map(v => v * (1 - ob) + v * (v / rho) * ob * spec.bounceScale);
+      const expected = a.map((v, i) => v * (1 - ob) + spec.bounceRGB[i] * ob);
       near(readPixel(pipe, 32, 32), encoded(expected), 2, hex);
       out.push(`${hex}→${fmt(readPixel(pipe, 32, 32))}`);
     }
@@ -254,6 +257,31 @@
     assert(more.some((v, i) => v !== base[i]), "contrast had no effect");
     return `centred ${fmt(zero)}, contrast +100 ${fmt(more)}`;
   });
+  await test("gpu: photos are resized in linear light (sRGB source + RESAMPLE)", () => {
+    // A 1-pixel black/white checker, resized to half size: the right answer is
+    // half the LIGHT (encoded 188), not half the encoded value (128).
+    const img = makeImage(128, 128, (x, y) => ((x + y) & 1) ? [255, 255, 255] : [0, 0, 0]);
+    const pipe = makePipeline(64, 64);
+    const src = pipe.createSource(64, 64, { srgb: true });
+    pipe.upload(src, img);
+    const gl = pipe.gl, fbo = gl.createFramebuffer(), px = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src.tex, 0);
+    gl.readPixels(32, 32, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.deleteFramebuffer(fbo);
+    return near(px[0], 188, 2, "encoded value of the resized checker");
+  });
+  await test("unit: LightStats point-samples (no averaging of encoded values)", () => {
+    // Random black/white pixels: half the light. Averaging encoded values
+    // would turn them into grey 128 (0.216 linear); point samples keep ~0.5.
+    let seed = 1;
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const img = makeImage(256, 256, () => rand() < 0.5 ? [255, 255, 255] : [0, 0, 0]);
+    const s = new P.LightStats(64, 64); s.add(img);
+    assert(Math.abs(s.meanWallY - 0.5) < 0.1, `mean ${s.meanWallY}`);
+    return `mean wall luminance ${s.meanWallY.toFixed(3)}`;
+  });
+
   if (P.supportsWideGamut()) {
     await test("gpu: Display P3 output encodes sRGB colours in P3", () => {
       const pipe = makePipeline(64, 64, true);

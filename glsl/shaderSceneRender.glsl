@@ -13,6 +13,7 @@
 //
 //     VERT     the vertex shader shared by every pass (complete program)
 //     COMMON   the fragment prelude: #version, precision, output, helpers
+//     RESAMPLE      resizes a photo in linear light (on upload, once)
 //     DECODE   P0   source image -> linear light + wall coverage
 //     ADJUST   P0a  the Contrast / Saturation sliders (skipped when centred)
 //     BLUR     P0b  separable Gaussian, weighted by wall coverage (v2, v3)
@@ -32,7 +33,9 @@
 //     of which uniforms are ints; only the names must match.
 //
 // PIPELINE (per image; A = analysis size, R = render size, R >= A)
-//   source (RGBA8 sRGB, R, mipmapped) --DECODE--> lin (A, rgb = linear light,
+//   photo --RESAMPLE--> source (SRGB8_ALPHA8, R, mipmapped; the GPU decodes it
+//   to linear light when sampled, so every resize and mip level averages
+//   LIGHT, not encoded values) --DECODE--> lin (A, rgb = linear light,
 //   a = wall coverage) [--ADJUST--> adj] --BLUR x2--> blurred --ANALYSE-->
 //   light map (RGBA16F, A) --RENDER--> canvas drawing buffer (R, 8-bit)
 //   The light is analysed at A, where noise and compression artefacts are
@@ -236,9 +239,22 @@ vec3 planckRGB(float T, float duv) {
 vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.0, 0.0); return c / lum(c); }
 
 
+//@@RESAMPLE
+// Resizes a photo to the render size, in linear light. src is an SRGB8_ALPHA8
+// texture of the full-size photo (mipmapped), so texture() returns LINEAR
+// light, averaged over the pixel footprint; the target is SRGB8_ALPHA8 too, so
+// the GPU encodes the result back to sRGB on write. Resizing encoded values
+// instead (as a 2D canvas does) darkens every high-contrast edge: measured on
+// these photos, 1 % of 8x8 blocks come out 38-60 % too dark, and those blocks
+// are exactly the shadow and sunbeam edges.
+uniform sampler2D src;
+uniform vec2 size;
+void main() { fragOut = vec4(texture(src, gl_FragCoord.xy / size).rgb, 1.0); }
+
 //@@DECODE
 // P0: source image -> linear light, at the analysis size.
-// src       the photo or video frame (RGBA8, encoded sRGB). It may be larger
+// src       the photo (SRGB8_ALPHA8: already linear when sampled, srcLinear = 1)
+//           or video frame (RGBA8, encoded: srcLinear = 0). It may be larger
 //           than this pass's target (R > A); it is then mipmapped, and
 //           texture() picks the right level from the pixel footprint, so the
 //           downscale is a proper average rather than a sparse sample.
@@ -252,9 +268,11 @@ vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.
 uniform sampler2D src;
 uniform sampler2D wallMask;
 uniform vec2 size;
+uniform int srcLinear;
 void main() {
   vec2 uv = gl_FragCoord.xy / size;
-  vec3 c = toLinear(texture(src, uv).rgb);
+  vec3 t = texture(src, uv).rgb;
+  vec3 c = srcLinear == 1 ? t : toLinear(t);
   vec4 m = texture(wallMask, uv);
   float wall = 1.0 - m.r * m.a;
   fragOut = vec4(c, wall);
@@ -414,7 +432,8 @@ void main() {
 //
 // Shared uniforms
 //   lightMap     ANALYSE's output (LINEAR filtering)
-//   src          the source image at full resolution (v3's detail layer)
+//   src          the source image at full resolution (v3's detail layer);
+//   srcLinear    1 when src is an sRGB texture (sampled as linear light)
 //   size         render size in pixels
 //   model        MODEL_V1 / V2 / V3
 //   dither       1 = add triangular dither before 8-bit quantisation
@@ -426,7 +445,7 @@ void main() {
 uniform sampler2D lightMap;
 uniform sampler2D src;
 uniform vec2  size;
-uniform int   model, dither;
+uniform int   model, dither, srcLinear;
 uniform vec3  albedo;
 uniform mat3  toOutput;
 uniform float warmCCT, warmTint, skyCCT, adaptation, fill, bounce, glow, shadowCurve;
@@ -565,7 +584,7 @@ uniform vec3  whiteNorm;           // per-channel scale: the reference blackbody
 uniform vec3  paintFix;            // per-channel correction: the paint under that reference -> exactly albedo
 uniform mat3  adaptMat;            // scene-wide CAT16 adaptation, linear sRGB -> linear sRGB (built in JS)
 uniform float oldBounce;           // light (in reference-white units) that the ORIGINAL white walls bounced
-uniform float bounceScale;         // how much more/less the new paint bounces, from its reflectance
+uniform vec3  bounceRGB;           // the new paint's multi-bounce interreflection, relative to white walls (JS, spectral)
 uniform float detailGamma;         // strength of the detail layer (x the contrast exponent)
 
 // Planck's law: spectral radiance of a blackbody at temperature T (kelvin),
@@ -599,8 +618,9 @@ vec3 renderV3(vec4 L, vec3 sharp) {
   // blackbody spectrum at that temperature, integrated against the CIE
   // observer, both alone (the light) and times the paint's reflectance (the
   // light reflected by the paint). This is the spectral product a 3-channel
-  // RGB multiply only approximates; it matters most for saturated paints
-  // under warm light.
+  // RGB multiply only approximates: against a 1 nm CIE reference, an RGB
+  // multiply errs by up to dE_OK 0.044 at 2000 K (saturated paints, warm
+  // light) and this integral by at most 0.009 (tests/reference_check.py).
   vec2  xy = uv2xy(L.yz);
   float T  = clamp(mccamyCCT(xy), 1667.0, 25000.0);
   vec3 lightXYZ = vec3(0.0), paintXYZ = vec3(0.0);
@@ -623,11 +643,12 @@ vec3 renderV3(vec4 L, vec3 sharp) {
 
   // 4. Interreflection. The photo's light already includes light bounced off
   // its own (white) walls, oldBounce. Remove that and add what the NEW paint
-  // bounces instead: tinted by the paint, and scaled by its reflectance
-  // (bounceScale): dark paint returns less light into the room, so its
-  // shadows are deeper; light paint fills them.
-  vec3 c = paintLit * tint * max(E - oldBounce, 0.0)
-         + albedo * (albedo / max(lum(albedo), 1e-4)) * (oldBounce * bounceScale);
+  // bounces instead (bounceRGB, computed spectrally in JS): light that has
+  // bounced between painted walls is filtered by the paint at every bounce,
+  // rho(l) * rho(l) / (1 - f rho(l)) per wavelength, so it is both dimmer for
+  // dark paints (deeper shadows) and more saturated than the paint itself, as
+  // in a real room painted one colour.
+  vec3 c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
 
   // 5. Colour constancy for the whole scene (not per pixel), then highlight
   // roll-off and gamut mapping.
@@ -653,7 +674,8 @@ void main() {
   } else if (model == MODEL_V2) {
     c = renderV2(texture(lightMap, uv).xyz, albedo);
   } else {
-    c = renderV3(texture(lightMap, uv), toLinear(texture(src, uv).rgb));
+    vec3 s = texture(src, uv).rgb;
+    c = renderV3(texture(lightMap, uv), srcLinear == 1 ? s : toLinear(s));
   }
   // To the output primaries (Display P3 or sRGB; both use the sRGB curve).
   vec3 enc = toSRGB(clamp(toOutput * c, 0.0, 1.0));

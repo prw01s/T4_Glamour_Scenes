@@ -179,12 +179,12 @@
   // ======================================================================
 
   /** Section names expected in the .glsl file (see its header). */
-  const SECTIONS = ["VERT", "COMMON", "DECODE", "ADJUST", "BLUR", "ANALYSE", "RENDER"];
+  const SECTIONS = ["VERT", "COMMON", "RESAMPLE", "DECODE", "ADJUST", "BLUR", "ANALYSE", "RENDER"];
 
   /**
    * Complete GLSL sources, ready to compile: the vertex shader and one
    * fragment shader per pass (COMMON + "\n" + its section).
-   * @typedef {{ vert: string, decode: string, adjust: string, blur: string, analyse: string, render: string }} ShaderSources
+   * @typedef {{ vert: string, resample: string, decode: string, adjust: string, blur: string, analyse: string, render: string }} ShaderSources
    */
 
   /**
@@ -199,7 +199,9 @@
   async function loadShaders(url) {
     let text;
     try {
-      const res = await fetch(url);
+      // no-cache: revalidate with the server, so an edited shader file is
+      // never paired with a stale cached copy.
+      const res = await fetch(url, { cache: "no-cache" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       text = await res.text();
     } catch (err) {
@@ -216,7 +218,7 @@
       if (!(name in parts)) throw new PaintError("load", `${url} has no //@@${name} section`);
     const fragment = name => parts.COMMON + "\n" + parts[name];
     return {
-      vert: parts.VERT, decode: fragment("DECODE"), adjust: fragment("ADJUST"),
+      vert: parts.VERT, resample: fragment("RESAMPLE"), decode: fragment("DECODE"), adjust: fragment("ADJUST"),
       blur: fragment("BLUR"), analyse: fragment("ANALYSE"), render: fragment("RENDER")
     };
   }
@@ -491,7 +493,11 @@
   /**
    * CIE 1931 2-degree colour-matching functions, from the multi-lobe Gaussian
    * fit of Wyman, Sloan & Shirley 2013 ("Simple Analytic Approximations to the
-   * CIE XYZ Color Matching Functions"), accurate to about 1 % of the peak.
+   * CIE XYZ Color Matching Functions"). Checked against the CIE 1931 1 nm
+   * table: within 1.4 % (x̄), 0.8 % (ȳ) and 1.3 % (z̄) of each curve's peak.
+   * With 20 nm sampling, paints rendered by v3 stay within ΔE_OK 0.009 (worst
+   * case, 2000 K) of a 1 nm, D65-referenced spectral reference (README,
+   * "Verification"; tests/reference_check.py).
    * @param {number} l  Wavelength in nm.
    * @returns {[number, number, number]} [x̄, ȳ, z̄].
    */
@@ -510,7 +516,14 @@
     return 1 / (l ** 5 * (Math.exp(14387.77 / (l * T)) - 1));
   }
 
-  /** Correlated colour temperature from CIE 1931 xy (McCamy 1992; mccamyCCT() in the shader). */
+  /**
+   * Correlated colour temperature from CIE 1931 xy (McCamy 1992; mccamyCCT()
+   * in the shader). Checked against blackbodies: within 1.2 % from 1800 to
+   * 10000 K, but 7 % low at 15000 K and 22 % low at 25000 K. That doesn't
+   * matter for v3, which corrects to the exact measured chromaticity after
+   * using the CCT for the spectrum's shape: even for 25000 K skylight the
+   * rendered paints stay within ΔE_OK 0.008 of the reference.
+   */
   function mccamyCCT(x, y) {
     const n = (x - 0.3320) / (0.1858 - y);
     return ((449 * n + 3525) * n + 6823.3) * n + 5520.33;
@@ -590,7 +603,8 @@
    * @property {number[]} albedo       Linear sRGB (all models).
    * @property {Float32Array} paintW   v3: reflectance x CMF at each wavelength.
    * @property {number[]} paintFix     v3: per-channel exactness correction (≈ 1).
-   * @property {number} bounceScale    v3: interreflection relative to the original white walls.
+   * @property {number[]} bounceRGB    v3: the light this paint returns by interreflection,
+   *                                   relative to the original white walls (white paint = 1,1,1).
    */
 
   /** @type {Map<string, PaintSpec>} paintSpec() cache (paint fades create many). */
@@ -609,13 +623,20 @@
     const paintW = new Float32Array(SPECTRAL_N * 3);
     for (let i = 0; i < SPECTRAL_N * 3; i++) paintW[i] = refl[Math.floor(i / 3)] * CMF[i];
     const fitted = reflectedRGB(refl);
-    // Radiosity: indirect light grows as ρ / (1 - f ρ); relative to the
-    // original white walls (ρ = 1).
-    const f = SHADER_DEFAULTS.v3.interreflection, rho = Math.max(luminance(albedo), 1e-4);
+    // Interreflection (radiosity), per wavelength: indirect light that has
+    // bounced between walls of reflectance ρ grows as ρ / (1 - f ρ), and the
+    // wall reflects it once more: ρ² / (1 - f ρ). Relative to the original
+    // white walls (ρ = 1: 1 / (1 - f)). Computed under the reference light;
+    // the bounce is a small share of the total, so its light colour matters
+    // far less than the paint's filtering, which this captures. Per
+    // wavelength, repeated filtering makes bounced light MORE saturated than
+    // the paint: an RGB estimate differs by up to ΔE_OK 0.06 for saturated paints.
+    const f = SHADER_DEFAULTS.v3.interreflection;
+    const bounceRGB = reflectedRGB(refl.map(r => (1 - f) * r * r / (1 - f * r)));
     spec = {
       hex, albedo, paintW,
       paintFix: albedo.map((v, i) => fitted[i] > 1e-6 ? v / fitted[i] : 1),
-      bounceScale: (rho / (1 - f * rho)) * (1 - f)
+      bounceRGB
     };
     if (paintCache.size > 256) paintCache.clear();
     paintCache.set(hex, spec);
@@ -640,7 +661,7 @@
       albedo: a.albedo.map((v, i) => lerp(v, b.albedo[i])),
       paintW: a.paintW.map((v, i) => lerp(v, b.paintW[i])),
       paintFix: a.paintFix.map((v, i) => lerp(v, b.paintFix[i])),
-      bounceScale: lerp(a.bounceScale, b.bounceScale)
+      bounceRGB: a.bounceRGB.map((v, i) => lerp(v, b.bounceRGB[i]))
     };
   }
 
@@ -675,7 +696,10 @@
 
   /**
    * Statistics of a set of images (a room's photos, or a video's frames),
-   * measured on the CPU from small copies:
+   * measured on the CPU from point samples on a w x h grid. Point sampling
+   * (no smoothing) keeps every sample a real pixel: averaging neighbours in a
+   * 2D canvas happens on ENCODED values, which measured 2-5 % low on mean
+   * wall brightness and up to 4 % low on the reference white at 64 x 64.
    *
    *   over ALL pixels (the sliders compare each pixel with these)
    *     pivotY        median luminance (the Contrast slider's fixed point)
@@ -702,7 +726,7 @@
     #maskCache = new WeakMap();
 
     /**
-     * @param {number} w  Measuring size: images are downscaled to w x h first.
+     * @param {number} w  Sampling grid: w x h point samples per image.
      * @param {number} h
      */
     constructor(w, h) {
@@ -717,7 +741,7 @@
         // willReadFrequently keeps this canvas on the CPU, so getImageData is cheap.
         this.#ctx = Object.assign(document.createElement("canvas"), { width: this.#w, height: this.#h })
           .getContext("2d", { willReadFrequently: true });
-        this.#ctx.imageSmoothingQuality = "high";
+        this.#ctx.imageSmoothingEnabled = false;     // point samples (see the class comment)
       }
       this.#ctx.clearRect(0, 0, this.#w, this.#h);
       this.#ctx.drawImage(src, 0, 0, this.#w, this.#h);
@@ -936,6 +960,9 @@
    * @property {number} w
    * @property {number} h
    * @property {boolean} mipmaps
+   * @property {boolean} srgb  SRGB8_ALPHA8: sampled as LINEAR light, resized and
+   *   mipmapped in linear light (photos). Otherwise RGBA8, sampled as encoded
+   *   values (video frames, which are used 1:1, and masks).
    * @property {TexImageSource | null} image  Last upload, kept for restores.
    * @property {number} version  Bumped on every upload (part of the analysis key).
    *
@@ -970,6 +997,7 @@
   /**
    * Owns one WebGL2 context on `canvas` and runs every pass:
    *
+   *   upload()   photos: RESAMPLE to the render size R, in linear light
    *   analyse()  DECODE (source -> lin, at the analysis size A)
    *              ADJUST (sliders, optional) -> BLUR x2 (v2, v3) -> ANALYSE
    *              -> the job's light map
@@ -1045,7 +1073,7 @@
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
-      this.progs = Object.fromEntries(["decode", "adjust", "blur", "analyse", "render"]
+      this.progs = Object.fromEntries(["resample", "decode", "adjust", "blur", "analyse", "render"]
         .map(k => [k, makeProgram(gl, src.vert, src[k])]));
       this.scratch = Object.fromEntries(["lin", "adj", "tmp", "blurred", "raw"]
         .map(k => [k, makeTarget(gl, this.aw, this.ah)]));
@@ -1066,21 +1094,23 @@
     #build(h) {
       const gl = this.gl;
       if (h.kind === "lightMap") { h.target = makeTarget(gl, this.aw, this.ah); h.analysedFor = null; return; }
-      h.tex = makeTexture(gl, h.w, h.h, gl.RGBA8, gl.UNSIGNED_BYTE, h.mipmaps ? "mipmap" : "linear");
+      h.tex = makeTexture(gl, h.w, h.h, h.srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, gl.UNSIGNED_BYTE, h.mipmaps ? "mipmap" : "linear");
       if (h.image) this.#fill(h, h.image);
     }
 
     /**
-     * A source texture: a photo, a video frame or a mask. RGBA8 holding
-     * encoded sRGB; DECODE and RENDER convert to linear.
+     * A source texture: a photo, a video frame or a mask.
      * @param {number} w
      * @param {number} h
-     * @param {{ mipmaps?: boolean }} [o]  Mipmaps for sources larger than the
-     *   analysis size, so DECODE's downscale averages properly.
+     * @param {{ mipmaps?: boolean, srgb?: boolean }} [o]
+     *   mipmaps  for sources larger than the analysis size, so DECODE's
+     *            downscale averages properly.
+     *   srgb     store as SRGB8_ALPHA8 so every resize, mip level and filtered
+     *            sample is computed in linear light (see SourceHandle).
      * @returns {SourceHandle}
      */
-    createSource(w, h, { mipmaps = false } = {}) {
-      const handle = { kind: "source", tex: null, w, h, mipmaps, image: null, version: 0 };
+    createSource(w, h, { mipmaps = false, srgb = false } = {}) {
+      const handle = { kind: "source", tex: null, w, h, mipmaps, srgb, image: null, version: 0 };
       this.#build(handle);
       this.#handles.add(handle);
       return handle;
@@ -1104,7 +1134,8 @@
 
     /**
      * Uploads an image (photo, canvas, video element: its current frame) into
-     * a source. Images of another size are resized through a 2-D canvas.
+     * a source. Images of another size are resized: on the GPU in linear light
+     * for sRGB sources (RESAMPLE), otherwise through a 2-D canvas.
      * @param {SourceHandle} h
      * @param {TexImageSource} image  Same-origin, decoded / with a frame.
      * @throws {PaintError} "origin" when the pixels can't be read (file://).
@@ -1118,6 +1149,7 @@
     #fill(h, image) {
       const gl = this.gl;
       const [iw, ih] = sizeOf(image);
+      if (h.srgb && (iw !== h.w || ih !== h.h)) { this.#resample(h, image, iw, ih); return; }
       let data = image;
       if (iw !== h.w || ih !== h.h) {
         if (!this.#scratch) this.#scratch = document.createElement("canvas").getContext("2d");
@@ -1131,13 +1163,46 @@
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, h.tex);
-      try { gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, data); }
+      this.#texImage(data);
+      if (h.mipmaps) gl.generateMipmap(gl.TEXTURE_2D);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /** texSubImage2D of a whole image into the bound texture, with the file:// error mapped. */
+    #texImage(image) {
+      const gl = this.gl;
+      try { gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, image); }
       catch (err) {
         if (err && err.name === "SecurityError") throw new PaintError("origin", "The browser blocked reading the image's pixels.");
         throw err;
       }
-      if (h.mipmaps) gl.generateMipmap(gl.TEXTURE_2D);
-      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    /**
+     * Resizes `image` into sRGB source `h` in linear light: upload it full
+     * size as an SRGB8_ALPHA8 texture, build its mipmaps (the GPU averages
+     * light, not encoded values; verified on Apple M2 / ANGLE Metal), draw it
+     * at h's size with RESAMPLE into h (the sRGB target re-encodes), then
+     * mipmap h the same way. The full-size texture is freed right away.
+     */
+    #resample(h, image, iw, ih) {
+      const gl = this.gl;
+      const full = makeTexture(gl, iw, ih, gl.SRGB8_ALPHA8, gl.UNSIGNED_BYTE, "mipmap");
+      this.#texImage(image);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, h.tex, 0);
+      this.#draw(this.progs.resample, { fbo, w: h.w, h: h.h }, { src: full }, { size: [h.w, h.h] });
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(full);
+      if (h.mipmaps) {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, h.tex);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      }
     }
 
     /**
@@ -1190,7 +1255,7 @@
                    ...(adjust ? Object.values(adjust) : [])].join("|");
       if (lightMap.analysedFor === key) return;
       const P = this.progs, T = this.scratch, blurs = model !== "v1" && this.sigma >= 0.3;
-      this.#draw(P.decode, T.lin, { src: src.tex, wallMask: mask.tex }, { size: [this.aw, this.ah] });
+      this.#draw(P.decode, T.lin, { src: src.tex, wallMask: mask.tex }, { size: [this.aw, this.ah], srcLinear: src.srgb ? 1 : 0 });
       let light = T.lin;                                       // unblurred, adjusted
       if (adjust) { this.#draw(P.adjust, T.adj, { src: T.lin.tex }, adjust); light = T.adj; }
       let soft = light, raw = T.lin;                            // blurred: adjusted / unadjusted
@@ -1212,7 +1277,7 @@
     render({ lightMap, src, model, paint, scene, detailGamma }) {
       const S = SHADER_DEFAULTS;
       this.#draw(this.progs.render, null, { lightMap: lightMap.target.tex, src: src.tex }, {
-        size: [this.rw, this.rh], model: MODELS[model], dither: S.dither ? 1 : 0,
+        size: [this.rw, this.rh], model: MODELS[model], dither: S.dither ? 1 : 0, srcLinear: src.srgb ? 1 : 0,
         albedo: paint.albedo,
         toOutput: mat.toGL(this.outputSpace === "display-p3" ? SRGB_TO_P3 : mat.IDENTITY),
         // v1 / v2
@@ -1221,7 +1286,7 @@
         v1p: [S.v1.ambient, S.v1.shadowCurve, S.v1.warmth, S.v1.glow],
         // v3
         cmf: CMF, paintW: paint.paintW, whiteNorm: WHITE_NORM, paintFix: paint.paintFix,
-        adaptMat: scene.adaptMat, oldBounce: scene.oldBounce, bounceScale: paint.bounceScale, detailGamma
+        adaptMat: scene.adaptMat, oldBounce: scene.oldBounce, bounceRGB: paint.bounceRGB, detailGamma
       });
     }
   }

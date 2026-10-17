@@ -14,9 +14,9 @@
  * DATA FLOW (per photo; see LightPipeline in js/paintPipeline.js)
  *
  *   <img> photo (2048² sRGB JPEG)
- *     │  uploaded once, at the render size R (mipmapped)
+ *     │  uploaded once, resized to the render size R in linear light (mipmapped)
  *     ▼
- *   source          RGBA8, R x R
+ *   source          SRGB8_ALPHA8, R x R
  *     │  analyse(): DECODE -> [ADJUST] -> BLUR -> ANALYSE, at A = 1024
  *     ▼
  *   light map       RGBA16F, A x A, one per photo; cached until the model,
@@ -87,8 +87,8 @@
   const ANALYSIS_SIZE = 1024;
   /** Largest render size R (the photos are 2048²). */
   const MAX_RENDER_SIZE = 2048;
-  /** LightStats measure each photo at this size. */
-  const STATS_SIZE = 64;
+  /** LightStats point-sample each photo on a STATS_SIZE² grid (65 536 samples). */
+  const STATS_SIZE = 256;
   /** Paint fade duration, and the delay between successive tiles (morning -> noon -> night), in ms. */
   const FADE_MS = 360, STAGGER_MS = 70;
   /** Default location of the shader file, relative to the page. */
@@ -377,7 +377,8 @@
         const entries = imgs.map(img => {
           const stats = new LightStats(STATS_SIZE, STATS_SIZE);
           stats.add(img, maskImg);
-          const src = pipeline.createSource(n, n, { mipmaps: n > ANALYSIS_SIZE });
+          // sRGB: resized and mipmapped in linear light (see LightPipeline.upload)
+          const src = pipeline.createSource(n, n, { mipmaps: n > ANALYSIS_SIZE, srgb: true });
           pipeline.upload(src, img);
           return { img, src, stats, lightMap: pipeline.createLightMap(), scene: null };
         });

@@ -17,13 +17,21 @@
  *       video.video__media--source   the PROCESSED copy; its frames feed WebGL
  *       canvas.video__canvas         the painted frames, covering the source
  *     .video__layer--top
- *       video.video__media--top      the UNPROCESSED copy, masked under
- *                                    .is-painted so its walls are transparent
+ *       video.video__media--top      the UNPROCESSED copy: shown until painting
+ *                                    starts, and again if it fails
+ *       canvas.video__copy           while painting: a copy of the SOURCE
+ *                                    video's current frame, masked so its
+ *                                    walls are transparent
  *
- *   The canvas replaces the source video on screen. Where the mask is black
- *   (the walls), the top video is transparent and the painted canvas shows
- *   through. Without .is-painted the canvas is hidden and the top video shows
- *   unmasked, so a failure falls back to the plain video.
+ *   The painted canvas replaces the source video on screen. Where the mask is
+ *   black (the walls), the frame copy is transparent and the painted canvas
+ *   shows through. Both canvases are drawn from the same decoded frame, in
+ *   the same callback, so they always show the same frame. (The first
+ *   version masked the second <video> instead; two decoders drift, and even
+ *   with playback-rate correction 16 % of displayed frames differed by one.)
+ *   The second <video> is paused while painting. Without .is-painted the
+ *   canvases are hidden and the second video shows unmasked, so a failure
+ *   falls back to the plain video.
  *
  * --------------------------------------------------------------------------
  * DATA FLOW (per video frame; W x H = the video's own size, used for both
@@ -45,9 +53,9 @@
  * requestAnimationFrame; both pass the frame's timestamp, and a frame is never
  * rendered twice for the same timestamp.
  *
- * SYNC: the two <video> elements decode independently and would drift apart.
- * The source video leads. On every painted frame, the top video's playback
- * rate is nudged toward the source's position (or it seeks, if far off).
+ * SYNC: while painting, nothing needs syncing: both visible layers come from
+ * the source video's frames. When painting stops, the top video resumes from
+ * the source's position.
  *
  * PUBLIC API: window.VideoShaderRender.createVideoRenderer() returns a
  * VideoRenderer (see its typedef).
@@ -71,15 +79,8 @@
   /** Paint fade duration, in ms (as the photo page). */
   const FADE_MS = 360;
 
-  /** Drift between the two videos, in seconds, below which the top video plays at normal speed (≈ 1 frame at 30 fps). */
-  const HOLD_DRIFT = 1 / 30;
-  /** Drift above which the top video seeks instead of catching up gradually. */
-  const SEEK_DRIFT = 0.5;
-  /** Largest playback-rate change used to catch up (0.1 = 0.9x .. 1.1x). */
-  const MAX_RATE_NUDGE = 0.1;
-
-  /** VideoStats: frames are measured at 1/STATS_DOWNSCALE of their size... */
-  const STATS_DOWNSCALE = 20;
+  /** VideoStats: frames are point-sampled on a grid of 1/STATS_DOWNSCALE of their size... */
+  const STATS_DOWNSCALE = 8;
   /** ...once per STATS_BUCKET_S seconds of the video, until all are covered. */
   const STATS_BUCKET_S = 0.1;
 
@@ -93,7 +94,7 @@
   /**
    * LightStats over ALL frames of the video, not just the current one, so the
    * sliders' effect and v3's calibration don't flicker as the light changes.
-   * During the first loop, sample() adds the frame (at 1/STATS_DOWNSCALE size)
+   * During the first loop, sample() adds the frame (point-sampled at 1/STATS_DOWNSCALE size)
    * once per STATS_BUCKET_S of video time; once every slice has been seen it
    * does nothing. `version` counts the samples (scene settings depend on them).
    */
@@ -180,6 +181,7 @@
    * @property {HTMLVideoElement} elements.source  The processed video (frame source).
    * @property {HTMLVideoElement} elements.top     The unprocessed, masked video.
    * @property {HTMLCanvasElement} elements.canvas The painted frames.
+   * @property {HTMLCanvasElement} elements.copy   The unpainted frames (frame-locked top layer).
    * @property {HTMLFieldSetElement} elements.controls  Tinting algo + sliders; disabled on failure.
    * @property {HTMLElement} elements.notice       role="status" region for notices.
    */
@@ -209,7 +211,7 @@
    * @returns {VideoRenderer}
    */
   function createVideoRenderer(options) {
-    const { app, source, top, canvas, controls, notice } = options.elements;
+    const { app, source, top, canvas, copy, controls, notice } = options.elements;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
 
     // ------------------------------------------------------------ state
@@ -233,6 +235,8 @@
     let stats = null;
     /** GPU resources: the frame, the mask and the light map. */
     let src = null, mask = null, lightMap = null;
+    /** @type {CanvasRenderingContext2D | null} The frame-locked top layer. */
+    let copyCtx = null;
     /** v3 scene settings, and the stats version they were built from. */
     let scene = null, sceneVersion = -1;
     /** True once the canvas holds painted frames and .is-painted is on. */
@@ -279,8 +283,8 @@
 
     /**
      * Paints the canvas. With `newFrame`, first uploads the source video's
-     * current frame (the analysis then re-runs); otherwise reuses the frame
-     * already uploaded.
+     * current frame (the analysis then re-runs) and afterwards copies the same
+     * frame into the top layer; otherwise reuses the frame already uploaded.
      * @param {number} now  Frame timestamp (rVFC / rAF), or performance.now().
      * @param {boolean} newFrame
      */
@@ -295,6 +299,7 @@
         lightMap, src, model: activeModel, paint: paintAt(now), scene: currentScene(),
         detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1)
       });
+      if (newFrame) copyCtx.drawImage(source, 0, 0, copy.width, copy.height);
     }
 
     /** @type {number | null} Pending requestAnimationFrame id. */
@@ -312,29 +317,8 @@
       });
     }
 
-    /**
-     * Keeps the top video on the source video's frame. Both positions are read
-     * at the same instant, so any reporting lag cancels out. Drift is measured
-     * the short way round the loop point, then corrected by a small
-     * playback-rate change, or by a seek when it is large.
-     */
-    function syncTop() {
-      const d = source.duration, t = source.currentTime;
-      if (!(d > 0) || top.seeking) return;
-      if (source.paused !== top.paused) {
-        if (source.paused) top.pause(); else top.play().catch(() => {});
-      }
-      let drift = top.currentTime - t;
-      drift -= d * Math.round(drift / d);
-      let rate = 1;
-      if (Math.abs(drift) > SEEK_DRIFT) top.currentTime = t;
-      else if (Math.abs(drift) > HOLD_DRIFT) rate = 1 - Math.max(-MAX_RATE_NUDGE, Math.min(MAX_RATE_NUDGE, drift));
-      if (top.playbackRate !== rate) top.playbackRate = rate;
-    }
-
     /** onEveryFrame() callback for the source video. */
     function onFrame(now) {
-      syncTop();
       try { render(now, true); } catch (err) { fail(err); }
     }
 
@@ -348,6 +332,9 @@
       painting = false;
       fade = null;
       app.classList.remove("is-painted");
+      // The second video takes over: same position, playing.
+      if (isFinite(source.currentTime)) top.currentTime = source.currentTime;
+      if (!source.paused) top.play().catch(() => {});
       controls.disabled = true;
       const kind = err instanceof PaintError ? err.kind : "error";
       if (kind === "error" || kind === "webgl") console.warn("videoShaderRender:", err);
@@ -399,9 +386,9 @@
       requestRender();
     }
 
-    /** Starts both videos; needed only if the browser blocked autoplay. */
+    /** Starts the video(s); needed only if the browser blocked autoplay. */
     function play() {
-      for (const video of [source, top]) if (video.paused) video.play().catch(() => {});
+      for (const video of painting ? [source] : [source, top]) if (video.paused) video.play().catch(() => {});
     }
 
     // ------------------------------------------------------------ boot
@@ -413,8 +400,9 @@
      *  2. In parallel: load the shaders, decode the mask, wait for the first frame.
      *  3. Create the LightPipeline at the video's own size, its textures, and
      *     the VideoStats.
-     *  4. Paint the current frame, THEN add .is-painted. CSS switches the mask
-     *     on and fades the canvas in over the source video (the same frame,
+     *  4. Paint the current frame and copy it into the top layer, THEN add
+     *     .is-painted. CSS swaps the top video for the masked frame copy and
+     *     fades the painted canvas in over the source video (the same frame,
      *     unpainted), so the paint fades in over the original walls.
      *  5. Paint every new frame from now on.
      */
@@ -432,9 +420,12 @@
         pipeline.upload(mask, maskImg);
         lightMap = pipeline.createLightMap();
         stats = new VideoStats(source, maskImg);
+        Object.assign(copy, { width: size[0], height: size[1] });
+        copyCtx = copy.getContext("2d");
       }
       painting = true;
       render(performance.now(), true);
+      top.pause();                     // the frame copy replaces it (and saves a decoder)
       controls.disabled = false;
       notice.textContent = "";
       app.classList.add("is-painted");
@@ -460,6 +451,6 @@
   // ---------------------------------------------------------------- export
   window.VideoShaderRender = {
     createVideoRenderer, VideoStats,
-    DEFAULT_GLSL_URL, FADE_MS, HOLD_DRIFT, SEEK_DRIFT, MAX_RATE_NUDGE, STATS_DOWNSCALE, STATS_BUCKET_S
+    DEFAULT_GLSL_URL, FADE_MS, STATS_DOWNSCALE, STATS_BUCKET_S
   };
 })();
