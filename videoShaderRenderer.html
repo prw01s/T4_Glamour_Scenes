@@ -35,6 +35,8 @@
   /* ---- side column: intro, tinting algo, video sliders --------------------- */
   .side { grid-area: side; align-self: start; display: flex; flex-direction: column; gap: 28px; }
   .intro__text { margin: 0; font-size: 18px; color: var(--slate); }
+  .intro__text p { margin: 0 0 8px; }
+  .intro__text ul { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }
   .notice {
     margin: 0;
     padding: 10px 14px;
@@ -127,7 +129,13 @@
   <div class="stage" id="stage"></div>
 
   <aside class="side">
-    <p class="intro__text">The walls are repainted on every frame as the video plays, so the paint follows the light.</p>
+    <div class="intro__text">
+      <p>This T4 Glamour Scene Video demo serves two purposes:</p>
+      <ul>
+        <li>Confirms that the same tech we used to combine different room lighting conditions with paint colors for images also works with videos.</li>
+        <li>Provides examples of the sophisticated ways that we can programmatically and precisely optimize the color blending code. The controls below adjust the tinting algorithm in real time.</li>
+      </ul>
+    </div>
     <p class="notice" id="notice" role="status"></p>
 
     <!-- Tinting algo, Contrast / Saturation, Difference from white: built by js/tuningControls.js -->
@@ -171,7 +179,7 @@ const { lrv } = window.PaintPipeline;
  * paint on screen when the page loads.
  * @type {string[]}
  */
-const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#2f3d4c"];
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#607D84"];
 
 /**
  * The video and its wall mask (black = wall, same framing as the video).
