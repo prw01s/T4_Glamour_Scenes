@@ -173,17 +173,21 @@
   const encoded = lin => lin.map(v => Math.round(255 * P.encodeSrgb(Math.min(1, Math.max(0, v)))));
 
   /** Analyses + renders `image` (all wall unless a mask is given) and returns the pipeline. */
-  function run(pipe, image, { model, hex, mask = null, sliders = null, srgb = false }) {
+  function run(pipe, image, { model, hex, mask = null, sliders = null, srgb = false, reference = null }) {
     const src = pipe.createSource(pipe.rw, pipe.rh, { mipmaps: pipe.rw > pipe.aw, srgb });
     pipe.upload(src, image);
     const maskImg = mask || makeImage(4, 4, () => [0, 0, 0]);
     const m = pipe.createSource(...P.sizeOf(maskImg), { mipmaps: true });
     pipe.upload(m, maskImg);
     const stats = new P.LightStats(32, 32); stats.add(image, maskImg);
+    // v3's reference white comes from the whole set of images (a room's photos,
+    // a video's frames); `reference` adds a brighter one, like daylight frames.
+    let pool = stats;
+    if (reference) { const r = new P.LightStats(32, 32); r.add(reference, maskImg); pool = P.LightStats.combine([stats, r]); }
     const lightMap = pipe.createLightMap();
     const adjust = sliders ? P.makeAdjustment(sliders, stats) : null;
-    pipe.analyse({ src, mask: m, lightMap, model, adjust, refY: stats.refY });
-    pipe.render({ lightMap, src, model, paint: P.paintSpec(hex), scene: P.sceneSpec(stats, stats),
+    pipe.analyse({ src, mask: m, lightMap, model, adjust, refY: pool.refY });
+    pipe.render({ lightMap, src, model, paint: P.paintSpec(hex), scene: P.sceneSpec(stats, pool),
                   detailGamma: P.SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1) });
     return { pipe, stats };
   }
@@ -245,6 +249,21 @@
     assert(r > g && g > b, `warm side ${fmt([r, g, b])}`);
     assert(Math.abs(n[0] - n[2]) < Math.abs(r - b), "neutral side as warm as the warm side");
     return `warm side ${fmt([r, g, b])}, neutral side ${fmt(n)}`;
+  });
+  await test("gpu: in a dark room the paint stays dark (fill follows the scene's light)", () => {
+    // A uniformly dim room (encoded 30, ~1.3 % of white), as a night frame of
+    // a video whose daytime frames are white. A paint with LRV 40 must come
+    // out darker than the original white wall in every model: a fixed fill
+    // floor used to make it 3-4x brighter (glowing walls at night).
+    const dim = makeImage(64, 64, () => [30, 30, 30]);
+    const wallY = P.decodeSrgb(30 / 255), out = [];
+    for (const model of ["v1", "v2", "v3"]) {
+      const [r, g, b] = readPixel(run(makePipeline(64, 64), dim, { model, hex: "#a4aca6", reference: white }).pipe, 32, 32);
+      const y = P.luminance([r, g, b].map(v => P.decodeSrgb(v / 255)));
+      assert(y < wallY, `${model}: painted ${y.toFixed(4)} vs wall ${wallY.toFixed(4)}`);
+      out.push(`${model} ${(y / wallY).toFixed(2)}x`);
+    }
+    return "painted / original wall light: " + out.join(", ");
   });
   await test("gpu: sliders change the result, centred sliders change nothing", () => {
     const img = makeImage(64, 64, x => [120 + x, 110 + x, 100 + x]);

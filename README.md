@@ -95,7 +95,7 @@ light and apply it to the paint.
 | Light amount | HSV value | Brightest channel, plus a "glow" boost for coloured light | Relative luminance, calibrated to the room's reference white |
 | Light colour | HSV hue | A warm/cool estimate from the Oklab hue, mapped onto the blackbody curve (fixed 2700 K / 10000 K ends) | The **measured** chromaticity → colour temperature (McCamy) + exact tint correction |
 | Light × paint | RGB multiply | Linear-sRGB multiply | **Spectral**: blackbody spectrum × fitted paint reflectance, integrated against the CIE 1931 observer |
-| Bounce light | Constant floor | Fixed fill + paint-coloured bounce | Original white walls' bounce replaced by the paint's, computed spectrally over multiple bounces (radiosity) |
+| Bounce light | Constant floor (scaled down in dark scenes) | Fill + paint-coloured bounce (fill scaled down in dark scenes) | Original white walls' bounce replaced by the paint's, computed spectrally over multiple bounces (radiosity) |
 | Colour constancy | — | CAT16, per pixel, D = 0.35 | CAT16 toward the **scene's** white, D from CIECAM16 × 0.4 |
 | Fine detail | From the 1024 px light map | Smooth (blurred light map) | Brightness detail restored from the full-resolution image |
 | Highlights, gamut | Soft clip | Oklab roll-off + gamut mapping | Oklab roll-off + gamut mapping |

@@ -15,6 +15,7 @@
 //     COMMON   the fragment prelude: #version, precision, output, helpers
 //     RESAMPLE      resizes a photo in linear light (on upload, once)
 //     DECODE   P0   source image -> linear light + wall coverage
+//     MEAN     P0c  the image's mean wall light (one pixel), for the fill light
 //     ADJUST   P0a  the Contrast / Saturation sliders (skipped when centred)
 //     BLUR     P0b  separable Gaussian, weighted by wall coverage (v2, v3)
 //     ANALYSE  P1   light -> light map, in the active model's encoding
@@ -278,6 +279,31 @@ void main() {
   fragOut = vec4(c, wall);
 }
 
+//@@MEAN
+// P0c: the mean light on the walls of this image, as ONE pixel (a 1 x 1
+// target), so RENDER knows how bright the scene is as a whole without any
+// read-back to the CPU. Input: lin (rgb = linear light, a = wall coverage,
+// unadjusted). Output: rgb = wall-weighted mean linear light, a = the share
+// of the image that is wall. 32 x 32 point samples spread over the image
+// (unbiased; the light is smooth at that scale). With no wall in view, the
+// plain mean is used.
+// RENDER uses it so that fill / bounce light follows the scene's light level:
+// a room at dusk gets dusk-level fill, not daytime fill (see fillScale and
+// renderV3).
+uniform sampler2D src;
+void main() {
+  vec4 wall = vec4(0.0);
+  vec3 plain = vec3(0.0);
+  for (int y = 0; y < 32; y++) {
+    for (int x = 0; x < 32; x++) {
+      vec4 t = texture(src, (vec2(x, y) + 0.5) / 32.0);
+      wall += vec4(t.rgb * t.a, t.a);
+      plain += t.rgb;
+    }
+  }
+  fragOut = wall.a > 1.0 ? vec4(wall.rgb / wall.a, wall.a / 1024.0) : vec4(plain / 1024.0, 0.0);
+}
+
 //@@ADJUST
 // P0a: the Contrast and Saturation sliders adjust the light before it is
 // analysed. Input: src = lin. Output: the "adj" target (RGBA16F), which then
@@ -440,16 +466,29 @@ void main() {
 //   albedo       the paint's reflectance: its colour in linear sRGB
 //   toOutput     linear sRGB -> linear output primaries (identity for sRGB,
 //                or the sRGB -> Display P3 matrix); gamut tests use it
+//   frameMean    MEAN's one pixel: this image's mean wall light (linear)
+//   fillRefY     v1 / v2: below this mean wall luminance, their fill light
+//                shrinks in proportion (see fillScale)
 // v1 / v2 uniforms: see SHADER_DEFAULTS in js/paintPipeline.js.
 // v3 uniforms: see renderV3.
 uniform sampler2D lightMap;
 uniform sampler2D src;
+uniform sampler2D frameMean;
+uniform float fillRefY;
 uniform vec2  size;
 uniform int   model, dither, srcLinear;
 uniform vec3  albedo;
 uniform mat3  toOutput;
 uniform float warmCCT, warmTint, skyCCT, adaptation, fill, bounce, glow, shadowCurve;
 uniform vec4  v1p;            // ambient, shadowCurve, warmth, glow
+
+// v1 / v2's fill (ambient) light is a fixed share of WHITE light: tuned on
+// normally lit photos, it keeps shadowed walls from going black. In a scene
+// that is dark as a whole (the video at dusk and night), a fixed floor is
+// brighter than the room itself and the walls glow. Fill light comes from the
+// room's own light, so it scales with the scene's mean wall luminance below
+// fillRefY. (Every photo is above it, so they are unchanged.) Set in main().
+float fillScale = 1.0;
 
 // ---- previous version, kept for side-by-side comparison --------------------
 // v1 (HSV) model. d = (light hue in degrees, light saturation, V - 1); albedo =
@@ -467,7 +506,8 @@ vec3 renderV1(vec3 d, vec3 albedo) {
   vec3  lightCol = toLinear(hsv2rgb(vec3(Hh, 1.0, 1.0)));
   vec3  tint     = mix(vec3(1.0), lightCol, S * v1p.z);
   float boost    = 1.0 + v1p.w * S * exposure;
-  vec3  c = albedo * (v1p.x + (1.0 - v1p.x) * exposure * boost * tint);
+  float ambient  = v1p.x * fillScale;
+  vec3  c = albedo * (ambient + (1.0 - ambient) * exposure * boost * tint);
   float m = max(c.r, max(c.g, c.b));
   if (m > 1.0) c = mix(c / m, vec3(1.0), clamp((m - 1.0) * 0.5, 0.0, 1.0));
   return clamp(c, 0.0, 1.0);
@@ -542,8 +582,9 @@ vec3 renderV2(vec3 d, vec3 albedo) {
   // paint swatch exactly where the photo's wall was lit white.
   vec3 fillCol = mix(lightRGB(skyCCT, 0.0), albedo / lum(albedo), bounce);
   fillCol /= lum(fillCol);
-  vec3 total   = fill * fillCol + (1.0 - fill) * direct;
-  vec3 neutral = fill * fillCol + (1.0 - fill) * vec3(1.0);
+  float f = fill * fillScale;             // scaled for dark scenes (see fillScale)
+  vec3 total   = f * fillCol + (1.0 - f) * direct;
+  vec3 neutral = f * fillCol + (1.0 - f) * vec3(1.0);
   vec3 light   = total / neutral;          // white in ImageA -> exactly (1,1,1)
 
   // 3. light x wall, per channel in linear sRGB
@@ -583,7 +624,8 @@ uniform vec3  paintW[SPECTRAL_N];  // the paint's reflectance at each wavelength
 uniform vec3  whiteNorm;           // per-channel scale: the reference blackbody (T at D65) -> exactly (1,1,1)
 uniform vec3  paintFix;            // per-channel correction: the paint under that reference -> exactly albedo
 uniform mat3  adaptMat;            // scene-wide CAT16 adaptation, linear sRGB -> linear sRGB (built in JS)
-uniform float oldBounce;           // light (in reference-white units) that the ORIGINAL white walls bounced
+uniform float refY;                // the reference white's luminance (as ANALYSE)
+uniform float v3Ambient, v3BounceShare;   // SHADER_DEFAULTS.v3.ambient, .bounceShare
 uniform vec3  bounceRGB;           // the new paint's multi-bounce interreflection, relative to white walls (JS, spectral)
 uniform float detailGamma;         // strength of the detail layer (x the contrast exponent)
 
@@ -604,7 +646,7 @@ float mccamyCCT(vec2 xy) {
 // L = light-map texel (luminance / refY, CIE 1960 u, v, blurred raw luminance);
 // sharp = the source pixel at full resolution, linear.
 // Returns the lit wall colour in linear sRGB, inside the output gamut.
-vec3 renderV3(vec4 L, vec3 sharp) {
+vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
   // 1. How much light. The light map is smooth (blurred at the analysis
   // size); the eye resolves brightness far more finely than colour, so fine
   // brightness detail (plaster texture, crisp shadow edges) comes back from
@@ -642,12 +684,15 @@ vec3 renderV3(vec4 L, vec3 sharp) {
   vec3 tint    = (measRGB / lum(measRGB)) / (bbRGB / lum(bbRGB));
 
   // 4. Interreflection. The photo's light already includes light bounced off
-  // its own (white) walls, oldBounce. Remove that and add what the NEW paint
+  // its own (white) walls, oldBounce: a share of THIS image's mean wall light
+  // (sceneY, from MEAN), so it follows the light level of each video frame.
+  // Remove that and add what the NEW paint
   // bounces instead (bounceRGB, computed spectrally in JS): light that has
   // bounced between painted walls is filtered by the paint at every bounce,
   // rho(l) * rho(l) / (1 - f rho(l)) per wavelength, so it is both dimmer for
   // dark paints (deeper shadows) and more saturated than the paint itself, as
   // in a real room painted one colour.
+  float oldBounce = v3Ambient * v3BounceShare * min(4.0, sceneY / max(refY, 1e-4));
   vec3 c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
 
   // 5. Colour constancy for the whole scene (not per pixel), then highlight
@@ -665,6 +710,8 @@ void main() {
   // Image coordinates: (0,0) is the TOP-left (see COORDINATES in the header),
   // while gl_FragCoord's origin is the bottom-left of the canvas.
   vec2 uv = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / size;
+  float sceneY = lum(texelFetch(frameMean, ivec2(0), 0).rgb);
+  fillScale = clamp(sceneY / max(fillRefY, 1e-4), 0.0, 1.0);
   vec3 c;
   if (model == MODEL_V1) {
     // v1's light map holds HSV hue in degrees, which must not be interpolated
@@ -675,7 +722,7 @@ void main() {
     c = renderV2(texture(lightMap, uv).xyz, albedo);
   } else {
     vec3 s = texture(src, uv).rgb;
-    c = renderV3(texture(lightMap, uv), srcLinear == 1 ? s : toLinear(s));
+    c = renderV3(texture(lightMap, uv), srcLinear == 1 ? s : toLinear(s), sceneY);
   }
   // To the output primaries (Display P3 or sRGB; both use the sRGB curve).
   vec3 enc = toSRGB(clamp(toOutput * c, 0.0, 1.0));

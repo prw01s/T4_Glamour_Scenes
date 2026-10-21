@@ -123,6 +123,14 @@
    *               brighter than neutral light of the same exposure: a stand-in
    *               for the Helmholtz–Kohlrausch and Hunt effects.
    *  shadowCurve  Exponent on exposure. 1 = linear; > 1 = deeper shadows.
+   *  fillRefY     v1 and v2: `fill` (and v1's ambient) is a fixed share of white
+   *               light, tuned on normally lit photos. In scenes whose mean
+   *               wall luminance (MEAN) is below fillRefY it shrinks in
+   *               proportion, because fill light comes from the room's own
+   *               light: otherwise a dark room (the videos at dusk and night)
+   *               gets a floor brighter than the room itself, and the walls
+   *               glow. 0.25 is just below the darkest photo (0.26, the living
+   *               room at night), so the photos are unchanged.
    *
    * v1 (HSV): ambient, shadowCurve, warmth, glow; see renderV1 in the .glsl file.
    *
@@ -141,8 +149,9 @@
    *               fully adapted walls would look unrelated to the room around
    *               them. 0.4 gives D ≈ 0.35, matching v2's tuned look, while
    *               keeping CIECAM16's dependence on the light level.
-   *  ambient      Indirect (bounced) light as a share of the scene's mean wall
-   *               light: about 10–20 % in furnished rooms.
+   *  ambient      Indirect (bounced) light as a share of the image's mean wall
+   *               light (MEAN, so it follows each video frame's light level):
+   *               about 10–20 % in furnished rooms.
    *  bounceShare  Share of that indirect light that came off the walls (the
    *               rest: ceiling, floor, sky).
    *  interreflection  Form factor f: share of wall-bounced light that reaches
@@ -162,6 +171,7 @@
     bounce:       0.4,
     glow:         0.5,
     shadowCurve:  1.0,
+    fillRefY:     0.25,
     v1: { ambient: 0.12, shadowCurve: 1.0, warmth: 0.8, glow: 1.2 },
     v3: {
       whitePercentile: 0.95,
@@ -179,12 +189,12 @@
   // ======================================================================
 
   /** Section names expected in the .glsl file (see its header). */
-  const SECTIONS = ["VERT", "COMMON", "RESAMPLE", "DECODE", "ADJUST", "BLUR", "ANALYSE", "RENDER"];
+  const SECTIONS = ["VERT", "COMMON", "RESAMPLE", "DECODE", "MEAN", "ADJUST", "BLUR", "ANALYSE", "RENDER"];
 
   /**
    * Complete GLSL sources, ready to compile: the vertex shader and one
    * fragment shader per pass (COMMON + "\n" + its section).
-   * @typedef {{ vert: string, resample: string, decode: string, adjust: string, blur: string, analyse: string, render: string }} ShaderSources
+   * @typedef {{ vert: string, resample: string, decode: string, mean: string, adjust: string, blur: string, analyse: string, render: string }} ShaderSources
    */
 
   /**
@@ -218,7 +228,8 @@
       if (!(name in parts)) throw new PaintError("load", `${url} has no //@@${name} section`);
     const fragment = name => parts.COMMON + "\n" + parts[name];
     return {
-      vert: parts.VERT, resample: fragment("RESAMPLE"), decode: fragment("DECODE"), adjust: fragment("ADJUST"),
+      vert: parts.VERT, resample: fragment("RESAMPLE"), decode: fragment("DECODE"), mean: fragment("MEAN"),
+      adjust: fragment("ADJUST"),
       blur: fragment("BLUR"), analyse: fragment("ANALYSE"), render: fragment("RENDER")
     };
   }
@@ -905,7 +916,6 @@
    * @property {number} refY          The room's / video's reference white luminance.
    * @property {Float32Array} adaptMat  Scene-wide CAT16 adaptation (column-major).
    * @property {number} D             The degree of adaptation used.
-   * @property {number} oldBounce     Light the original white walls bounced, in reference-white units.
    */
 
   /**
@@ -939,11 +949,7 @@
     const wSrc = mat.apply(toCat, white), wDst = mat.apply(toCat, [1, 1, 1]);
     const gain = wSrc.map((s, i) => D * wDst[i] / Math.max(s, 1e-6) + 1 - D);
     const adapt = mat.mul(fromCat, mat.mul(mat.diag(gain), toCat));
-    return {
-      refY, D,
-      adaptMat: mat.toGL(adapt),
-      oldBounce: S.ambient * S.bounceShare * Math.min(4, scene.meanWallY / refY)
-    };
+    return { refY, D, adaptMat: mat.toGL(adapt) };
   }
 
   // ======================================================================
@@ -969,6 +975,7 @@
    * @typedef {Object} LightMapHandle
    * @property {"lightMap"} kind
    * @property {Target} target
+   * @property {Target} mean  1 x 1: the image's mean wall light (MEAN), for RENDER.
    * @property {string | null} analysedFor  Analysis cache key, null = stale.
    */
 
@@ -998,7 +1005,8 @@
    * Owns one WebGL2 context on `canvas` and runs every pass:
    *
    *   upload()   photos: RESAMPLE to the render size R, in linear light
-   *   analyse()  DECODE (source -> lin, at the analysis size A)
+   *   analyse()  DECODE (source -> lin, at the analysis size A) -> MEAN (its
+   *              mean wall light, one pixel)
    *              ADJUST (sliders, optional) -> BLUR x2 (v2, v3) -> ANALYSE
    *              -> the job's light map
    *   render()   RENDER the light map and paint into the canvas (size R)
@@ -1073,7 +1081,7 @@
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
-      this.progs = Object.fromEntries(["resample", "decode", "adjust", "blur", "analyse", "render"]
+      this.progs = Object.fromEntries(["resample", "decode", "mean", "adjust", "blur", "analyse", "render"]
         .map(k => [k, makeProgram(gl, src.vert, src[k])]));
       this.scratch = Object.fromEntries(["lin", "adj", "tmp", "blurred", "raw"]
         .map(k => [k, makeTarget(gl, this.aw, this.ah)]));
@@ -1093,7 +1101,12 @@
     /** (Re)creates a handle's GL objects (and refills a source from its last image). */
     #build(h) {
       const gl = this.gl;
-      if (h.kind === "lightMap") { h.target = makeTarget(gl, this.aw, this.ah); h.analysedFor = null; return; }
+      if (h.kind === "lightMap") {
+        h.target = makeTarget(gl, this.aw, this.ah);
+        h.mean = makeTarget(gl, 1, 1);
+        h.analysedFor = null;
+        return;
+      }
       h.tex = makeTexture(gl, h.w, h.h, h.srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, gl.UNSIGNED_BYTE, h.mipmaps ? "mipmap" : "linear");
       if (h.image) this.#fill(h, h.image);
     }
@@ -1118,7 +1131,7 @@
 
     /** @returns {LightMapHandle} An RGBA16F light map at the analysis size. */
     createLightMap() {
-      const handle = { kind: "lightMap", target: null, analysedFor: null };
+      const handle = { kind: "lightMap", target: null, mean: null, analysedFor: null };
       this.#build(handle);
       this.#handles.add(handle);
       return handle;
@@ -1128,7 +1141,9 @@
     release(h) {
       const gl = this.gl;
       this.#handles.delete(h);
-      if (h.kind === "lightMap") { gl.deleteTexture(h.target.tex); gl.deleteFramebuffer(h.target.fbo); }
+      if (h.kind === "lightMap") {
+        for (const t of [h.target, h.mean]) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); }
+      }
       else gl.deleteTexture(h.tex);
     }
 
@@ -1256,6 +1271,7 @@
       if (lightMap.analysedFor === key) return;
       const P = this.progs, T = this.scratch, blurs = model !== "v1" && this.sigma >= 0.3;
       this.#draw(P.decode, T.lin, { src: src.tex, wallMask: mask.tex }, { size: [this.aw, this.ah], srcLinear: src.srgb ? 1 : 0 });
+      this.#draw(P.mean, lightMap.mean, { src: T.lin.tex }, {});    // the scene's light level
       let light = T.lin;                                       // unblurred, adjusted
       if (adjust) { this.#draw(P.adjust, T.adj, { src: T.lin.tex }, adjust); light = T.adj; }
       let soft = light, raw = T.lin;                            // blurred: adjusted / unadjusted
@@ -1276,17 +1292,18 @@
      */
     render({ lightMap, src, model, paint, scene, detailGamma }) {
       const S = SHADER_DEFAULTS;
-      this.#draw(this.progs.render, null, { lightMap: lightMap.target.tex, src: src.tex }, {
+      this.#draw(this.progs.render, null, { lightMap: lightMap.target.tex, src: src.tex, frameMean: lightMap.mean.tex }, {
         size: [this.rw, this.rh], model: MODELS[model], dither: S.dither ? 1 : 0, srcLinear: src.srgb ? 1 : 0,
         albedo: paint.albedo,
         toOutput: mat.toGL(this.outputSpace === "display-p3" ? SRGB_TO_P3 : mat.IDENTITY),
         // v1 / v2
         warmCCT: S.warmCCT, warmTint: S.warmTint, skyCCT: S.skyCCT, adaptation: S.adaptation,
-        fill: S.fill, bounce: S.bounce, glow: S.glow, shadowCurve: S.shadowCurve,
+        fill: S.fill, bounce: S.bounce, glow: S.glow, shadowCurve: S.shadowCurve, fillRefY: S.fillRefY,
         v1p: [S.v1.ambient, S.v1.shadowCurve, S.v1.warmth, S.v1.glow],
         // v3
         cmf: CMF, paintW: paint.paintW, whiteNorm: WHITE_NORM, paintFix: paint.paintFix,
-        adaptMat: scene.adaptMat, oldBounce: scene.oldBounce, bounceRGB: paint.bounceRGB, detailGamma
+        adaptMat: scene.adaptMat, refY: scene.refY, v3Ambient: S.v3.ambient, v3BounceShare: S.v3.bounceShare,
+        bounceRGB: paint.bounceRGB, detailGamma
       });
     }
   }
