@@ -64,10 +64,12 @@
   /**
    * Writes the controls into `fieldset` (its old content is replaced).
    * @param {HTMLFieldSetElement} fieldset  The page's fieldset.controls.
-   * @param {{ subject: "photos" | "video", model?: string }} o
+   * @param {{ subject: "photos" | "video", model?: string, measure?: boolean }} o
+   *   measure: include the "Difference from white" toggle (default true).
    * @returns {{ model: string, bind: (renderer: object, opts?: { onChange?: () => void }) => void }}
+   *   bind() takes one renderer, or an array of them (every setter goes to each).
    */
-  function mount(fieldset, { subject, model = DEFAULT_MODEL }) {
+  function mount(fieldset, { subject, model = DEFAULT_MODEL, measure = true }) {
     const S = SUBJECTS[subject];
     fieldset.innerHTML = `
       <legend class="vh">Tinting controls</legend>
@@ -88,11 +90,11 @@
           `Spreads the ${S.noun} light and shade apart or pulls them together, around ${S.pivot}.`)}
         ${slider("saturation", "Saturation", ["Muted", S.asShot, "Richer"],
           `Strength of the light's color. Each pixel changes in proportion to how far it is from pure white, compared with ${S.median}.`,
-          `
+          measure ? `
         <div class="model__row slider__measure">
           <span class="model__label" id="satMeasureLabel">Difference from white</span>
           ${segmented("satMeasure", [["full", "Color + brightness"], ["chroma", "Color only"]], "full", "satMeasureLabel")}
-        </div>`)}
+        </div>` : "")}
         <datalist id="sliderCentre"><option value="0"></option></datalist>
       </fieldset>`;
 
@@ -101,8 +103,10 @@
 
     return {
       model,
-      bind(renderer, { onChange = () => {} } = {}) {
-        const setters = { contrast: v => renderer.setContrast(v), saturation: v => renderer.setSaturation(v) };
+      bind(renderers, { onChange = () => {} } = {}) {
+        const all = [].concat(renderers);
+        const each = (method, value) => { for (const r of all) r[method](value); };
+        const setters = { contrast: v => each("setContrast", v), saturation: v => each("setSaturation", v) };
         /** Applies one slider: snap, show the value, send it to the renderer as -1..1. */
         const apply = input => {
           let value = Math.round(+input.value);
@@ -118,8 +122,8 @@
         // "change" fires for clicks, taps and arrow keys on the radios.
         fieldset.addEventListener("change", e => {
           const t = e.target;
-          if (t.name === "model") renderer.setModel(t.value);
-          else if (t.name === "satMeasure") renderer.setSatMeasure(t.value);
+          if (t.name === "model") each("setModel", t.value);
+          else if (t.name === "satMeasure") each("setSatMeasure", t.value);
           else return;
           onChange();
         });

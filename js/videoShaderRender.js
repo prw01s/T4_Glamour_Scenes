@@ -97,9 +97,13 @@
    * During the first loop, sample() adds the frame (point-sampled at 1/STATS_DOWNSCALE size)
    * once per STATS_BUCKET_S of video time; once every slice has been seen it
    * does nothing. `version` counts the samples (scene settings depend on them).
+   * One VideoStats can measure several videos of the same scene (see the
+   * `shareStats` option): it keeps track of the slices of each video.
    */
   class VideoStats extends LightStats {
-    #seen; #left; #mask;
+    /** @type {Map<HTMLVideoElement, { seen: Uint8Array, left: number }>} */
+    #videos = new Map();
+    #mask;
 
     /**
      * @param {HTMLVideoElement} video  With metadata loaded.
@@ -108,23 +112,25 @@
     constructor(video, mask) {
       super(Math.max(1, Math.round(video.videoWidth / STATS_DOWNSCALE)),
             Math.max(1, Math.round(video.videoHeight / STATS_DOWNSCALE)));
-      const d = video.duration;
-      this.#seen = new Uint8Array(d > 0 && isFinite(d) ? Math.ceil(d / STATS_BUCKET_S) : 1);
-      this.#left = this.#seen.length;
       this.#mask = mask;
       this.version = 0;
     }
 
-    /** True once every part of the video has been measured. */
-    get complete() { return this.#left === 0; }
+    /** True once every part of every sampled video has been measured. */
+    get complete() { return [...this.#videos.values()].every(v => v.left === 0); }
 
     /** Adds the video's current frame, unless its slice was already measured. */
     sample(video) {
-      if (this.#left === 0) return;
-      const i = Math.min(this.#seen.length - 1, Math.floor(video.currentTime / STATS_BUCKET_S));
-      if (this.#seen[i]) return;
-      this.#seen[i] = 1;
-      this.#left--;
+      let v = this.#videos.get(video);
+      if (!v) {
+        const d = video.duration, n = d > 0 && isFinite(d) ? Math.ceil(d / STATS_BUCKET_S) : 1;
+        this.#videos.set(video, v = { seen: new Uint8Array(n), left: n });
+      }
+      if (v.left === 0) return;
+      const i = Math.min(v.seen.length - 1, Math.floor(video.currentTime / STATS_BUCKET_S));
+      if (v.seen[i]) return;
+      v.seen[i] = 1;
+      v.left--;
       this.add(video, this.#mask);
       this.version++;
     }
@@ -176,10 +182,15 @@
    * @property {string} initialPaint  Paint on screen at load (#rrggbb).
    * @property {"v1" | "v2" | "v3"} [initialModel="v2"]  Must match the checked model radio.
    * @property {string} [glslUrl]  Shader file (default "glsl/shaderSceneRender.glsl").
+   * @property {{ stats?: VideoStats }} [shareStats]  Renderers given the same
+   *   object share one VideoStats (the first to start creates it), so videos of
+   *   the same scene get the same slider medians and v3 calibration.
    * @property {Object} elements  Page elements the renderer drives:
    * @property {HTMLElement} elements.app          Gets the .is-painted class.
+   * @property {HTMLElement} [elements.ui]         Holds the paint / model radios it keeps checked (default: app).
    * @property {HTMLVideoElement} elements.source  The processed video (frame source).
-   * @property {HTMLVideoElement} elements.top     The unprocessed, masked video.
+   * @property {HTMLVideoElement | null} [elements.top]  The unprocessed video shown when
+   *   not painting. Optional: without it, the source video itself shows then.
    * @property {HTMLCanvasElement} elements.canvas The painted frames.
    * @property {HTMLCanvasElement} elements.copy   The unpainted frames (frame-locked top layer).
    * @property {HTMLFieldSetElement} elements.controls  Tinting algo + sliders; disabled on failure.
@@ -211,7 +222,9 @@
    * @returns {VideoRenderer}
    */
   function createVideoRenderer(options) {
-    const { app, source, top, canvas, copy, controls, notice } = options.elements;
+    const { app, source, canvas, copy, controls, notice } = options.elements;
+    const top = options.elements.top || null;
+    const ui = options.elements.ui || app;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
 
     // ------------------------------------------------------------ state
@@ -253,7 +266,7 @@
     // ------------------------------------------------------------ UI sync
 
     function syncRadio(name, value) {
-      for (const input of app.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value;
+      for (const input of ui.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value;
     }
 
     /** The --active-paint CSS variable and the checked chip. */
@@ -333,8 +346,10 @@
       fade = null;
       app.classList.remove("is-painted");
       // The second video takes over: same position, playing.
-      if (isFinite(source.currentTime)) top.currentTime = source.currentTime;
-      if (!source.paused) top.play().catch(() => {});
+      if (top) {
+        if (isFinite(source.currentTime)) top.currentTime = source.currentTime;
+        if (!source.paused) top.play().catch(() => {});
+      }
       controls.disabled = true;
       const kind = err instanceof PaintError ? err.kind : "error";
       if (kind === "error" || kind === "webgl") console.warn("videoShaderRender:", err);
@@ -388,7 +403,7 @@
 
     /** Starts the video(s); needed only if the browser blocked autoplay. */
     function play() {
-      for (const video of painting ? [source] : [source, top]) if (video.paused) video.play().catch(() => {});
+      for (const video of painting || !top ? [source] : [source, top]) if (video.paused) video.play().catch(() => {});
     }
 
     // ------------------------------------------------------------ boot
@@ -419,13 +434,14 @@
         mask = pipeline.createSource(maskImg.naturalWidth, maskImg.naturalHeight, { mipmaps: true });
         pipeline.upload(mask, maskImg);
         lightMap = pipeline.createLightMap();
-        stats = new VideoStats(source, maskImg);
+        stats = options.shareStats ? (options.shareStats.stats ??= new VideoStats(source, maskImg))
+                                   : new VideoStats(source, maskImg);
         Object.assign(copy, { width: size[0], height: size[1] });
         copyCtx = copy.getContext("2d");
       }
       painting = true;
       render(performance.now(), true);
-      top.pause();                     // the frame copy replaces it (and saves a decoder)
+      if (top) top.pause();            // the frame copy replaces it (and saves a decoder)
       controls.disabled = false;
       notice.textContent = "";
       app.classList.add("is-painted");

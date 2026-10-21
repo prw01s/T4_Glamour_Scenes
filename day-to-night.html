@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T4 Scene Visualization - Day to Night</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  /* Shared tokens, base, controls and chips: css/visualizer.css. This page's layout: */
+
+  /* ---- booth: the film on top, the three control sets in a row below ------- */
+  .booth {
+    width: min(97%, calc(1920px + 2 * var(--pad)));
+    margin: 1.5vh auto;
+    margin: 1.5dvh auto;
+    padding: var(--pad);
+    min-height: 97vh;
+    min-height: 97svh;
+    background: var(--booth);
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: calc(1.5 * var(--gap));
+  }
+  .notice {
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 14px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .notice:empty { display: none; }
+  .notice b { font-weight: 600; }
+  .notice a { color: inherit; }
+
+  /* ---- film: two tracks (day -> night, night -> day), 1080p at most -------- */
+  .film {
+    position: relative;
+    isolation: isolate;
+    width: min(100%, calc(var(--w) * 1px));
+    aspect-ratio: var(--w) / var(--h);
+    border-radius: 3px;
+    overflow: hidden;
+    background: #DADADA;
+  }
+  /* One track per video. js/dayNightSequence.js puts the active track on top
+     (z-index 2) and fades it in when it changes. */
+  .film__track { position: absolute; inset: 0; }
+  .film__source, .film__paint, .film__copy {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  /* Inside a track, as on videoShaderRenderer.html: the painted frames cover
+     the source video, and on top a masked copy of the same frame keeps
+     everything that isn't wall. Both canvases are drawn from the same decoded
+     frame, so they are always in sync. Without .is-painted (a failure, or
+     ?nogl) only the plain source video shows. */
+  .film__paint { opacity: 0; transition: opacity 360ms cubic-bezier(.2, 0, 0, 1); }
+  .is-painted .film__paint { opacity: 1; }
+  .film__copy { display: none; }
+  .is-painted .film__copy {
+    display: block;
+    mask-image: var(--mask);
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: 100% 100%;
+    mask-mode: luminance;
+  }
+  @media (prefers-reduced-motion: reduce) { .film__paint { transition: none; } }
+
+  /* ---- the three control sets, left to right (they wrap when narrow) ------- */
+  .deck {
+    width: min(100%, calc(var(--w) * 1px));
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 28px 56px;
+  }
+  .deck__label { display: block; margin-bottom: 10px; font-size: 14px; color: var(--slate); }
+
+  /* SET 1: time of day */
+  .timeline { flex: 1 1 380px; min-width: 0; }
+  .timeline__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .timeline__row { display: flex; align-items: flex-start; gap: 20px; }
+  .timeline__track {
+    --pos: 0%;
+    position: relative;
+    flex: 1 1 auto;
+    height: 64px;
+    margin-inline: 30px;      /* room for the end labels, which centre on their stops */
+  }
+  .timeline__rail, .timeline__fill {
+    position: absolute; left: 0; top: 14px; height: 4px; border-radius: 2px;
+  }
+  .timeline__rail { right: 0; background: var(--rule); }
+  .timeline__fill { width: var(--pos); background: var(--graphite); }
+  .timeline__playhead {
+    position: absolute; top: 8px; left: var(--pos);
+    width: 16px; height: 16px; margin-left: -8px;
+    border-radius: 50%;
+    background: var(--graphite);
+    box-shadow: 0 0 0 3px var(--booth);
+    pointer-events: none;
+  }
+  .timeline__stop {
+    position: absolute; top: 0;
+    transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 56px;
+    cursor: pointer;
+  }
+  .timeline__dot {
+    width: 32px; height: 32px;
+    display: grid; place-items: center;
+  }
+  .timeline__dot::before {
+    content: "";
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--booth);
+    box-shadow: inset 0 0 0 2px var(--graphite);
+    transition: transform .15s;
+  }
+  .timeline__stop:hover .timeline__dot::before { transform: scale(1.2); }
+  .timeline__stop input:checked + .timeline__dot::before { background: var(--graphite); transform: scale(1.35); }
+  .timeline__stop input:focus-visible + .timeline__dot { outline: 2px solid var(--graphite); outline-offset: -2px; border-radius: 50%; }
+  .timeline__name { font-size: 14px; line-height: 18px; }
+  .timeline__time { font-size: 12px; line-height: 16px; color: var(--slate); font-variant-numeric: tabular-nums; }
+  .timeline__stop input:checked ~ .timeline__name { font-weight: 600; }
+  .timeline__autoplay {
+    flex: 0 0 auto;
+    margin-top: 2px;
+    padding: 6px 14px;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: none; font: inherit; font-size: 14px; color: var(--graphite);
+    cursor: pointer;
+  }
+  .timeline__autoplay:hover { border-color: var(--graphite); }
+  .timeline__autoplay[aria-pressed="true"] { background: var(--graphite); border-color: var(--graphite); color: var(--booth); }
+  .timeline__autoplay:focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
+
+  /* SET 2: paint chips */
+  .palette { flex: 0 0 auto; }
+  .chip { width: 44px; height: 44px; }
+  .chip__hex { font-size: 12px; line-height: 16px; color: var(--slate); }
+
+  /* SET 3: tinting controls (js/tuningControls.js) */
+  .controls { flex: 0 1 340px; min-width: 260px; display: flex; flex-direction: column; gap: 22px; }
+
+  /* ---- mobile (<640) ------------------------------------------------------- */
+  @media (max-width: 639.98px) {
+    .chips { gap: 10px; }
+    .chip__hex { font-size: 11px; }
+    .controls { flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+<main class="booth" id="app">
+  <h1 class="vh">Paint color visualizer, day to night</h1>
+
+  <div class="film" id="film"></div>
+
+  <p class="notice" id="notice" role="status"></p>
+
+  <div class="deck">
+    <fieldset class="timeline" id="timeline">
+      <legend class="vh">Time of day</legend>
+      <div class="timeline__head"><span class="deck__label" aria-hidden="true">Time of day</span></div>
+      <div class="timeline__row">
+        <div class="timeline__track" id="timelineTrack">
+          <div class="timeline__rail"></div>
+          <div class="timeline__fill"></div>
+          <div class="timeline__playhead" aria-hidden="true"></div>
+        </div>
+        <!-- Appears after the first time point is picked (see the script) -->
+        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false" hidden>Autoplay</button>
+      </div>
+    </fieldset>
+
+    <fieldset class="palette">
+      <legend class="vh">Paint color</legend>
+      <span class="deck__label" aria-hidden="true">Paint color</span>
+      <ul class="chips" id="chips"></ul>
+    </fieldset>
+
+    <!-- Tinting algo, Contrast, Saturation: built by js/tuningControls.js -->
+    <fieldset class="controls" id="controls"></fieldset>
+  </div>
+</main>
+
+<script src="js/paintPipeline.js"></script>
+<script src="js/videoShaderRender.js"></script>
+<script src="js/tuningControls.js"></script>
+<script src="js/dayNightSequence.js"></script>
+<script type="module">
+/* ==========================================================================
+ * Page setup for day-to-night.html.
+ *
+ * One room, filmed from morning to night (study_day-night.mp4) and back
+ * (study_night-to-day.mp4). js/dayNightSequence.js plays them as one film:
+ * an endless day -> night -> day loop at first, then on demand to a picked
+ * time of day. Each video is painted like videoShaderRenderer.html: one
+ * js/videoShaderRender.js renderer per video, both driven by the same paint,
+ * model and sliders, and sharing one set of whole-scene statistics so the
+ * paint matches when the film switches videos.
+ * ======================================================================== */
+
+if (!window.PaintPipeline || !window.VideoShaderRender || !window.TuningControls || !window.DayNightSequence) {
+  document.getElementById("notice").textContent =
+    "Paint previews couldn't start because a file in the js folder didn't load. Check the js folder, then reload the page.";
+  throw new Error("day-to-night: a script in js/ is missing");
+}
+const { createVideoRenderer } = window.VideoShaderRender;
+const { lrv } = window.PaintPipeline;
+
+// ---------------------------------------------------------------- config
+
+/** Paint swatches, as #rrggbb. The first is the paint on screen at load. */
+const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#2f3d4c"];
+
+/**
+ * The scene. `span` is the length of the day in both videos (5 s, 24 fps);
+ * width/height are their native size (1080p), the film's largest size.
+ */
+const SCENE = {
+  forward:  "images/videos/study_day-night.mp4",
+  backward: "images/videos/study_night-to-day.mp4",
+  mask:     "images/masks/day-night-mask.png",
+  label:    "Study, from morning light to night",
+  width: 1920, height: 1080, span: 5, fps: 24
+};
+
+/** The time points, in seconds of the day-to-night video. */
+const TIME_POINTS = [
+  { key: "morning", label: "Morning", time: 0 },
+  { key: "noon",    label: "Noon",    time: 2 },
+  { key: "sunset",  label: "Sunset",  time: 3 },
+  { key: "night",   label: "Night",   time: 5 }
+];
+
+// ---------------------------------------------------------------- markup
+
+const film = document.getElementById("film");
+// The film's native size, for the film and the control row under it.
+document.getElementById("app").style.cssText = `--w: ${SCENE.width}; --h: ${SCENE.height}`;
+// One track per video: the source video (no autoplay or loop: the sequence
+// drives them), its painted frames, and the masked copy of the same frames.
+// Both videos are muted.
+film.innerHTML = ["forward", "backward"].map(dir => `
+  <div class="film__track" id="${dir}Track">
+    <video class="film__source" src="${SCENE[dir]}" muted playsinline preload="auto" disablepictureinpicture
+      tabindex="-1" aria-hidden="true"></video>
+    <canvas class="film__paint" aria-hidden="true"></canvas>
+    <canvas class="film__copy" role="img" aria-label="${SCENE.label}" style="--mask: url('${SCENE.mask}')"></canvas>
+  </div>`).join("");
+
+const fmt = t => `00:0${t}`;
+const timelineTrack = document.getElementById("timelineTrack");
+timelineTrack.insertAdjacentHTML("beforeend", TIME_POINTS.map(p =>
+  `<label class="timeline__stop" style="left: ${100 * p.time / SCENE.span}%">` +
+    `<input class="vh" type="radio" name="timePoint" value="${p.time}">` +
+    `<span class="timeline__dot"></span>` +
+    `<span class="timeline__name">${p.label}</span><span class="timeline__time">${fmt(p.time)}</span>` +
+  `</label>`).join(""));
+
+document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
+  `<li><label class="chip-option">` +
+    `<input class="vh" type="radio" name="paint" value="${hex}">` +
+    `<span class="chip" style="background:${hex}"></span>` +
+    `<span class="chip__hex">${hex.toUpperCase()}</span><span class="vh">, LRV ${lrv(hex)}</span>` +
+  `</label></li>`).join("");
+
+// ---------------------------------------------------------------- renderers
+
+const controlsEl = document.getElementById("controls");
+const controls = TuningControls.mount(controlsEl, { subject: "video", measure: false });
+
+const tracks = ["forward", "backward"].map(dir => {
+  const layer = document.getElementById(`${dir}Track`);
+  return { layer, video: layer.querySelector("video") };
+});
+/** Both renderers measure into this one VideoStats (whole-scene medians and calibration). */
+const shareStats = {};
+const renderers = tracks.map(({ layer, video }) => createVideoRenderer({
+  mask: SCENE.mask,
+  initialPaint: PAINT_COLORS[0],
+  initialModel: controls.model,
+  glslUrl: "glsl/shaderSceneRender.glsl",
+  shareStats,
+  elements: {
+    app: layer,                    // gets .is-painted
+    ui: document,                  // the paint radios it keeps checked
+    source: video,
+    canvas: layer.querySelector(".film__paint"),
+    copy: layer.querySelector(".film__copy"),
+    controls: controlsEl,
+    notice: document.getElementById("notice")
+  }
+}));
+controls.bind(renderers);
+document.getElementById("chips").addEventListener("change", e => {
+  for (const r of renderers) r.setPaint(e.target.value);
+});
+
+// ---------------------------------------------------------------- sequence
+
+const autoplayButton = document.getElementById("autoplay");
+let shownState = "";
+const sequence = DayNightSequence.create({
+  forward: tracks[0], backward: tracks[1], span: SCENE.span, fps: SCENE.fps,
+  // Every animation frame: move the playhead, and show whether autoplay runs.
+  onUpdate({ position, mode }) {
+    timelineTrack.style.setProperty("--pos", `${(100 * position / SCENE.span).toFixed(3)}%`);
+    if (mode !== shownState) {
+      shownState = mode;
+      autoplayButton.setAttribute("aria-pressed", String(mode === "autoplay"));
+    }
+  }
+});
+
+// Time points: play to the picked time (forward or backward) and stop there.
+// The first pick reveals the Autoplay button.
+document.getElementById("timeline").addEventListener("change", e => {
+  if (e.target.name !== "timePoint") return;
+  autoplayButton.hidden = false;
+  sequence.goTo(+e.target.value);
+});
+// Autoplay: resume the endless day -> night -> day loop from here.
+autoplayButton.addEventListener("click", () => {
+  for (const input of document.querySelectorAll('input[name="timePoint"]')) input.checked = false;
+  sequence.autoplay();
+});
+
+// Scripting and testing handles.
+window.dayNight = { sequence, renderers };
+
+// Boot: paint both videos, and start the loop. If the browser blocks
+// autoplay, the first click or key press anywhere starts it.
+for (const r of renderers) r.start();
+sequence.autoplay();
+const kick = () => { if (sequence.mode === "autoplay" && tracks.every(t => t.video.paused)) sequence.autoplay(); };
+document.addEventListener("pointerdown", kick, { once: true });
+document.addEventListener("keydown", kick, { once: true });
+</script>
+</body>
+</html>

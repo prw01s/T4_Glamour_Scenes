@@ -13,12 +13,17 @@ The pages read image pixels, which browsers only allow over http:
 bash serve.sh
 ```
 
+`serve.sh` runs `serve.py`, a small static server (Python 3 standard library)
+with byte-range support for the videos and `Cache-Control: no-store`, so edits
+always show on reload.
+
 Then open:
 
 | Page | What it shows |
 | --- | --- |
 | http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side) |
 | http://localhost:8000/videoShaderRenderer.html | One room in a video whose light changes; every frame is repainted |
+| http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one), with time-of-day points |
 | http://localhost:8000/tests/ | Automated tests of the colour science and the shaders |
 
 Add `?nogl` to a page's address to see its fallback (plain photos / video).
@@ -34,6 +39,8 @@ original image, so only the walls change.
 ```
 shaderSceneRenderer.html ─ js/shaderSceneRender.js ─┐   tiles, rooms, fades, room switching
 videoShaderRenderer.html ─ js/videoShaderRender.js ─┤   video frames, frame-locked layers, paint fades
+day-to-night.html ──────── js/videoShaderRender.js ─┤   (one renderer per video, shared statistics)
+                           js/dayNightSequence.js   │   day -> night -> day loop, crossfades, time points
                            js/tuningControls.js ────┤   Tinting algo, sliders (markup + wiring)
                            css/visualizer.css       │   shared styles
                                                     └─ js/paintPipeline.js     GPU pipeline, colour science,
