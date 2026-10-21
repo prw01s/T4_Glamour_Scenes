@@ -23,7 +23,7 @@ Then open:
 | --- | --- |
 | http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side) |
 | http://localhost:8000/videoShaderRenderer.html | One room in a video whose light changes; every frame is repainted |
-| http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one), with time-of-day points |
+| http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one): autoplay loop, time points, drag through the day |
 | http://localhost:8000/tests/ | Automated tests of the colour science and the shaders |
 
 Add `?nogl` to a page's address to see its fallback (plain photos / video).
@@ -40,7 +40,7 @@ original image, so only the walls change.
 shaderSceneRenderer.html ─ js/shaderSceneRender.js ─┐   tiles, rooms, fades, room switching
 videoShaderRenderer.html ─ js/videoShaderRender.js ─┤   video frames, frame-locked layers, paint fades
 day-to-night.html ──────── js/videoShaderRender.js ─┤   (one renderer per video, shared statistics)
-                           js/dayNightSequence.js   │   day -> night -> day loop, crossfades, time points
+                           js/dayNightSequence.js   │   eased loop and moves, crossfades, scrubbing
                            js/tuningControls.js ────┤   Tinting algo, sliders (markup + wiring)
                            css/visualizer.css       │   shared styles
                                                     └─ js/paintPipeline.js     GPU pipeline, colour science,
@@ -136,6 +136,17 @@ HDR video, e.g. 10-bit HLG/PQ), unclipped and without a tone curve. The
 pipeline already works in half-float linear light, so it needs only a
 different decode step for them.
 
+### day-to-night.html
+
+Two videos of one room (morning to night, and night to morning) play as one
+film; `js/dayNightSequence.js` keeps one scene clock for both and crossfades
+whenever the film switches video. Moves to a time point are eased (launch at
+up to 4x, slow landing, ~0.6 s for 1 s of film, ~1.6 s for all 5 s); autoplay
+slows into night and morning and accelerates out; the track can be clicked
+or dragged, and the playhead is a keyboard slider. Both videos are painted by
+one shared GPU pipeline at the film's size on screen. Smooth seeking depends
+on the video encoding: see "Exporting the videos" below.
+
 ## Controls
 
 * **Tinting algo**: v3 / v2 / v1.
@@ -203,6 +214,14 @@ Results are listed on the page and in `window.testResults`.
 * Every stored image has row 0 at the top; only RENDER flips y.
 * The scripts are classic scripts (not ES modules) so the pages still load,
   and explain themselves, when opened from `file://`.
+
+## Exporting the videos (day-to-night.html)
+
+Seeking speed (reversals, exact stops, dragging) depends on keyframe spacing.
+Export both videos as H.264, High profile, 1920 x 1080, 24 fps, with a
+keyframe every 6 frames and no B-frames; export the night-to-day video as the
+exact frame reverse of the day-to-night one. The step-by-step Premiere Pro
+settings are in `docs/premiere-export.md`.
 
 ## Other files
 

@@ -311,6 +311,152 @@
     });
   }
 
+  // ======================================================================
+  // Sequence tests (js/dayNightSequence.js) with simulated videos
+  // ======================================================================
+
+  /**
+   * A stand-in for <video>: plays in real time at playbackRate, seeks
+   * asynchronously (10 ms), reports presented frames to
+   * requestVideoFrameCallback with frame-quantised mediaTime, and fires
+   * "seeked" and "ended" like the real element.
+   */
+  class FakeVideo extends EventTarget {
+    constructor(duration, fps = 24) {
+      super();
+      Object.assign(this, { duration, fps, _t: 0, paused: true, ended: false, seeking: false, playbackRate: 1, _cbs: [] });
+      this._q = { droppedVideoFrames: 0, totalVideoFrames: 0 };
+    }
+    get currentTime() { return this._t; }
+    set currentTime(t) {
+      this._t = Math.max(0, Math.min(this.duration, t));
+      this.ended = false;
+      this.seeking = true;
+      setTimeout(() => { this.seeking = false; this.dispatchEvent(new Event("seeked")); this._present(); }, 10);
+    }
+    play() {
+      if (this._t >= this.duration) this._t = 0;
+      this.ended = false;
+      if (!this.paused) return Promise.resolve();
+      this.paused = false;
+      let last = performance.now();
+      const step = now => {
+        if (this.paused) return;
+        this._t = Math.min(this.duration, this._t + (now - last) / 1000 * this.playbackRate);
+        last = now;
+        this._present();
+        if (this._t >= this.duration) { this.paused = true; this.ended = true; this.dispatchEvent(new Event("ended")); return; }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+      return Promise.resolve();
+    }
+    pause() { this.paused = true; }
+    _present() {
+      this._q.totalVideoFrames++;
+      const cbs = this._cbs, mediaTime = Math.floor(this._t * this.fps + 1e-6) / this.fps;
+      this._cbs = [];
+      for (const cb of cbs) cb(performance.now(), { mediaTime });
+    }
+    requestVideoFrameCallback(cb) { this._cbs.push(cb); }
+    getVideoPlaybackQuality() { return this._q; }
+  }
+
+  const S = window.DayNightSequence;
+  const SPAN = 1, FRAME = 1 / 24;
+  /** A fresh sequence over two simulated 1-second videos. */
+  function makeSequence(extra = {}) {
+    const track = () => {
+      const layer = document.body.appendChild(Object.assign(document.createElement("div"), { hidden: true }));
+      return { video: new FakeVideo(SPAN), layer };
+    };
+    const forward = track(), backward = track();
+    const arrivals = [];
+    const seq = S.create({ forward, backward, span: SPAN, autoplayRate: 1, onArrive: s => arrivals.push(s), ...extra });
+    return { seq, forward, backward, arrivals };
+  }
+  const waitFor = async (cond, ms = 4000) => {
+    const t0 = performance.now();
+    while (!cond()) {
+      if (performance.now() - t0 > ms) throw new Error("timed out");
+      await new Promise(r => setTimeout(r, 10));
+    }
+    return performance.now() - t0;
+  };
+  const settled = seq => () => seq.mode === "paused" && !seq.playing;
+
+  await test("sequence: a later time plays the forward video and stops on its exact frame", async () => {
+    const { seq, arrivals } = makeSequence();
+    seq.goTo(0.5);
+    await waitFor(settled(seq));
+    near(seq.position, 0.5, FRAME / 2, "position");
+    assert(seq.active === "forward", `active ${seq.active}`);
+    return `stopped at ${seq.position.toFixed(3)}; arrived ${fmt(arrivals)}`;
+  });
+  await test("sequence: an earlier time switches to the backward video and starts moving at once", async () => {
+    const { seq, backward } = makeSequence();
+    seq.goTo(0.75); await waitFor(settled(seq));
+    const t0 = performance.now();
+    seq.goTo(0.25);
+    const ms = await waitFor(() => !backward.video.paused);
+    await waitFor(settled(seq));
+    assert(seq.active === "backward", `active ${seq.active}`);
+    assert(ms < 100, `moved after ${ms.toFixed(0)} ms`);
+    near(seq.position, 0.25, FRAME / 2, "position");
+    return `moving after ${ms.toFixed(0)} ms (no wait for the crossfade); stopped at ${seq.position.toFixed(3)}`;
+  });
+  await test("sequence: moves are eased (fast start, slow landing)", async () => {
+    const { seq, forward } = makeSequence();
+    const rates = [];
+    seq.goTo(1);
+    const rec = () => { if (!forward.video.paused) rates.push(forward.video.playbackRate); if (seq.mode === "seek") requestAnimationFrame(rec); };
+    requestAnimationFrame(rec);
+    await waitFor(settled(seq));
+    const peak = Math.max(...rates), last = rates[rates.length - 1];
+    assert(peak > 2 && last < peak / 2, `rates ${fmt(rates)}`);
+    return `peak ${peak.toFixed(2)}x, landing ${last.toFixed(2)}x`;
+  });
+  await test("sequence: morning and night land on the exact first frames", async () => {
+    const { seq, forward, backward } = makeSequence();
+    seq.goTo(1); await waitFor(settled(seq));
+    assert(seq.active === "backward" && backward.video.currentTime === 0, `night on ${seq.active} at ${backward.video.currentTime}`);
+    seq.goTo(0); await waitFor(settled(seq));
+    assert(seq.active === "forward" && forward.video.currentTime === 0, `morning on ${seq.active} at ${forward.video.currentTime}`);
+    return "night = backward t 0, morning = forward t 0";
+  });
+  await test("sequence: reversing twice within a crossfade still arrives (no freeze)", async () => {
+    const { seq } = makeSequence();
+    seq.goTo(0.5); await waitFor(settled(seq));
+    seq.goTo(0.25);
+    await new Promise(r => setTimeout(r, 40));
+    seq.goTo(0.8);
+    await waitFor(settled(seq));
+    near(seq.position, 0.8, FRAME / 2, "position");
+    return `arrived at ${seq.position.toFixed(3)} on ${seq.active}`;
+  });
+  await test("sequence: autoplay hands over at the end and loops; pause stops both", async () => {
+    const { seq, forward, backward } = makeSequence();
+    seq.goTo(0.8); await waitFor(settled(seq));
+    seq.autoplay();
+    await waitFor(() => seq.active === "backward" && !backward.video.paused);
+    const back = seq.position;
+    seq.pause();
+    await waitFor(settled(seq));
+    assert(forward.video.paused && backward.video.paused, "a video still plays");
+    return `handed over at night, running backward (at ${back.toFixed(2)}); paused`;
+  });
+  await test("sequence: scrubbing shows the dragged-to time", async () => {
+    const { seq } = makeSequence();
+    seq.scrubTo(0.3);
+    await waitFor(() => Math.abs(seq.position - 0.3) < 1e-6);
+    seq.scrubTo(0.6);
+    await waitFor(() => Math.abs(seq.position - 0.6) < 1e-6);
+    assert(seq.mode === "scrub" && !seq.playing, `mode ${seq.mode}`);
+    seq.endScrub();
+    assert(seq.mode === "paused", `mode ${seq.mode}`);
+    return "followed 0.3 -> 0.6, paused after the drag";
+  });
+
   // ---------------------------------------------------------------- summary
   const failed = results.filter(r => !r.ok).length;
   document.getElementById("summary").textContent =

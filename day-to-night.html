@@ -87,27 +87,39 @@
   .timeline__label { font-weight: 700; }
   /* The Autoplay button wraps under the track when there isn't room beside it */
   .timeline__row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 20px; }
+  /* The track: click a point or anywhere on it, or drag along it. --p is the
+     film's position (0 = morning .. 1 = night); the fill and the playhead
+     follow it with transforms only (no layout on every frame). */
   .timeline__track {
-    --pos: 0%;
+    --p: 0;
     position: relative;
     flex: 1 1 280px;
     min-width: 210px;         /* Noon and Sunset are 20 % apart (42 px here): their labels stay clear */
-    height: 64px;
+    height: 56px;
     margin-inline: 26px;      /* room for the end labels, which centre on their stops */
+    container-type: inline-size;   /* 100cqi = the track's width, for the playhead */
+    cursor: pointer;
+    touch-action: pan-y;      /* horizontal drags scrub; vertical ones still scroll the page */
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .timeline.is-scrubbing .timeline__track { cursor: grabbing; }
   .timeline__rail, .timeline__fill {
-    position: absolute; left: 0; top: 14px; height: 4px; border-radius: 2px;
+    position: absolute; left: 0; right: 0; top: 14px; height: 4px; border-radius: 2px;
   }
-  .timeline__rail { right: 0; background: var(--rule); }
-  .timeline__fill { width: var(--pos); background: var(--graphite); }
+  .timeline__rail { background: var(--rule); }
+  .timeline__fill { background: var(--graphite); transform-origin: left center; transform: scaleX(var(--p)); }
   .timeline__playhead {
-    position: absolute; top: 8px; left: var(--pos);
-    width: 16px; height: 16px; margin-left: -8px;
+    position: absolute; top: 8px; left: -8px;
+    width: 16px; height: 16px;
     border-radius: 50%;
     background: var(--graphite);
     box-shadow: 0 0 0 3px var(--booth);
-    pointer-events: none;
+    transform: translateX(calc(var(--p) * 100cqi));
+    z-index: 1;
+    pointer-events: none;     /* the track handles the pointer; the playhead is the keyboard slider */
   }
+  .timeline__playhead:focus-visible { outline: 2px solid var(--graphite); outline-offset: 3px; }
   .timeline__stop {
     position: absolute; top: 0;
     transform: translateX(-50%);
@@ -131,12 +143,14 @@
   .timeline__stop input:checked + .timeline__dot::before { background: var(--graphite); transform: scale(1.35); }
   .timeline__stop input:focus-visible + .timeline__dot { outline: 2px solid var(--graphite); outline-offset: -2px; border-radius: 50%; }
   .timeline__name { font-size: 14px; line-height: 18px; }
-  .timeline__time { font-size: 12px; line-height: 16px; color: var(--slate); font-variant-numeric: tabular-nums; }
   .timeline__stop input:checked ~ .timeline__name { font-weight: 600; }
+  /* Autoplay: a play / pause toggle. Pressed (dark, pause icon) while the
+     loop plays; unpressed (play icon) when stopped. */
   .timeline__autoplay {
     flex: 0 0 auto;
+    display: inline-flex; align-items: center; gap: 8px;
     margin-top: 2px;
-    padding: 6px 14px;
+    padding: 6px 14px 6px 10px;
     border: 1px solid var(--rule); border-radius: 3px;
     background: none; font: inherit; font-size: 14px; font-weight: 700; color: var(--graphite);
     cursor: pointer;
@@ -144,6 +158,9 @@
   .timeline__autoplay:hover { border-color: var(--graphite); }
   .timeline__autoplay[aria-pressed="true"] { background: var(--graphite); border-color: var(--graphite); color: var(--booth); }
   .timeline__autoplay:focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .timeline__icon { width: 12px; height: 12px; fill: currentColor; }
+  .timeline__autoplay .icon-pause, .timeline__autoplay[aria-pressed="true"] .icon-play { display: none; }
+  .timeline__autoplay[aria-pressed="true"] .icon-pause { display: inline; }
 
   /* SET 2: paint chips */
   .palette { flex: 0 0 auto; }
@@ -178,11 +195,20 @@
         <div class="timeline__track" id="timelineTrack">
           <div class="timeline__rail"></div>
           <div class="timeline__fill"></div>
-          <div class="timeline__playhead" aria-hidden="true"></div>
+          <!-- The playhead doubles as a keyboard slider (arrow keys, Home, End) -->
+          <div class="timeline__playhead" id="playhead" role="slider" tabindex="0" aria-label="Time of day"
+            aria-valuemin="0" aria-valuemax="5" aria-valuenow="0" aria-valuetext="Morning"></div>
         </div>
-        <!-- Pressed while the loop plays; click to resume it after picking a time point -->
-        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false">Autoplay</button>
+        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false">
+          <svg class="timeline__icon" viewBox="0 0 12 12" aria-hidden="true">
+            <path class="icon-play" d="M2 1 L11 6 L2 11 Z"/>
+            <path class="icon-pause" d="M2 1 H5 V11 H2 Z M7 1 H10 V11 H7 Z"/>
+          </svg>
+          <span>Autoplay</span>
+        </button>
       </div>
+      <!-- Spoken updates: where the film is, and autoplay on / paused -->
+      <p class="vh" id="timeStatus" aria-live="polite"></p>
     </fieldset>
 
     <fieldset class="palette">
@@ -233,11 +259,12 @@ const PAINT_COLORS = ["#a4aca6", "#cfdbde", "#d0ba94", "#dee0de", "#607D84"];
 const SCENE = {
   forward:  "images/videos/study_day-night.mp4",
   backward: "images/videos/study_night-to-day.mp4",
+  poster:   "images/videos/study_day-night_poster.jpg",   // the forward video's first frame (morning)
   mask:     "images/masks/day-night-mask.png",
   label:    "Study, from morning light to night",
   width: 1920, height: 1080, span: 5, fps: 24,
-  autoplayRate: 0.75,  // playback speed of the endless loop
-  seekRate: 2          // playback speed when moving to a time point
+  autoplayRate: 0.75   // playback speed of the endless loop (eased down near morning and night)
+  // Moves to a time point are eased (fast start, soft landing): see SEEK in js/dayNightSequence.js.
 };
 
 /** The time points, in seconds of the day-to-night video. */
@@ -248,6 +275,8 @@ const TIME_POINTS = [
   { key: "night",   label: "Night",   time: 5 }
 ];
 
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 // ---------------------------------------------------------------- markup
 
 const film = document.getElementById("film");
@@ -255,23 +284,24 @@ const film = document.getElementById("film");
 document.getElementById("app").style.cssText = `--w: ${SCENE.width}; --h: ${SCENE.height}`;
 // One track per video: the source video (no autoplay or loop: the sequence
 // drives them), its painted frames, and the masked copy of the same frames.
-// Both videos are muted.
+// Both videos are muted. The forward video (on top at load) shows a poster of
+// its first frame until it has loaded.
 film.innerHTML = ["forward", "backward"].map(dir => `
   <div class="film__track" id="${dir}Track">
     <video class="film__source" src="${SCENE[dir]}" muted playsinline preload="auto" disablepictureinpicture
-      tabindex="-1" aria-hidden="true"></video>
+      ${dir === "forward" ? `poster="${SCENE.poster}"` : ""} tabindex="-1" aria-hidden="true"></video>
     <canvas class="film__paint" aria-hidden="true"></canvas>
     <canvas class="film__copy" role="img" aria-label="${SCENE.label}" style="--mask: url('${SCENE.mask}')"></canvas>
   </div>`).join("");
 
-const fmt = t => `00:0${t}`;
 const timelineTrack = document.getElementById("timelineTrack");
 timelineTrack.insertAdjacentHTML("beforeend", TIME_POINTS.map(p =>
   `<label class="timeline__stop" style="left: ${100 * p.time / SCENE.span}%">` +
     `<input class="vh" type="radio" name="timePoint" value="${p.time}">` +
     `<span class="timeline__dot"></span>` +
-    `<span class="timeline__name">${p.label}</span><span class="timeline__time">${fmt(p.time)}</span>` +
+    `<span class="timeline__name">${p.label}</span>` +
   `</label>`).join(""));
+document.getElementById("playhead").setAttribute("aria-valuemax", SCENE.span);
 
 document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
   `<li><label class="chip-option">` +
@@ -289,14 +319,16 @@ const tracks = ["forward", "backward"].map(dir => {
   const layer = document.getElementById(`${dir}Track`);
   return { layer, video: layer.querySelector("video") };
 });
-/** Both renderers measure into this one VideoStats (whole-scene medians and calibration). */
+/** Both renderers measure into one VideoStats (whole-scene medians and calibration)... */
 const shareStats = {};
+/** ...and render with one GPU pipeline (one WebGL context), at the film's size on screen. */
+const sharePipeline = {};
 const renderers = tracks.map(({ layer, video }) => createVideoRenderer({
   mask: SCENE.mask,
   initialPaint: PAINT_COLORS[0],
   initialModel: controls.model,
   glslUrl: "glsl/shaderSceneRender.glsl",
-  shareStats,
+  shareStats, sharePipeline, fitDisplay: true,
   elements: {
     app: layer,                    // gets .is-painted
     ui: document,                  // the paint radios it keeps checked
@@ -314,40 +346,132 @@ document.getElementById("chips").addEventListener("change", e => {
 
 // ---------------------------------------------------------------- sequence
 
+const timeline = document.getElementById("timeline");
+const playhead = document.getElementById("playhead");
 const autoplayButton = document.getElementById("autoplay");
-let shownState = "";
+const status = document.getElementById("timeStatus");
+const timeRadios = [...document.querySelectorAll('input[name="timePoint"]')];
+/** The time point at scene time s (within half a frame), if any. */
+const pointAt = s => TIME_POINTS.find(p => Math.abs(p.time - s) < 0.5 / SCENE.fps);
+/** Words for scene time s: a time point's name, or where between two it is. */
+function describe(s) {
+  const at = pointAt(s);
+  if (at) return at.label;
+  const after = TIME_POINTS.filter(p => p.time < s).pop(), before = TIME_POINTS.find(p => p.time > s);
+  return `Between ${after.label.toLowerCase()} and ${before.label.toLowerCase()}`;
+}
+const checkPoint = s => { for (const r of timeRadios) r.checked = Math.abs(+r.value - s) < 0.5 / SCENE.fps; };
+
+let shown = { pressed: null, value: null, text: null };
 const sequence = DayNightSequence.create({
   forward: tracks[0], backward: tracks[1], span: SCENE.span, fps: SCENE.fps,
-  autoplayRate: SCENE.autoplayRate, seekRate: SCENE.seekRate,
-  // Every animation frame: move the playhead, and show whether autoplay runs.
-  onUpdate({ position, mode }) {
-    timelineTrack.style.setProperty("--pos", `${(100 * position / SCENE.span).toFixed(3)}%`);
-    if (mode !== shownState) {
-      shownState = mode;
-      autoplayButton.setAttribute("aria-pressed", String(mode === "autoplay"));
+  autoplayRate: SCENE.autoplayRate,
+  // While anything moves (and once when it stops): move the playhead, keep
+  // the slider's value and the Autoplay button's state current.
+  onUpdate({ position, mode, playing }) {
+    timelineTrack.style.setProperty("--p", (position / SCENE.span).toFixed(4));
+    const pressed = mode === "autoplay" && playing;
+    if (pressed !== shown.pressed) {
+      shown.pressed = pressed;
+      autoplayButton.setAttribute("aria-pressed", String(pressed));
     }
+    // ARIA: the value in 0.1 s steps, the words whenever they change.
+    const value = Math.round(position * 10) / 10, text = describe(position);
+    if (value !== shown.value) { shown.value = value; playhead.setAttribute("aria-valuenow", value); }
+    if (text !== shown.text) { shown.text = text; playhead.setAttribute("aria-valuetext", text); }
+  },
+  // A move reached its target: select its time point (if it is one) and say so.
+  onArrive(s) {
+    checkPoint(s);
+    status.textContent = `Showing ${describe(s).toLowerCase()}.`;
   }
 });
 
-// Time points: play to the picked time (forward or backward) and stop there.
-document.getElementById("timeline").addEventListener("change", e => {
-  if (e.target.name !== "timePoint") return;
-  sequence.goTo(+e.target.value);
+// Time points: move to the picked time (forward or backward) and stop there.
+timeline.addEventListener("change", e => {
+  if (e.target.name === "timePoint") sequence.goTo(+e.target.value);
 });
-// Autoplay: resume the endless day -> night -> day loop from here.
+
+// Autoplay: a play / pause toggle for the endless day -> night -> day loop.
 autoplayButton.addEventListener("click", () => {
-  for (const input of document.querySelectorAll('input[name="timePoint"]')) input.checked = false;
-  sequence.autoplay();
+  if (autoplayButton.getAttribute("aria-pressed") === "true") {
+    sequence.pause();
+    status.textContent = "Autoplay paused.";
+  } else {
+    checkPoint(-1);
+    sequence.autoplay();
+    status.textContent = "Autoplay on.";
+  }
+});
+
+// The track: click anywhere to move there; drag to scrub through the day.
+// A press that moves less than DRAG_PX is a click (on a time point, its
+// label's own click selects it).
+const DRAG_PX = 4;
+let press = null, suppressClick = false;
+const sceneAtX = x => {
+  const r = timelineTrack.getBoundingClientRect();
+  return SCENE.span * Math.min(1, Math.max(0, (x - r.left) / r.width));
+};
+timelineTrack.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  press = { id: e.pointerId, x: e.clientX, dragging: false, onStop: !!e.target.closest(".timeline__stop") };
+});
+timelineTrack.addEventListener("pointermove", e => {
+  if (!press || e.pointerId !== press.id) return;
+  if (!press.dragging) {
+    if (Math.abs(e.clientX - press.x) < DRAG_PX) return;
+    press.dragging = true;
+    try { timelineTrack.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+    timeline.classList.add("is-scrubbing");
+    checkPoint(-1);
+  }
+  sequence.scrubTo(sceneAtX(e.clientX));
+});
+const release = e => {
+  if (!press || e.pointerId !== press.id) return;
+  const { dragging, onStop } = press;
+  press = null;
+  timeline.classList.remove("is-scrubbing");
+  if (dragging) {
+    sequence.endScrub();
+    // Let go near a time point: glide onto it; otherwise stay where dropped.
+    const near = TIME_POINTS.find(p => Math.abs(p.time - sceneAtX(e.clientX)) < 0.12);
+    if (near) sequence.goTo(near.time);
+    else status.textContent = `Showing ${describe(sequence.position).toLowerCase()}.`;
+    suppressClick = true;              // the click that follows a drag isn't a pick
+  } else if (!onStop && e.type === "pointerup") {
+    checkPoint(-1);
+    sequence.goTo(sceneAtX(e.clientX));
+  }
+};
+timelineTrack.addEventListener("pointerup", release);
+timelineTrack.addEventListener("pointercancel", release);
+timelineTrack.addEventListener("click", e => {
+  if (suppressClick) { suppressClick = false; e.preventDefault(); }
+}, true);
+
+// Keyboard: the playhead is a slider. Arrows move 1/4 s of film, Page keys
+// a whole second, Home / End go to morning / night.
+playhead.addEventListener("keydown", e => {
+  const s = sequence.position;
+  const to = { ArrowRight: s + 0.25, ArrowUp: s + 0.25, ArrowLeft: s - 0.25, ArrowDown: s - 0.25,
+               PageUp: s + 1, PageDown: s - 1, Home: 0, End: SCENE.span }[e.key];
+  if (to === undefined) return;
+  e.preventDefault();
+  checkPoint(-1);
+  sequence.goTo(Math.min(SCENE.span, Math.max(0, to)));
 });
 
 // Scripting and testing handles.
 window.dayNight = { sequence, renderers };
 
-// Boot: paint both videos, and start the loop. If the browser blocks
-// autoplay, the first click or key press anywhere starts it.
+// Boot: paint both videos and start the loop, unless the visitor asked for
+// reduced motion (then the film waits at morning until they choose). If the
+// browser blocks autoplay, the first click or key press starts it.
 for (const r of renderers) r.start();
-sequence.autoplay();
-const kick = () => { if (sequence.mode === "autoplay" && tracks.every(t => t.video.paused)) sequence.autoplay(); };
+if (!reducedMotion) sequence.autoplay();
+const kick = () => { if (sequence.mode === "autoplay" && !sequence.playing) sequence.autoplay(); };
 document.addEventListener("pointerdown", kick, { once: true });
 document.addEventListener("keydown", kick, { once: true });
 </script>

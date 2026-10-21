@@ -139,6 +139,19 @@
   // ---------------------------------------------------------------- small utilities
 
   /**
+   * Render size for a video of vw x vh shown in `el`: its width on screen in
+   * device pixels (rounded up to a multiple of 16), at the video's aspect
+   * ratio, never larger than the video.
+   * @returns {[number, number]}
+   */
+  function displaySize(el, vw, vh) {
+    const css = el.getBoundingClientRect().width;
+    if (!(css > 0)) return [vw, vh];
+    const w = Math.min(vw, Math.ceil(css * (window.devicePixelRatio || 1) / 16) * 16);
+    return [w, Math.round(w * vh / vw)];
+  }
+
+  /**
    * Resolves once the video has a frame to show.
    * @throws {PaintError} "load" when the video fails to load.
    */
@@ -185,6 +198,13 @@
    * @property {{ stats?: VideoStats }} [shareStats]  Renderers given the same
    *   object share one VideoStats (the first to start creates it), so videos of
    *   the same scene get the same slider medians and v3 calibration.
+   * @property {{ pipeline?: LightPipeline }} [sharePipeline]  Renderers given the
+   *   same object share ONE LightPipeline (one WebGL context, one set of
+   *   scratch targets) on an offscreen canvas; each copies its frames into its
+   *   own canvas with a 2D context. Halves GPU memory for pages with two videos.
+   * @property {boolean} [fitDisplay=false]  Render (and analyse) at the canvas's
+   *   size on screen in device pixels, never above the video's own size,
+   *   instead of always at the video's size.
    * @property {Object} elements  Page elements the renderer drives:
    * @property {HTMLElement} elements.app          Gets the .is-painted class.
    * @property {HTMLElement} [elements.ui]         Holds the paint / model radios it keeps checked (default: app).
@@ -250,6 +270,8 @@
     let src = null, mask = null, lightMap = null;
     /** @type {CanvasRenderingContext2D | null} The frame-locked top layer. */
     let copyCtx = null;
+    /** @type {CanvasRenderingContext2D | null} With a shared pipeline: where this renderer's frames go. */
+    let outCtx = null;
     /** v3 scene settings, and the stats version they were built from. */
     let scene = null, sceneVersion = -1;
     /** True once the canvas holds painted frames and .is-painted is on. */
@@ -312,6 +334,7 @@
         lightMap, src, model: activeModel, paint: paintAt(now), scene: currentScene(),
         detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1)
       });
+      if (outCtx) outCtx.drawImage(pipeline.canvas, 0, 0);        // shared pipeline: copy out at once
       if (newFrame) copyCtx.drawImage(source, 0, 0, copy.width, copy.height);
     }
 
@@ -425,18 +448,42 @@
       checkGates();
       const [sources, maskImg] = await Promise.all([loadShaders(glslUrl), decodeImage(options.mask), videoReady(source)]);
       if (!pipeline) {
-        const size = [source.videoWidth, source.videoHeight];
-        pipeline = new LightPipeline(canvas, {
-          analysis: size, render: size, sources, hooks: { onRestored, onError: fail },
-          wideGamut: supportsWideGamut()
-        });
-        src = pipeline.createSource(...size);
+        const native = [source.videoWidth, source.videoHeight];
+        const size = options.fitDisplay ? displaySize(canvas, ...native) : native;
+        const shared = options.sharePipeline;
+        if (shared) {
+          // One pipeline for every renderer on the page; its hooks reach them all.
+          if (!shared.pipeline) {
+            shared.renderers = new Set();
+            shared.pipeline = new LightPipeline(document.createElement("canvas"), {
+              analysis: size, render: size, sources, wideGamut: supportsWideGamut(),
+              preserveDrawingBuffer: true,      // copied out with drawImage after each render
+              hooks: {
+                onRestored: () => { for (const r of shared.renderers) r.onRestored(); },
+                onError: err => { for (const r of shared.renderers) r.onError(err); }
+              }
+            });
+          }
+          pipeline = shared.pipeline;
+          shared.renderers.add({ onRestored, onError: fail });
+          Object.assign(canvas, { width: pipeline.rw, height: pipeline.rh });
+          outCtx = canvas.getContext("2d", { colorSpace: pipeline.outputSpace === "display-p3" ? "display-p3" : "srgb" });
+        } else {
+          pipeline = new LightPipeline(canvas, {
+            analysis: size, render: size, sources, hooks: { onRestored, onError: fail },
+            wideGamut: supportsWideGamut()
+          });
+        }
+        // The frame at full size, as an sRGB texture: DECODE's and RENDER's
+        // downscales (mipmaps) then average linear light. Same upload cost as
+        // RGBA8 (measured: ~1 ms per 1080p frame with mipmaps).
+        src = pipeline.createSource(...native, { mipmaps: pipeline.aw < native[0], srgb: true });
         mask = pipeline.createSource(maskImg.naturalWidth, maskImg.naturalHeight, { mipmaps: true });
         pipeline.upload(mask, maskImg);
         lightMap = pipeline.createLightMap();
         stats = options.shareStats ? (options.shareStats.stats ??= new VideoStats(source, maskImg))
                                    : new VideoStats(source, maskImg);
-        Object.assign(copy, { width: size[0], height: size[1] });
+        Object.assign(copy, { width: pipeline.rw, height: pipeline.rh });
         copyCtx = copy.getContext("2d");
       }
       painting = true;
