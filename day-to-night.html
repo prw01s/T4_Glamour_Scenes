@@ -38,7 +38,8 @@
   .film {
     position: relative;
     isolation: isolate;
-    width: min(100%, calc(var(--w) * 1px));
+    width: 100%;
+    max-width: 960px;           /* half the videos' native 1920 px width */
     aspect-ratio: var(--w) / var(--h);
     border-radius: 3px;
     overflow: hidden;
@@ -230,7 +231,9 @@ const SCENE = {
   backward: "images/videos/study_night-to-day.mp4",
   mask:     "images/masks/day-night-mask.png",
   label:    "Study, from morning light to night",
-  width: 1920, height: 1080, span: 5, fps: 24
+  width: 1920, height: 1080, span: 5, fps: 24,
+  autoplayRate: 0.75,  // playback speed of the endless loop
+  seekRate: 2          // playback speed when moving to a time point
 };
 
 /** The time points, in seconds of the day-to-night video. */
@@ -311,6 +314,7 @@ const autoplayButton = document.getElementById("autoplay");
 let shownState = "";
 const sequence = DayNightSequence.create({
   forward: tracks[0], backward: tracks[1], span: SCENE.span, fps: SCENE.fps,
+  autoplayRate: SCENE.autoplayRate, seekRate: SCENE.seekRate,
   // Every animation frame: move the playhead, and show whether autoplay runs.
   onUpdate({ position, mode }) {
     timelineTrack.style.setProperty("--pos", `${(100 * position / SCENE.span).toFixed(3)}%`);

@@ -24,7 +24,8 @@
  *             parked at its start in advance, so the hand-over is immediate.
  *   seek      goTo(s): play toward scene time s and pause there. Moving later
  *             in the day plays the forward video, earlier plays the backward
- *             one (switching to it first if needed), at normal speed.
+ *             one (switching to it first if needed).
+ *   Each mode has its own playback speed (autoplayRate, seekRate).
  *   idle      paused at a time point (after a seek).
  *
  * Exposes window.DayNightSequence.create().
@@ -58,10 +59,12 @@
    * @param {Track} o.backward  Night -> morning.
    * @param {number} [o.span=5]  Scene length in seconds (the shorter video's duration).
    * @param {number} [o.fps=24]  Frame rate, for stopping on the exact frame.
+   * @param {number} [o.autoplayRate=1]  Playback speed in autoplay mode.
+   * @param {number} [o.seekRate=1]      Playback speed when moving to a time point.
    * @param {(state: { position: number, mode: string, target: number | null }) => void} [o.onUpdate]
    *   Called on every animation frame with the scene time and mode.
    */
-  function create({ forward, backward, span = 5, fps = 24, onUpdate = () => {} }) {
+  function create({ forward, backward, span = 5, fps = 24, autoplayRate = 1, seekRate = 1, onUpdate = () => {} }) {
     const frame = 1 / fps;
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
     /** @type {Track} The track on top. */
@@ -78,7 +81,11 @@
     const sceneTime = (track, t = track.video.currentTime) => clamp(track === forward ? t : span - t, 0, span);
     /** The video time at which `track` shows scene time s. */
     const videoTime = (track, s) => clamp(track === forward ? s : span - s, 0, track.video.duration || span);
-    const play = video => video.play().catch(() => {});      // autoplay may be blocked; the page retries on input
+    /** Plays at the current mode's speed (autoplay may be blocked; the page retries on input). */
+    const play = video => {
+      video.playbackRate = mode === "autoplay" ? autoplayRate : seekRate;
+      video.play().catch(() => {});
+    };
 
     function stack() {
       active.layer.style.zIndex = 2;
