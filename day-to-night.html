@@ -84,13 +84,16 @@
   /* SET 1: time of day */
   .timeline { flex: 1 1 380px; min-width: 0; }
   .timeline__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-  .timeline__row { display: flex; align-items: flex-start; gap: 20px; }
+  .timeline__label { font-weight: 700; }
+  /* The Autoplay button wraps under the track when there isn't room beside it */
+  .timeline__row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 20px; }
   .timeline__track {
     --pos: 0%;
     position: relative;
-    flex: 1 1 auto;
+    flex: 1 1 280px;
+    min-width: 210px;         /* Noon and Sunset are 20 % apart (42 px here): their labels stay clear */
     height: 64px;
-    margin-inline: 30px;      /* room for the end labels, which centre on their stops */
+    margin-inline: 26px;      /* room for the end labels, which centre on their stops */
   }
   .timeline__rail, .timeline__fill {
     position: absolute; left: 0; top: 14px; height: 4px; border-radius: 2px;
@@ -135,7 +138,7 @@
     margin-top: 2px;
     padding: 6px 14px;
     border: 1px solid var(--rule); border-radius: 3px;
-    background: none; font: inherit; font-size: 14px; color: var(--graphite);
+    background: none; font: inherit; font-size: 14px; font-weight: 700; color: var(--graphite);
     cursor: pointer;
   }
   .timeline__autoplay:hover { border-color: var(--graphite); }
@@ -152,6 +155,7 @@
 
   /* ---- mobile (<640) ------------------------------------------------------- */
   @media (max-width: 639.98px) {
+    .timeline__name { font-size: 13px; }
     .chips { gap: 10px; }
     .chip__hex { font-size: 11px; }
     .controls { flex-basis: 100%; }
@@ -168,16 +172,16 @@
 
   <div class="deck">
     <fieldset class="timeline" id="timeline">
-      <legend class="vh">Time of day</legend>
-      <div class="timeline__head"><span class="deck__label" aria-hidden="true">Time of day</span></div>
+      <legend class="vh">Select a time of day for the scene, or view in Autoplay mode.</legend>
+      <div class="timeline__head"><span class="deck__label timeline__label" aria-hidden="true">Select a time of day for the scene, or view in Autoplay mode.</span></div>
       <div class="timeline__row">
         <div class="timeline__track" id="timelineTrack">
           <div class="timeline__rail"></div>
           <div class="timeline__fill"></div>
           <div class="timeline__playhead" aria-hidden="true"></div>
         </div>
-        <!-- Appears after the first time point is picked (see the script) -->
-        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false" hidden>Autoplay</button>
+        <!-- Pressed while the loop plays; click to resume it after picking a time point -->
+        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false">Autoplay</button>
       </div>
     </fieldset>
 
@@ -326,10 +330,8 @@ const sequence = DayNightSequence.create({
 });
 
 // Time points: play to the picked time (forward or backward) and stop there.
-// The first pick reveals the Autoplay button.
 document.getElementById("timeline").addEventListener("change", e => {
   if (e.target.name !== "timePoint") return;
-  autoplayButton.hidden = false;
   sequence.goTo(+e.target.value);
 });
 // Autoplay: resume the endless day -> night -> day loop from here.
