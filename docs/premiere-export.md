@@ -1,113 +1,189 @@
-# Exporting the day-to-night videos from Premiere Pro
+# Preparing the day-to-night videos in Premiere Pro
 
-`day-to-night.html` plays `images/videos/study_day-night.mp4` and
-`images/videos/study_night-to-day.mp4` as one film. Two things about how they
-are exported decide how smooth it can be:
+A step-by-step guide for first-time Premiere users. It takes about 20 minutes.
 
-1. **Keyframe spacing (seeking speed).** To show any frame, the browser decodes
-   forward from the previous keyframe. The current `study_day-night.mp4` has a
-   single keyframe (frame 1), so seeking near its end decodes the whole clip:
-   measured 75 ms, against 21 ms near the start. `study_night-to-day.mp4` has
-   one every 47 frames (8–26 ms). Seeks happen on every direction change,
-   every exact stop, and continuously while dragging the timeline.
-2. **An exact reverse.** The page shows scene time *s* on the forward video at
-   *s* and on the backward one at 5 − *s*. Today the two are separate renders
-   that differ by about 6 levels at matching moments, so every switch needs a
-   crossfade to hide the difference. If night-to-day is the forward video's
-   frames in reverse order, switches are pixel-identical.
+## What you're making, and why
 
-Target for both files: **H.264, 1920 × 1080, exactly 24 fps, 120 frames
-(5.000 s), a keyframe every 6 frames, no B-frames, no audio.**
+`day-to-night.html` plays two videos as one film. You'll make new copies of
+both:
+
+- **`study_day-night.mp4`**: the same film, re-saved so the browser can jump
+  to any moment quickly. The current file has a single keyframe, a complete
+  picture the browser can start decoding from, at the very start. To show a
+  frame near the end, the browser decodes the whole clip first. The new file
+  gets a keyframe every 6 frames, so jumps, stops and dragging the timeline are
+  quick everywhere.
+- **`study_night-to-day.mp4`**: exactly the same film played backwards. Today
+  it's a separate render that looks slightly different, so the page has to
+  crossfade every time it changes direction. An exact mirror makes the switch
+  seamless.
+
+You only need `study_day-night.mp4`, because the backwards copy is made from
+it. The current files stay untouched. You'll export into a new folder, and they
+are checked before they replace the old ones.
+
+**Before you start**
+- Premiere shows time as **hours:minutes:seconds:frames**, so `00:00:04:23` is
+  4 seconds and 23 frames.
+- The film runs at 24 frames per second, so it is 120 frames long:
+  `00:00:00:00` to `00:00:04:23`.
+- On a Mac keyboard without **Home** and **End** keys, use **Fn + ←** for
+  Home and **Fn + →** for End.
+- If a panel goes missing, use **Window > Workspaces > Reset to Saved Layout**.
 
 ---
 
-## A. Make night-to-day the exact reverse of day-to-night
+## Part 1. Create a project and bring in the video
 
-Work from the Premiere project that produced the day-to-night clip (the
-`images/videos/premiere files` folder), not from the exported MP4, so the
-reverse isn't a re-compression of a compressed file.
+1. Open Premiere Pro. On the start screen, click **New project**.
+2. The Import screen opens. Fill in the top of it:
+   - **Project name:** `day-night-web`
+   - **Project location:** click it and choose
+     `T4_Glamour_Scenes/images/videos/premiere files`. Premiere keeps its
+     working files next to the project, so this keeps them out of the
+     website's folders.
+3. In the left column, go to **T4_Glamour_Scenes > images > videos**. Click
+   **`study_day-night.mp4`** once so it gets a blue tick. Select only this
+   file.
+4. On the right, make sure **Create new sequence** is switched on, and name it
+   `study_day-night`.
+5. Click **Create** (bottom right).
 
-1. **Check the day-to-night sequence settings.** Open the sequence, then
-   **Sequence > Sequence Settings…**
-   - Timebase: **24.00 frames/second** (not 23.976: the page assumes 24).
-   - Frame Size: **1920 × 1080**, Pixel Aspect Ratio: **Square Pixels (1.0)**,
-     Fields: **No Fields (Progressive Scan)**.
-2. **Trim it to exactly 120 frames.** Set the In point on the first frame
-   (`00:00:00:00`) and the Out point on `00:00:04:23` (the 120th frame), with
-   **Markers > Mark In / Mark Out** (I / O). The current export runs 5.035 s,
-   one frame's worth too long.
-3. **Duplicate the sequence.** In the Project panel, right-click the sequence >
-   **Duplicate**. Rename the copy `study_night-to-day`.
-4. **Nest it.** Open the copy, select everything on the timeline (**Cmd+A**),
-   right-click > **Nest…**, name it `day-to-night (nested)`, OK. The whole edit
-   (clips, transitions, effects) is now one clip, so reversing it reverses the
-   finished frames exactly.
-5. **Reverse it.** Select the nested clip, then **Clip > Speed/Duration…**
-   (Cmd+R):
-   - Speed: **100 %** (Duration stays 00:00:05:00).
-   - Tick **Reverse Speed**.
-   - Time Interpolation: **Frame Sampling**. (Frame Blending or Optical Flow
-     would invent new in-between frames, and the reverse would no longer
-     match.)
-   - OK.
-6. **Set In and Out again** on this sequence: `00:00:00:00` to `00:00:04:23`.
-7. **Check the ends.** The first frame of `study_night-to-day` must be the
-   last frame (`00:00:04:23`) of the day-to-night sequence, and its last frame
-   the first. Step through with the arrow keys in the Program Monitor, or use
-   **Export Frame** (the camera icon) on both and compare.
+The editing screen opens:
+- the picture is in the top right (the **Program Monitor**);
+- the **Project** panel is in the bottom left;
+- the **Timeline**, with your clip on it, is in the bottom right.
 
-## B. Export settings (use for both sequences)
+> Different start screen? Use **File > New > Project…**, then
+> **File > Import…** (Cmd+I) to bring in the video. In the Project panel,
+> right-click the video and choose **New Sequence From Clip**.
+>
+> Already in the editing screen with a sequence called **Sequence 01** that
+> holds the clip? Then this part is done. In the Project panel, right-click
+> **Sequence 01**, choose **Rename**, and call it `study_day-night`.
 
-With the sequence active, open **File > Export > Media…** (Cmd+M). Use the
-**Export** workspace's settings, or click **More settings…** if your version
-opens the simplified dialog.
+## Part 2. Tidy the day-to-night sequence
 
-1. **Format:** H.264. **Preset:** Custom (start from "Match Source – High
-   bitrate" if you like, then change the settings below).
-2. **Range:** Source In/Out (the 120 frames you marked).
-3. **Video tab**
-   - Frame Size: **1920 × 1080**. Frame Rate: **24**. Field Order:
-     **Progressive**. Aspect: **Square Pixels (1.0)**.
-   - **Encoding Settings**
-     - Performance: **Software Encoding**. (Hardware encoding may ignore or
-       grey out the options below; Premiere also switches to software by
-       itself when hardware can't honour a setting.)
-     - Profile: **Baseline**. Baseline doesn't allow B-frames, which is the
-       only way to rule them out in Premiere (it has no B-frame setting).
-       Its compression is a little less efficient, so it gets a bit more
-       bitrate below. If Baseline isn't offered, use **High**: the keyframe
-       distance (next) is the larger gain.
-     - Level: **4.2**.
-   - **Bitrate Settings**
-     - Bitrate Encoding: **VBR, 2 pass**.
-     - Target Bitrate: **12 Mbps**. Maximum Bitrate: **16 Mbps**. (The current
-       files are about 9.5 Mbps. More keyframes and no B-frames need more
-       bits for the same quality; expect files of about 8–10 MB each.)
-   - **Advanced Settings**
-     - Tick **Key Frame Distance** and set it to **6**. That is a keyframe
-       every quarter second at 24 fps, so any frame is at most 5 frames from
-       one. (Premiere may add extra keyframes at hard cuts; that's fine.)
-   - Colour: **Rec. 709** output (the default for SD/HD), no HDR.
-4. **Audio tab:** untick **Export Audio** (or set the audio track off). The
-   page plays the videos muted, and the AAC audio track is the likely source
-   of the extra 0.035 s on the current day-to-night file.
-5. **Multiplexer tab:** MP4, Stream Compatibility: **Standard**.
-6. Leave **Use Previews** unticked, so frames are rendered fresh.
-7. **File names**: `study_day-night.mp4` (the day-to-night sequence) and
-   `study_night-to-day.mp4` (the reversed one). **Export**, then replace the two
-   files in `images/videos/`.
+1. **Remove the sound.** In the Timeline, the clip is two strips: the upper one
+   is **V1**, the video (blue or purple), and the lower one is **A1**, the
+   audio (green).
+   1. Right-click the clip and choose **Unlink**.
+   2. Click an empty part of the Timeline.
+   3. Click only the green audio strip and press **Delete**.
 
-## C. After exporting
+   Only the video strip should be left.
+2. **Check the settings.** Choose **Sequence > Sequence Settings…** It should
+   show:
+   - **Timebase:** 24.00 frames/second
+   - **Frame Size:** 1920 horizontal, 1080 vertical
 
-Ask Claude (or re-run the checks used in this project) to confirm:
+   Click **Cancel** without changing anything. If it shows something else,
+   such as 23.976, stop and ask before continuing.
+3. **Check the length.** Click inside the Timeline and press **End**. The blue
+   timecode at the top left of the Timeline should read **`00:00:05:00`**,
+   the moment just after the last frame.
 
-- each file has 120 frames at 24 fps, 5.000 s, no audio track;
-- the keyframe table lists a keyframe every 6 frames, and there are no B-frames;
-- frame *k* of night-to-day matches frame 119 − *k* of day-to-night exactly.
+## Part 3. Make the backwards copy
 
-Once the reverse is exact, the crossfade on every switch (400 ms in
-`js/dayNightSequence.js`) can be shortened or dropped, and dragging along the
-timeline becomes fluid on both videos.
+1. In the Project panel, find the **sequence** named `study_day-night`. Its
+   icon looks like a small timeline; the video file's icon is a film strip.
+   Right-click the sequence and choose **Duplicate**. A copy named
+   `study_day-night Copy` appears.
+2. Right-click the copy, choose **Rename**, type `study_night-to-day` and press
+   Return.
+3. Right-click `study_night-to-day` and choose **Open in Timeline**.
+   (Double-clicking its thumbnail also works; double-clicking its *name*
+   starts renaming it instead, so press Esc if that happens.) It opens as a
+   second tab in the Timeline; the tab's name shows which sequence you're
+   editing.
+4. In that Timeline, click the video clip once to select it.
+5. Choose **Clip > Speed/Duration…** (Cmd+R) and set:
+   - **Speed:** 100 % (leave it as it is)
+   - **Reverse Speed:** ticked
+   - **Ripple Edit** and **Maintain Audio Pitch:** unticked
+   - **Time Interpolation:** **Frame Sampling**. The other options invent
+     in-between pictures, and the copy would no longer be an exact mirror.
+
+   Click **OK**. The clip's name now ends in `[-100%]`.
+6. **Check it:**
+   1. Press **Home**. The Program Monitor should show the night picture (the
+      darkest one).
+   2. Press **End**, then **←** once. It should show the bright morning
+      picture.
+   3. The timecode at End should still read `00:00:05:00`.
+7. Save the project: **File > Save** (Cmd+S).
+
+## Part 4. Export the first file
+
+1. In the Timeline, click the **`study_day-night`** tab so it's the active
+   sequence.
+2. Click **Export** at the top left of the window (next to Import and Edit).
+3. In the left column, make sure **Media File** is switched on. Leave the other
+   destinations off.
+4. Set the top of the settings:
+   - **File Name:** `study_day-night` (Premiere adds `.mp4`).
+   - **Location:** click the blue location text and go to
+     **T4_Glamour_Scenes > images > videos**. Click **New Folder**, name it
+     `export`, click **Create**, then click **Choose**.
+   - **Preset:** **High Quality 1080p HD**. It changes to "Custom" once you
+     change the settings below; that's expected.
+   - **Format:** **H.264**.
+5. Click **Video** to open that section. If you can't see every setting below,
+   click **More** at the bottom of the section.
+   - **Frame Size:** 1920 × 1080. **Frame Rate:** 24.
+   - **Field Order:** Progressive. **Aspect:** Square Pixels (1.0).
+   - **Performance:** **Software Encoding**. Hardware encoding is faster, but
+     it ignores some of the settings below.
+   - **Profile:** **Baseline**. If Baseline isn't in the list, choose **High**.
+   - **Level:** **4.2**.
+   - **Bitrate Encoding:** **VBR, 2 pass**.
+   - **Target Bitrate:** **12** Mbps. **Maximum Bitrate:** **16** Mbps.
+   - **Key Frame Distance:** tick it and type **6**. This is the most important
+     setting.
+6. **Audio:** untick the box next to the **Audio** heading. If there's no box,
+   that's fine: the sequence has no sound now.
+7. **Multiplexer:** **MP4**, Stream Compatibility **Standard**. This is
+   usually already set.
+8. **General:** leave **Use Previews** unticked.
+9. Under the preview picture, set **Range** to **Entire Source**. The duration
+   should read `00:00:05:00`.
+10. (Optional) To reuse these settings for the second file, click the **…**
+    next to Preset, choose **Save Preset**, and name it `Glamour web`.
+11. Click **Export** (bottom right). It takes about a minute.
+
+## Part 5. Export the second file
+
+1. Click **Edit** at the top left.
+2. In the Timeline, click the **`study_night-to-day`** tab.
+3. Click **Export** again. Choose the `Glamour web` preset, or check that the
+   settings from Part 4 are still there. Look especially at **Software
+   Encoding**, **Baseline** and **Key Frame Distance 6**.
+4. **File Name:** `study_night-to-day`. **Location:** the same `export` folder.
+5. Click **Export**.
+6. Back in Edit, save the project (Cmd+S).
+
+## Part 6. Check the files
+
+The two new files are in `images/videos/export/`. Ask Claude to check them, or
+re-run the checks used in this project. Each file should have:
+
+- 120 frames at 24 fps and no audio track;
+- a keyframe every 6 frames, and no B-frames;
+- for night-to-day, frame *k* matching frame 119 − *k* of day-to-night.
+
+Then the files replace the ones in `images/videos/`, with the old ones kept as
+a backup. With an exact mirror, the 400 ms crossfade in
+`js/dayNightSequence.js` can be shortened or removed.
+
+## If something goes wrong
+
+| Problem | Fix |
+| --- | --- |
+| Baseline is missing or greyed out | Set **Performance** to **Software Encoding** first. |
+| No **Key Frame Distance** setting | Click **More** at the bottom of the Video section. It's under Advanced Settings. |
+| Duration reads `00:00:05:01` or longer | The audio strip is still in the sequence. Repeat Part 2, step 1. |
+| The backwards copy looks blurry or jerky | Set Time Interpolation to **Frame Sampling** (Part 3, step 5). |
+| The wrong sequence was exported | Export uses the sequence that was active when you clicked Export. Go back to Edit, click the right Timeline tab, and export again. |
 
 ## Sources
 
