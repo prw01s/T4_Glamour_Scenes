@@ -59,6 +59,7 @@
  *                 prepare other rooms when idle.
  *   paint/model   setPaint() / setModel() -> scheduleRender() (one per frame)
  *                 -> flush() -> staggered fades.
+ *   sheen         (sheen mode, sheenSceneRenderer.html) setSheen() -> the same.
  *   sliders       setContrast() / setSaturation() / setSatMeasure() ->
  *                 scheduleRender(false) -> flush() -> instant repaint, so the
  *                 walls follow the thumb while dragging.
@@ -226,11 +227,23 @@
    */
 
   /**
+   * Sheen mode (sheenSceneRenderer.html): the walls are rendered with v3 and
+   * a paint sheen (glsl/sheen.glsl; js/sheenModel.js builds the jobs).
+   * @typedef {Object} SheenOptions
+   * @property {string} initial   Sheen on screen at load (must match the page's select).
+   * @property {string[]} keys    Every valid sheen.
+   * @property {string} glslUrl   The sheen shader file (glsl/sheen.glsl).
+   * @property {(room: string, time: string, sheen: string) => { uniforms: Record<string, any>, envKey: string }} jobFor
+   *   The sheen uniforms for one photo (SheenModel.sheenJob).
+   */
+
+  /**
    * @typedef {Object} RendererOptions
    * @property {Record<string, Room>} rooms  Every room, keyed like the photos' data-room values.
    * @property {string} initialPaint  Paint on screen at load (#rrggbb).
    * @property {"v1" | "v2" | "v3"} [initialModel="v2"]  Must match the checked model radio.
    * @property {string} [glslUrl]  Shader file (default "glsl/shaderSceneRender.glsl").
+   * @property {SheenOptions} [sheen]  Turns on sheen mode (needs initialModel "v3").
    * @property {Object} elements  Page elements the renderer drives:
    * @property {HTMLElement} elements.app         Gets the .is-painted class.
    * @property {HTMLElement} elements.renderer    Holds the figure.scene tiles; its
@@ -255,6 +268,8 @@
    * @property {(hex: string) => Promise<void>} setPaint
    * @property {(room: string) => Promise<void>} setRoom
    * @property {(model: string) => Promise<void>} setModel
+   * @property {string | null} activeSheen  Sheen mode: the current sheen (read-only).
+   * @property {(sheen: string) => Promise<void>} setSheen  Sheen mode only.
    * @property {(amount: number) => Promise<void>} setContrast    -1..1, 0 = as shot.
    * @property {(amount: number) => Promise<void>} setSaturation  -1..1, 0 = as shot.
    * @property {(measure: string) => Promise<void>} setSatMeasure "full" | "chroma".
@@ -275,6 +290,8 @@
     const { rooms, elements } = options;
     const { app, renderer, controls, notice, readoutHex, readoutLrv } = elements;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
+    /** @type {SheenOptions | null} */
+    const sheenOpts = options.sheen || null;
 
     // ------------------------------------------------------------ state
 
@@ -284,6 +301,9 @@
     let activeRoom = renderer.dataset.room;
     /** Lighting model. Written by setModel(). */
     let activeModel = toModel(options.initialModel || "v2");
+    /** Sheen mode: the paint's sheen. Written by setSheen(). */
+    let activeSheen = sheenOpts ? sheenOpts.initial : null;
+    if (sheenOpts && activeModel !== "v3") throw new RangeError("Sheen mode needs the v3 model");
     /** Slider settings, -1..1 (0 = as shot). Written by the slider setters. */
     const sliders = { contrast: 0, saturation: 0, satMeasure: "full" };
     /** Room actually on screen; changes only inside setRoom()'s swap(). */
@@ -371,7 +391,11 @@
         const [maskImg] = await Promise.all([maskImage(room), ...imgs.map(img => img.decode().catch(() => {
           if (!img.naturalWidth) throw new PaintError("load", `Couldn't load ${img.src}`);
         }))]);
-        const mask = pipeline.createSource(maskImg.naturalWidth, maskImg.naturalHeight, { mipmaps: true });
+        // Masks larger than the largest render size are uploaded at that size
+        // (a 4000² mask would take ~85 MB of GPU memory with its mipmaps).
+        const mScale = Math.min(1, MAX_RENDER_SIZE / Math.max(maskImg.naturalWidth, maskImg.naturalHeight));
+        const mask = pipeline.createSource(Math.round(maskImg.naturalWidth * mScale), Math.round(maskImg.naturalHeight * mScale),
+                                           { mipmaps: true });
         pipeline.upload(mask, maskImg);
         const n = pipeline.rw;
         const entries = imgs.map(img => {
@@ -396,16 +420,18 @@
 
     /**
      * A draw callback for SceneTile.present(): renders one photo with the
-     * current paint, model and sliders, then copies the pipeline's canvas into
-     * the tile canvas right away (the next render overwrites it).
+     * current paint, model, sliders (and sheen), then copies the pipeline's
+     * canvas into the tile canvas right away (the next render overwrites it).
+     * @param {string} time  The tile's time of day (for the sheen job).
      */
-    function drawer(entry, data) {
+    function drawer(entry, data, time) {
       return ctx => {
         analyse(entry, data);
         const adjust = adjustmentFor(data);
         pipeline.render({
           lightMap: entry.lightMap, src: entry.src, model: activeModel, paint: paintSpec(activePaintColor),
-          scene: entry.scene, detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1)
+          scene: entry.scene, detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1),
+          sheen: sheenOpts ? { mask: data.mask, ...sheenOpts.jobFor(shownRoom, time, activeSheen) } : undefined
         });
         ctx.drawImage(pipeline.canvas, 0, 0);
       };
@@ -444,7 +470,7 @@
       try {
         const data = roomData[shownRoom], animate = fades && !reducedMotion.matches;
         return Promise.all(tiles.map((tile, i) =>
-          tile.present(drawer(data.entries[i], data), animate, i * STAGGER_MS))).then(() => {});
+          tile.present(drawer(data.entries[i], data, tile.time), animate, i * STAGGER_MS))).then(() => {});
       } catch (err) { fail(err); }
     }
 
@@ -455,7 +481,7 @@
      */
     function repaint() {
       const data = roomData[shownRoom];
-      tiles.forEach((tile, i) => tile.present(drawer(data.entries[i], data), false));
+      tiles.forEach((tile, i) => tile.present(drawer(data.entries[i], data, tile.time), false));
     }
 
     /**
@@ -506,6 +532,19 @@
     function setModel(model) {
       activeModel = toModel(model);
       syncRadio("model", model);
+      return scheduleRender();
+    }
+
+    /**
+     * Sheen mode: sets the paint's sheen (one of SheenOptions.keys). The
+     * select updates at once; the walls fade to it on the next frame.
+     * @throws {RangeError} For an unknown sheen, or outside sheen mode.
+     */
+    function setSheen(sheen) {
+      if (!sheenOpts) throw new RangeError("setSheen: this renderer has no sheen mode");
+      if (!sheenOpts.keys.includes(sheen)) throw new RangeError(`Unknown sheen "${sheen}"`);
+      activeSheen = sheen;
+      for (const sel of app.querySelectorAll('select[name="sheen"]')) sel.value = sheen;
       return scheduleRender();
     }
 
@@ -587,7 +626,7 @@
     async function startPainting() {
       checkGates();
       if (!pipeline) {
-        const sources = await loadShaders(glslUrl);
+        const sources = await loadShaders(glslUrl, { sheenUrl: sheenOpts ? sheenOpts.glslUrl : undefined });
         const firstPhoto = Object.values(tiles[0].imgs)[0];
         const photoSize = firstPhoto.naturalWidth || +firstPhoto.getAttribute("width") || MAX_RENDER_SIZE;
         const n = renderSizeFor(tiles[0].frame, photoSize);
@@ -596,7 +635,8 @@
           hooks: { onRestored, onError: fail },
           wideGamut: colorSpace === "display-p3",
           // The canvas is copied out with drawImage right after each render.
-          preserveDrawingBuffer: true
+          preserveDrawingBuffer: true,
+          sheen: !!sheenOpts
         });
         for (const tile of tiles) tile.resize(n);
       }
@@ -633,11 +673,12 @@
       get activePaintColor() { return activePaintColor; },
       get activeRoom() { return activeRoom; },
       get activeModel() { return activeModel; },
+      get activeSheen() { return activeSheen; },
       get ready() { return ready; },
       get sliders() { return { ...sliders }; },
       get size() { return tiles[0].n; },
       get outputSpace() { return pipeline ? pipeline.outputSpace : colorSpace; },
-      setPaint, setRoom, setModel, setContrast, setSaturation, setSatMeasure,
+      setPaint, setRoom, setModel, setSheen, setContrast, setSaturation, setSatMeasure,
       start() { return (ready ??= startPainting().catch(fail)); },
       roomInfo(room) {
         const d = roomData[room];

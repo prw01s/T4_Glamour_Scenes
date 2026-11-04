@@ -24,6 +24,7 @@ Then open:
 | http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side) |
 | http://localhost:8000/videoShaderRenderer.html | One room in a video whose light changes; every frame is repainted |
 | http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one): autoplay loop, time points, drag through the day |
+| http://localhost:8000/sheenSceneRenderer.html | One room by day and by night in Flat, Eggshell, Satin or Semi-gloss: reflections, sheen bands and the colour shift of each finish (see "Paint sheen" below; `?calib` draws the solved room geometry) |
 | http://localhost:8000/tests/ | Automated tests of the colour science and the shaders |
 
 Add `?nogl` to a page's address to see its fallback (plain photos / video).
@@ -40,6 +41,8 @@ original image, so only the walls change.
 shaderSceneRenderer.html ─ js/shaderSceneRender.js ─┐   tiles, rooms, fades, room switching
 videoShaderRenderer.html ─ js/videoShaderRender.js ─┤   video frames, frame-locked layers, paint fades
 day-to-night.html ──────── js/videoShaderRender.js ─┤   (one renderer per video, shared statistics)
+sheenSceneRenderer.html ── js/shaderSceneRender.js ─┤   (sheen mode) + js/sheenModel.js: sheens, camera
+                           glsl/sheen.glsl          │   ENV + ENVDOWN passes, sheen code in RENDER
                            js/dayNightSequence.js   │   eased loop and moves, crossfades, scrubbing
                            js/tuningControls.js ────┤   Tinting algo, sliders (markup + wiring)
                            css/visualizer.css       │   shared styles
@@ -147,6 +150,44 @@ or dragged, and the playhead is a keyboard slider. Both videos are painted by
 one shared GPU pipeline at the film's size on screen. Smooth seeking depends
 on the video encoding: see "Exporting the videos" below.
 
+## Paint sheen (sheenSceneRenderer.html)
+
+Sheen is roughness, not reflectivity: every paint reflects ~4 % of light at
+its surface, in the light's colour (Fresnel, binder n ≈ 1.5); flats scatter
+it everywhere (a faint white veil over the colour), glossy paints gather it
+into reflections. So, away from highlights, glossier paint looks deeper and
+more saturated (most for dark colours), and near windows and lamps it shows
+sheen bands, reflections and hotspots in the light's colour. The full
+research, with sources and measurements, is in `docs/sheen-science.md`.
+
+* **Flat = the swatch.** The page renders v3 (the physical model). Paint
+  colours are measured specular-included, which is the matte look, so v3's
+  result is Flat; each other sheen swaps the swatch's surface veil for what
+  a GGX gloss lobe actually reflects: `c' = c + (1 − v) Fs (Ls − W)`.
+* **Sheens** (`SHEENS` in `js/sheenModel.js`): GGX α 0.30 / 0.075 / 0.045 /
+  0.025, diffused share v 0.95 / 0.45 / 0.30 / 0.10, grazing coefficient for
+  85° sheen. A virtual ASTM D523 gloss meter puts them inside the MPI levels:
+  60° GU 0.2 / 10.9 / 23.7 / 48.5, 85° 3.5 / 22.1 / 47.8 / 84.9 (G1, G3, G4,
+  G5). The lobe's albedo uses exact Fresnel (n = 1.5) and Smith masking.
+* **Reflections are traced**: `solveCamera` recovers the camera (f ≈ 4530 px,
+  25°) and the two walls and floor from straight lines in the photo; for each
+  wall pixel, 16 directions drawn from the GGX lobe for that pixel's viewing
+  direction are traced to the other wall or the floor and read from an HDR
+  blur pyramid of the photo whose walls carry the new paint (filtered
+  importance sampling), so reflections have the right blur and stretch.
+  Window panes and bulbs are restored to light-source brightness with gains
+  from energy balance (×7, ×12), and show unpainted.
+* **Glints** come from the wall's own texture (linear shape from shading
+  against each photo's key light), so they sit where real ones would.
+* Measured in the app (teal #607D84, back wall): off-highlight ΔL\* −0.9 /
+  −1.5 / −2.1 (day) and −1.3 / −1.8 / −2.4 (night) for Eggshell / Satin /
+  Semi-gloss, with chroma rising; in the window's reflection +13 / +20 / +29
+  with chroma falling (the light's colour). docs/sheen-science.md §5A lists
+  what a second review corrected.
+
+`python3 -I tests/sheen_check.py` prints the gloss-meter readings and the
+colour shifts for sample paints, and fails if a sheen leaves its MPI band.
+
 ## Controls
 
 * **Tinting algo**: v3 / v2 / v1.
@@ -204,12 +245,18 @@ transfer curves, Oklab, matrices, Display P3, colour temperature, the spectral
 paint fit, statistics and adaptation, and GPU tests of every model on small
 synthetic images (the swatch identity under white light, interreflection,
 mask-weighted blur, the detail layer, warm light, the sliders, P3 output).
+Sheen: the camera solver recovers a known camera; Flat equals v3's swatch;
+each glossier sheen is darker and more saturated off-highlight (most for
+dark paints, < 1.5 L\* for off-white); reflected light adds the light's
+colour, not the paint's.
 Results are listed on the page and in `window.testResults`.
 
 ## Editing notes
 
-* `glsl/shaderSceneRender.glsl` must stay pure ASCII, and its `//@@NAME`
-  section markers are looked up by name. Uniform types are read from the
+* `glsl/shaderSceneRender.glsl` and `glsl/sheen.glsl` must stay pure ASCII,
+  and their `//@@NAME` section markers are looked up by name. The sheen code
+  is compiled into RENDER only under `#define SHEEN`, so the other pages
+  compile exactly as before. Uniform types are read from the
   compiled program, so new uniforms need no registration in JS.
 * Every stored image has row 0 at the top; only RENDER flips y.
 * The scripts are classic scripts (not ES modules) so the pages still load,

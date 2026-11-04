@@ -11,6 +11,8 @@
  *   gpu   the shaders on small synthetic images: every model's "white light
  *         shows the swatch" identity, v3's interreflection, mask-weighted
  *         blur, v3's detail layer and warm light
+ *   sheen js/sheenModel.js's camera solver; glsl/sheen.glsl: Flat = the
+ *         swatch, glossier = deeper off-highlight, untinted highlights
  * ======================================================================== */
 (async function () {
   "use strict";
@@ -310,6 +312,142 @@
       return near(readPixel(pipe, 32, 32), expected, 2);
     });
   }
+
+  // ======================================================================
+  // Sheen tests (js/sheenModel.js, glsl/sheen.glsl; sheenSceneRenderer.html)
+  // ======================================================================
+
+  const SM = window.SheenModel;
+  await test("unit: solveCamera recovers a known camera from its lines", () => {
+    // A camera with f = 1.9 image widths and 0.4 deg roll, looking into a
+    // corner: the back wall's horizontal lines run at -35 deg, the side
+    // wall's at +55 deg; the corner at depth 1; the floor 0.3 below the eye.
+    const roll = 0.4 * Math.PI / 180, f = 1.9, c = [0.5, 0.42];
+    const truth = { c, f, rot: [Math.cos(roll), Math.sin(roll)] };
+    const a = -35 * Math.PI / 180, b = a + Math.PI / 2;
+    const dB = [Math.sin(a), 0, Math.cos(a)], dS = [Math.sin(b), 0, Math.cos(b)];
+    const C0 = [0.05, 0, 1];
+    const at = (d, s, y) => [C0[0] + d[0] * s, y, C0[2] + d[2] * s];
+    const seg = (d, s1, s2, y) => [...SM.project(truth, at(d, s1, y)), ...SM.project(truth, at(d, s2, y))];
+    // Back wall extends away from the side wall: -dB direction is toward the camera side.
+    const g = {
+      backLines: [seg(dB, -0.3, -0.05, 0.2), seg(dB, -0.35, -0.05, -0.05)],
+      sideLines: [seg(dS, -0.25, -0.05, -0.08), seg(dS, -0.3, -0.05, -0.12), seg(dS, -0.2, -0.05, -0.2)],
+      verticals: [[...SM.project(truth, at(dB, -0.2, -0.2)), ...SM.project(truth, at(dB, -0.2, 0.2))]],
+      cornerU: SM.project(truth, C0)[0], sideWall: "left", floorPoint: SM.project(truth, at(dB, -0.25, -0.3))
+    };
+    const cam = SM.solveCamera(g);
+    near(cam.f, f, 0.019, "focal length (1 %)");
+    near(cam.report.rollDeg, 0.4, 0.02, "roll (deg)");
+    near(cam.floorY, -0.3, 0.003, "floor height");
+    const back = cam.back.slice(0, 3), want = [-dS[0], 0, -dS[2]];       // back-wall normal faces the camera
+    near(back, want, 0.01, "back-wall normal");
+    return `f ${cam.f.toFixed(4)} (1.9), roll ${cam.report.rollDeg.toFixed(3)}°, floor ${cam.floorY.toFixed(4)}`;
+  });
+  await test("unit: specular albedo = exact Fresnel + Smith (tests/sheen_check.py reference)", () => {
+    // Reference values from tests/sheen_check.py (same quadrature): GGX α
+    // 0.025 and 0.075 at cos θ = 1, 0.6, 0.4.
+    const ref = [0.04, 0.06489, 0.13201, 0.04008, 0.06485, 0.1256];
+    const got = [0.025, 0.075].flatMap(a => [1, 0.6, 0.4].map(n => SM.specularAlbedo(a, n)));
+    near(got, ref, 2e-5, "albedo");
+    // A smooth lobe approaches the exact Fresnel reflectance of n = 1.5 (0.0892 at 60°).
+    return near(SM.specularAlbedo(0.025, 0.5), SM.fresnel(0.5), 0.003, "semi-gloss at 60° vs Fresnel");
+  });
+  await test("unit: every sheen's parameters are documented and ordered", () => {
+    let prev = Infinity;
+    for (const k of SM.SHEEN_ORDER) {
+      const s = SM.SHEENS[k];
+      assert(SM.SHEEN_COPY[k] && SM.SHEEN_COPY[k].look, `${k}: no copy`);
+      assert(s.alpha < prev, `${k}: alpha should fall with gloss`);
+      prev = s.alpha;
+    }
+    return SM.SHEEN_ORDER.map(k => `${k} α ${SM.SHEENS[k].alpha} v ${SM.SHEENS[k].v}`).join(", ");
+  });
+
+  // GPU: a simple camera whose mirror rays all leave the photo, so every
+  // wall pixel reflects the "unseen room" (its own colour and the scene's
+  // mean): a room painted one colour, as off-highlight walls usually see.
+  let sheenSources;
+  const plainCam = { c: [0.5, 0.5], f: 1, rot: [1, 0], back: [0, 0, -1, -1], side: [1, 0, 0, -10],
+                     floorY: -10, cornerX: -10, sideSign: -1 };
+  await test("gpu: the sheen shaders load and compile", async () => {
+    sheenSources = await P.loadShaders("../glsl/shaderSceneRender.glsl", { sheenUrl: "../glsl/sheen.glsl" });
+    makeSheenPipeline();
+    return "RENDER with SHEEN + ENVDOWN";
+  });
+  function makeSheenPipeline() {
+    return new P.LightPipeline(document.createElement("canvas"), {
+      analysis: [64, 64], render: [64, 64], sources: sheenSources, sheen: true, preserveDrawingBuffer: true,
+      hooks: { onRestored() {}, onError(e) { throw e; } }
+    });
+  }
+  /** Renders `image` in v3 with a sheen and returns the centre pixel's linear RGB. */
+  function runSheen(image, hex, sheen, { mask = null, emitters = [] } = {}) {
+    const pipe = makeSheenPipeline();
+    const src = pipe.createSource(64, 64, { srgb: true });
+    pipe.upload(src, image);
+    const maskImg = mask || makeImage(4, 4, () => [0, 0, 0]);
+    const m = pipe.createSource(...P.sizeOf(maskImg), { mipmaps: true });
+    pipe.upload(m, maskImg);
+    const stats = new P.LightStats(32, 32); stats.add(image, maskImg);
+    const lightMap = pipe.createLightMap();
+    pipe.analyse({ src, mask: m, lightMap, model: "v3", adjust: null, refY: stats.refY });
+    pipe.render({ lightMap, src, model: "v3", paint: P.paintSpec(hex), scene: P.sceneSpec(stats, stats), detailGamma: 1,
+                  sheen: { mask: m, ...SM.sheenJob(sheen, plainCam, { emitters, keyLight: [0, 0, 0] }) } });
+    // Mean of a 16 x 8 block in linear light: one 8-bit pixel carries +-1
+    // level of dither, as large as the step between neighbouring sheens on
+    // mid-tone paints.
+    const sum = [0, 0, 0];
+    for (let y = 16; y < 24; y++) for (let x = 24; x < 40; x++)
+      readPixel(pipe, x, y).forEach((v, i) => { sum[i] += P.decodeSrgb(v / 255) / 128; });
+    return sum;
+  }
+  const labOf = rgb => {
+    const X = P.mat.apply(P.RGB2XYZ, rgb).map((v, i) => v / [0.95047, 1, 1.08883][i]);
+    const f = X.map(t => t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+    return [116 * f[1] - 16, Math.hypot(500 * (f[0] - f[1]), 200 * (f[1] - f[2]))];   // L*, C*
+  };
+  await test("gpu: Flat shows the same wall as v3 without sheen (the swatch)", () => {
+    const out = [];
+    for (const hex of ["#a4aca6", "#2f3d4c", "#e8decd"]) {
+      const flat = encoded(runSheen(white, hex, "flat"));
+      const v3 = readPixel(run(makePipeline(64, 64), white, { model: "v3", hex }).pipe, 32, 20);
+      near(flat, v3, 1, hex);
+      out.push(hex);
+    }
+    return out.join(" ") + ": within 1 level";
+  });
+  await test("gpu: glossier = deeper off-highlight, most for dark colours (veil removed)", () => {
+    const rows = [];
+    for (const [hex, minDrop] of [["#2f3d4c", 2], ["#607d84", 1]]) {
+      const L = SM.SHEEN_ORDER.map(k => labOf(runSheen(white, hex, k)));
+      for (let i = 1; i < L.length; i++) {
+        assert(L[i][0] < L[i - 1][0] + 0.05, `${hex}: ${SM.SHEEN_ORDER[i]} not darker than ${SM.SHEEN_ORDER[i - 1]}`);
+        assert(L[i][1] > L[i - 1][1] - 0.05, `${hex}: ${SM.SHEEN_ORDER[i]} not more saturated`);
+      }
+      assert(L[0][0] - L[3][0] >= minDrop, `${hex}: semi-gloss only ${(L[0][0] - L[3][0]).toFixed(2)} L* darker`);
+      rows.push(`${hex} L* ${L.map(l => l[0].toFixed(1)).join(" → ")}, C* ${L[0][1].toFixed(1)} → ${L[3][1].toFixed(1)}`);
+    }
+    const w = SM.SHEEN_ORDER.map(k => labOf(runSheen(white, "#e8decd", k)));
+    assert(Math.abs(w[0][0] - w[3][0]) < 1.5, `off-white changed by ${(w[0][0] - w[3][0]).toFixed(2)} L*`);
+    rows.push(`#e8decd L* ${w[0][0].toFixed(1)} → ${w[3][0].toFixed(1)}`);
+    return rows.join("; ");
+  });
+  await test("gpu: reflections of a light source add the light's colour, not the paint's", () => {
+    // Top half wall, bottom half a bright light source (emitter x 20): the
+    // unseen room is then brighter than the wall's own light, like a highlight.
+    const mask = makeImage(64, 64, (x, y) => y < 32 ? [0, 0, 0] : [255, 255, 255]);
+    const emitters = [{ rect: [0, 0.5, 1, 1], threshold: 0, gain: 20 }];
+    const hex = "#7a1f2b";
+    const flat = runSheen(white, hex, "flat", { mask, emitters });
+    const semi = runSheen(white, hex, "semigloss", { mask, emitters });
+    const add = semi.map((v, i) => v - flat[i]);
+    assert(add.every(v => v > 0), `semi-gloss not brighter: ${fmt(add)}`);
+    const spread = (Math.max(...add) - Math.min(...add)) / Math.max(...add);
+    assert(spread < 0.15, `added light is tinted: ${fmt(add)}`);
+    const [Lf, Cf] = labOf(flat), [Ls, Cs] = labOf(semi);
+    return `added ${fmt(add)} (neutral within ${(spread * 100).toFixed(0)} %); L* ${Lf.toFixed(1)} → ${Ls.toFixed(1)}, C* ${Cf.toFixed(1)} → ${Cs.toFixed(1)}`;
+  });
 
   // ======================================================================
   // Sequence tests (js/dayNightSequence.js) with simulated videos

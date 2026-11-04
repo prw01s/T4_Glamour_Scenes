@@ -19,7 +19,9 @@
  *   sliders        makeAdjustment(), toAmount(), toSatMeasure()
  *   scene          sceneSpec(): v3's per-scene calibration and adaptation
  *   LightPipeline  one WebGL2 context: DECODE -> ADJUST -> BLUR -> ANALYSE
- *                  -> RENDER, its textures, and context-loss recovery
+ *                  -> RENDER, its textures, and context-loss recovery; with
+ *                  the `sheen` option also the paint-sheen passes (ENV ->
+ *                  ENVDOWN pyramid -> RENDER with glsl/sheen.glsl)
  *
  * ASSUMPTIONS the colour maths rests on (see README.md):
  *   - The photos and the video are encoded sRGB, white-balanced so that the
@@ -191,22 +193,23 @@
   /** Section names expected in the .glsl file (see its header). */
   const SECTIONS = ["VERT", "COMMON", "RESAMPLE", "DECODE", "MEAN", "ADJUST", "BLUR", "ANALYSE", "RENDER"];
 
+  /** Section names expected in the sheen file (glsl/sheen.glsl). */
+  const SHEEN_SECTIONS = ["ENVDOWN", "SHEEN"];
+
   /**
    * Complete GLSL sources, ready to compile: the vertex shader and one
-   * fragment shader per pass (COMMON + "\n" + its section).
-   * @typedef {{ vert: string, resample: string, decode: string, mean: string, adjust: string, blur: string, analyse: string, render: string }} ShaderSources
+   * fragment shader per pass (COMMON + "\n" + its section). With a sheen
+   * file, also `envdown` and `renderSheen` (COMMON + "#define SHEEN" +
+   * RENDER + SHEEN: RENDER with the paint-sheen code, see glsl/sheen.glsl).
+   * @typedef {{ vert: string, resample: string, decode: string, mean: string, adjust: string, blur: string, analyse: string, render: string, envdown?: string, renderSheen?: string }} ShaderSources
    */
 
   /**
-   * Fetches the shader file and cuts it into programs at its "//@@NAME"
-   * marker lines. A section runs from the line after its marker to the next
-   * marker, so "#version 300 es" stays the first line of VERT and COMMON.
-   * Needs http(s): fetch() can't read file:// URLs.
-   * @param {string} url  Relative to the page.
-   * @returns {Promise<ShaderSources>}
+   * Fetches a shader file and cuts it at its "//@@NAME" marker lines. A
+   * section runs from the line after its marker to the next marker.
    * @throws {PaintError} "load" when the file can't be fetched or a section is missing.
    */
-  async function loadShaders(url) {
+  async function loadSections(url, required) {
     let text;
     try {
       // no-cache: revalidate with the server, so an edited shader file is
@@ -224,14 +227,35 @@
       const end = i + 1 < markers.length ? markers[i + 1].index : text.length;
       parts[m[1]] = text.slice(m.index + m[0].length, end);
     });
-    for (const name of SECTIONS)
+    for (const name of required)
       if (!(name in parts)) throw new PaintError("load", `${url} has no //@@${name} section`);
+    return parts;
+  }
+
+  /**
+   * Fetches the shader file(s) and builds the programs' sources, so
+   * "#version 300 es" stays the first line of VERT and COMMON.
+   * Needs http(s): fetch() can't read file:// URLs.
+   * @param {string} url  Relative to the page.
+   * @param {{ sheenUrl?: string }} [o]  sheenUrl: also load the sheen file
+   *   (glsl/sheen.glsl), for a LightPipeline with the `sheen` option.
+   * @returns {Promise<ShaderSources>}
+   * @throws {PaintError} "load" when a file can't be fetched or a section is missing.
+   */
+  async function loadShaders(url, { sheenUrl } = {}) {
+    const [parts, sheen] = await Promise.all([
+      loadSections(url, SECTIONS), sheenUrl ? loadSections(sheenUrl, SHEEN_SECTIONS) : null]);
     const fragment = name => parts.COMMON + "\n" + parts[name];
-    return {
+    const sources = {
       vert: parts.VERT, resample: fragment("RESAMPLE"), decode: fragment("DECODE"), mean: fragment("MEAN"),
       adjust: fragment("ADJUST"),
       blur: fragment("BLUR"), analyse: fragment("ANALYSE"), render: fragment("RENDER")
     };
+    if (sheen) {
+      sources.envdown = parts.COMMON + "\n" + sheen.ENVDOWN;
+      sources.renderSheen = parts.COMMON + "\n#define SHEEN 1\n" + parts.RENDER + "\n" + sheen.SHEEN;
+    }
+    return sources;
   }
 
   // ======================================================================
@@ -977,6 +1001,14 @@
    * @property {Target} target
    * @property {Target} mean  1 x 1: the image's mean wall light (MEAN), for RENDER.
    * @property {string | null} analysedFor  Analysis cache key, null = stale.
+   * @property {EnvPyramid | null} env  Sheen only: the reflection environment,
+   *   created on first use.
+   *
+   * @typedef {Object} EnvPyramid
+   * @property {WebGLTexture} tex  RGBA16F at the analysis size with every mip level.
+   * @property {WebGLFramebuffer[]} fbos  One per level, for ENV (level 0) and ENVDOWN.
+   * @property {number[][]} sizes  [w, h] of each level.
+   * @property {string | null} key  What it holds (photo analysis, paint, geometry), null = stale.
    */
 
   /**
@@ -999,6 +1031,15 @@
    * @property {PaintSpec} paint
    * @property {SceneSpec} scene
    * @property {number} detailGamma  v3: detail strength x the contrast exponent.
+   * @property {SheenJob} [sheen]  Required by a pipeline with the `sheen` option
+   *   (v3 only): the paint's sheen and the room geometry.
+   *
+   * @typedef {Object} SheenJob
+   * @property {SourceHandle} mask  The room's wall mask (for the environment).
+   * @property {Record<string, any>} uniforms  glsl/sheen.glsl's uniforms
+   *   (SheenModel.sheenJob in js/sheenModel.js).
+   * @property {string} envKey  Identifies the geometry and emitters (part of
+   *   the environment's cache key).
    */
 
   /**
@@ -1039,6 +1080,8 @@
      * @param {boolean} [o.wideGamut=false]  Render in Display P3 if supported.
      * @param {boolean} [o.preserveDrawingBuffer=false]  Keep the canvas pixels
      *   after compositing (true when they are copied out with drawImage later).
+     * @param {boolean} [o.sheen=false]  Paint sheen (glsl/sheen.glsl): needs
+     *   sources loaded with a sheenUrl; every render() then needs a `sheen` job.
      * @throws {PaintError} "webgl" when WebGL2, float targets or the sizes aren't supported.
      */
     constructor(canvas, o) {
@@ -1049,6 +1092,8 @@
       this.#sources = o.sources;
       this.#hooks = o.hooks;
       this.#wideGamut = !!o.wideGamut;
+      this.sheen = !!o.sheen;
+      if (this.sheen && !o.sources.renderSheen) throw new Error("LightPipeline: sheen needs shaders loaded with a sheenUrl");
       canvas.addEventListener("webglcontextlost", e => e.preventDefault());
       canvas.addEventListener("webglcontextrestored", () => this.#restore());
       // alpha: false (opaque output, faster to composite and copy); no
@@ -1083,6 +1128,11 @@
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
       this.progs = Object.fromEntries(["resample", "decode", "mean", "adjust", "blur", "analyse", "render"]
         .map(k => [k, makeProgram(gl, src.vert, src[k])]));
+      if (this.sheen) {
+        // RENDER with the sheen code, and the pyramid downsample.
+        this.progs.render = makeProgram(gl, src.vert, src.renderSheen);
+        this.progs.envdown = makeProgram(gl, src.vert, src.envdown);
+      }
       this.scratch = Object.fromEntries(["lin", "adj", "tmp", "blurred", "raw"]
         .map(k => [k, makeTarget(gl, this.aw, this.ah)]));
       // VERT reads no attributes, but WebGL2 still wants a VAO bound to draw.
@@ -1105,6 +1155,7 @@
         h.target = makeTarget(gl, this.aw, this.ah);
         h.mean = makeTarget(gl, 1, 1);
         h.analysedFor = null;
+        h.env = null;          // (re)created on first use by #envFor
         return;
       }
       h.tex = makeTexture(gl, h.w, h.h, h.srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, gl.UNSIGNED_BYTE, h.mipmaps ? "mipmap" : "linear");
@@ -1131,7 +1182,7 @@
 
     /** @returns {LightMapHandle} An RGBA16F light map at the analysis size. */
     createLightMap() {
-      const handle = { kind: "lightMap", target: null, mean: null, analysedFor: null };
+      const handle = { kind: "lightMap", target: null, mean: null, analysedFor: null, env: null };
       this.#build(handle);
       this.#handles.add(handle);
       return handle;
@@ -1143,6 +1194,7 @@
       this.#handles.delete(h);
       if (h.kind === "lightMap") {
         for (const t of [h.target, h.mean]) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); }
+        if (h.env) { gl.deleteTexture(h.env.tex); h.env.fbos.forEach(f => gl.deleteFramebuffer(f)); }
       }
       else gl.deleteTexture(h.tex);
     }
@@ -1290,9 +1342,9 @@
      * images share this pipeline).
      * @param {RenderJob} job
      */
-    render({ lightMap, src, model, paint, scene, detailGamma }) {
+    render({ lightMap, src, model, paint, scene, detailGamma, sheen = null }) {
       const S = SHADER_DEFAULTS;
-      this.#draw(this.progs.render, null, { lightMap: lightMap.target.tex, src: src.tex, frameMean: lightMap.mean.tex }, {
+      const uniforms = {
         size: [this.rw, this.rh], model: MODELS[model], dither: S.dither ? 1 : 0, srcLinear: src.srgb ? 1 : 0,
         albedo: paint.albedo,
         toOutput: mat.toGL(this.outputSpace === "display-p3" ? SRGB_TO_P3 : mat.IDENTITY),
@@ -1304,7 +1356,82 @@
         cmf: CMF, paintW: paint.paintW, whiteNorm: WHITE_NORM, paintFix: paint.paintFix,
         adaptMat: scene.adaptMat, refY: scene.refY, v3Ambient: S.v3.ambient, v3BounceShare: S.v3.bounceShare,
         bounceRGB: paint.bounceRGB, detailGamma
+      };
+      const textures = { lightMap: lightMap.target.tex, src: src.tex, frameMean: lightMap.mean.tex };
+      if (!this.sheen) { this.#draw(this.progs.render, null, textures, uniforms); return; }
+      if (!sheen || model !== "v3") throw new Error("LightPipeline: a sheen pipeline renders v3 with a sheen job");
+      const env = this.#envFor(lightMap);
+      Object.assign(uniforms, sheen.uniforms, {
+        envMaxLod: env.sizes.length - 1, envSize: env.sizes[0][0]
       });
+      textures.wallMask = sheen.mask.tex;
+      // ENV: the environment depends on the photo's analysis, the paint and
+      // the geometry, not on the sheen, so a sheen change skips it.
+      const key = [lightMap.analysedFor, paint.hex, ...paint.albedo, scene.refY, sheen.envKey, sheen.mask.version].join("|");
+      if (env.key !== key) {
+        this.#draw(this.progs.render, { fbo: env.fbos[0], w: env.sizes[0][0], h: env.sizes[0][1] },
+                   { ...textures, envTex: lightMap.mean.tex },        // never the env itself (feedback loop)
+                   { ...uniforms, envPass: 1, size: env.sizes[0] });
+        this.#envPyramid(env);
+        env.key = key;
+      }
+      this.#draw(this.progs.render, null, { ...textures, envTex: env.tex }, { ...uniforms, envPass: 0 });
+    }
+
+    /**
+     * The light map's reflection environment (EnvPyramid), created on first
+     * use: RGBA16F at the analysis size with every mip level, each level
+     * renderable (ENV writes level 0, ENVDOWN the others).
+     * @param {LightMapHandle} lightMap
+     * @returns {EnvPyramid}
+     */
+    #envFor(lightMap) {
+      if (lightMap.env) return lightMap.env;
+      const gl = this.gl, sizes = [];
+      for (let w = this.aw, h = this.ah; ; w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) {
+        sizes.push([w, h]);
+        if (w === 1 && h === 1) break;
+      }
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, sizes.length, gl.RGBA16F, this.aw, this.ah);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      const fbos = sizes.map((_, level) => {
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, level);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+          throw new PaintError("webgl", "This GPU/browser can't render to half-float mip levels.");
+        return fbo;
+      });
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return (lightMap.env = { tex, fbos, sizes, key: null });
+    }
+
+    /**
+     * ENVDOWN level by level. While level k is read, the texture's base and
+     * max level are both k, so the level being written (k + 1) isn't
+     * sampled (no feedback loop) and LOD 0 in the shader means level k.
+     * @param {EnvPyramid} env
+     */
+    #envPyramid(env) {
+      const gl = this.gl, last = env.sizes.length - 1;
+      const levels = (base, max) => {
+        gl.bindTexture(gl.TEXTURE_2D, env.tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, base);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, max);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      };
+      for (let k = 0; k < last; k++) {
+        levels(k, k);
+        const [w, h] = env.sizes[k + 1];
+        this.#draw(this.progs.envdown, { fbo: env.fbos[k + 1], w, h }, { src: env.tex }, { size: [w, h] });
+      }
+      levels(0, last);
     }
   }
 
@@ -1339,7 +1466,7 @@
     // errors + settings
     PaintError, NOTICES, noticeFor, MODELS, SHADER_DEFAULTS, toModel,
     // shaders + GL
-    loadShaders, makeProgram, setUniform, makeTexture, makeTarget, LightPipeline,
+    loadShaders, SHEEN_SECTIONS, makeProgram, setUniform, makeTexture, makeTarget, LightPipeline,
     // colour
     normalizeHex, hexToRgb, hexToLinear, linearToHex, decodeSrgb, encodeSrgb, luminance, lrv, oklab,
     mat, RGB2XYZ, XYZ2RGB, CAT16, SRGB_TO_P3, D65_XY, rgbToXyzMatrix, supportsWideGamut,

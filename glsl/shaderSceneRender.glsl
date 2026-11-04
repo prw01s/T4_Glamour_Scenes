@@ -21,6 +21,9 @@
 //     ANALYSE  P1   light -> light map, in the active model's encoding
 //     RENDER   P2   the wall paint lit by the light map
 //
+//   glsl/sheen.glsl adds two sections for sheenSceneRenderer.html: ENVDOWN
+//   (its own program) and SHEEN (appended to RENDER under #define SHEEN).
+//
 //   Each fragment program is built in JS as COMMON + "\n" + section, so only
 //   VERT and COMMON start with "#version 300 es". That line must remain the
 //   very first line of those two sections; put nothing between the marker
@@ -645,8 +648,13 @@ float mccamyCCT(vec2 xy) {
 
 // L = light-map texel (luminance / refY, CIE 1960 u, v, blurred raw luminance);
 // sharp = the source pixel at full resolution, linear.
-// Returns the lit wall colour in linear sRGB, inside the output gamut.
-vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
+// Outputs, both linear sRGB BEFORE adaptation and gamut mapping:
+//   c  the lit wall colour (renderV3 below adapts and gamut-maps it)
+//   W  the same light on an ideal white matte wall (reflectance 1, so its
+//      bounce light is the original white walls': (1,1,1) x oldBounce). The
+//      sheen model (glsl/sheen.glsl) needs it: the surface reflection of
+//      paint is the LIGHT's colour, not the paint's.
+void v3Lit(vec4 L, vec3 sharp, float sceneY, out vec3 c, out vec3 W) {
   // 1. How much light. The light map is smooth (blurred at the analysis
   // size); the eye resolves brightness far more finely than colour, so fine
   // brightness detail (plaster texture, crisp shadow edges) comes back from
@@ -693,12 +701,31 @@ vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
   // dark paints (deeper shadows) and more saturated than the paint itself, as
   // in a real room painted one colour.
   float oldBounce = v3Ambient * v3BounceShare * min(4.0, sceneY / max(refY, 1e-4));
-  vec3 c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
-
+  c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
+  W = planckRGB1 * tint * max(E - oldBounce, 0.0) + vec3(oldBounce);
+}
+// Returns the lit wall colour in linear sRGB, inside the output gamut.
+vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
+  vec3 c, W;
+  v3Lit(L, sharp, sceneY, c, W);
   // 5. Colour constancy for the whole scene (not per pixel), then highlight
   // roll-off and gamut mapping.
   return compress(adaptMat * c);
 }
+
+#ifdef SHEEN
+// Paint sheen (sheenSceneRenderer.html only). The program is then built as
+// COMMON + "#define SHEEN" + RENDER + the SHEEN section of glsl/sheen.glsl,
+// which defines these two functions; without the define this block, and the
+// ones in main(), don't exist, so the other pages compile exactly as before.
+//   envPass 1: write the reflection environment (linear, reference-white
+//              units) at the analysis size instead of the wall (see ENV in
+//              glsl/sheen.glsl). Stored image: row 0 at the top, no flip.
+uniform int envPass;
+vec3 sheenEnvTexel(vec2 uv, float sceneY);
+vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv);
+float sheenEmitter(vec2 uv, vec3 lin);
+#endif
 
 // Cheap, stateless hash: a pixel position -> pseudo-random 0..1. Its only
 // job is to decorrelate neighbouring pixels for the dither, so it doesn't
@@ -712,6 +739,9 @@ void main() {
   vec2 uv = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / size;
   float sceneY = lum(texelFetch(frameMean, ivec2(0), 0).rgb);
   fillScale = clamp(sceneY / max(fillRefY, 1e-4), 0.0, 1.0);
+#ifdef SHEEN
+  if (envPass == 1) { fragOut = vec4(sheenEnvTexel(gl_FragCoord.xy / size, sceneY), 1.0); return; }
+#endif
   vec3 c;
   if (model == MODEL_V1) {
     // v1's light map holds HSV hue in degrees, which must not be interpolated
@@ -722,7 +752,17 @@ void main() {
     c = renderV2(texture(lightMap, uv).xyz, albedo);
   } else {
     vec3 s = texture(src, uv).rgb;
+#ifdef SHEEN
+    // The flat paint (v3, unchanged), then the sheen's surface reflection,
+    // then v3's scene adaptation and gamut mapping. Light sources (emitter
+    // cores) show the photo: they aren't wall, even where the mask is grey.
+    vec4 L = texture(lightMap, uv);
+    vec3 lin = srcLinear == 1 ? s : toLinear(s), lit, W;
+    v3Lit(L, lin, sceneY, lit, W);
+    c = mix(compress(adaptMat * applySheen(lit, W, L, uv)), lin, sheenEmitter(uv, lin));
+#else
     c = renderV3(texture(lightMap, uv), srcLinear == 1 ? s : toLinear(s), sceneY);
+#endif
   }
   // To the output primaries (Display P3 or sRGB; both use the sRGB curve).
   vec3 enc = toSRGB(clamp(toOutput * c, 0.0, 1.0));

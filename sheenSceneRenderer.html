@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T4 Paint Sheen Visualization</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  /* Shared tokens, base and chips: css/visualizer.css. This page's layout: */
+
+  /* ---- booth: scenes on the left 67 %, the panel on the right 33 % -------- */
+  .booth {
+    display: grid;
+    grid-template-columns: minmax(0, 67fr) minmax(0, 33fr);
+    min-height: 100vh;
+    min-height: 100svh;
+    background: var(--booth);
+  }
+  .booth > * { min-width: 0; }
+
+  /* ---- scenes -------------------------------------------------------------- */
+  .stage { padding: var(--pad) 0 var(--pad) var(--pad); align-self: start; }
+  .renderer {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .scene { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .scene figcaption { font-size: 16px; line-height: 24px; font-weight: 600; }
+  .scene__frame {
+    position: relative;
+    isolation: isolate;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 3px;
+    overflow: hidden;
+    background: #DADADA;
+  }
+  .scene__layer { position: absolute; inset: 0; }
+  .scene__layer--bottom { z-index: 1; }
+  .scene__layer--top { z-index: 2; }
+  .scene__canvas, .scene__photo {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+  }
+  .scene__canvas--incoming { opacity: 0; }
+  .scene__photo { object-fit: cover; }
+  /* Masks are opt-in: until .is-painted, visitors see the plain photos.
+     Black in the mask is wall, so luminance mode hides exactly the walls. */
+  .is-painted .scene__photo {
+    mask-image: var(--mask);
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: cover;
+    mask-mode: luminance;
+  }
+  .scene__calib { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; pointer-events: none; }
+  .notice {
+    margin: 12px 0 0;
+    padding: 10px 14px;
+    font-size: 14px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .notice:empty { margin: 0; padding: 0; border: 0; }
+  .notice b { font-weight: 600; }
+  .notice a { color: inherit; }
+
+  /* ---- panel --------------------------------------------------------------- */
+  .panel {
+    padding: var(--pad);
+    display: flex; flex-direction: column; gap: 22px;
+    align-self: start;
+    position: sticky; top: 0;
+    max-height: 100vh; max-height: 100svh;
+    overflow-y: auto;
+  }
+  .panel h1 { margin: 0; font-size: 28.8px; line-height: 1.1; font-weight: 600; color: #2F3D4C; }
+  .panel__intro { margin: 8px 0 0; font-size: 15px; line-height: 1.5; color: var(--slate); max-width: 46ch; }
+  .controls { display: flex; flex-direction: column; gap: 22px; }
+
+  .field__label { display: block; margin-bottom: 6px; font-size: 14px; color: var(--slate); }
+  .select {
+    width: 100%;
+    padding: 9px 36px 9px 12px;
+    font: inherit; font-size: 17px; font-weight: 600; color: var(--graphite);
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23242424' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 12px center;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    appearance: none;
+    cursor: pointer;
+  }
+  .select:focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
+
+  .sheen-card { margin: 12px 0 0; padding: 14px 16px; background: rgb(255 255 255 / .55); border: 1px solid var(--rule); border-radius: 3px; }
+  .sheen-card__meta { margin: 0 0 10px; font-size: 13px; color: var(--slate); font-variant-numeric: tabular-nums; }
+  .sheen-card dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; font-size: 14px; line-height: 1.45; }
+  .sheen-card dt { font-weight: 600; }
+  .sheen-card dd { margin: 0; color: var(--graphite); }
+
+  .palette legend { padding: 0; margin-bottom: 10px; font-size: 14px; color: var(--slate); }
+  .swatches { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+  .swatches .chip-option { flex-direction: row; justify-content: flex-start; gap: 12px; padding: 2px 0; }
+  .swatches .chip { flex: 0 0 auto; width: 36px; height: 36px; }
+  .swatch__text { display: flex; flex-direction: column; line-height: 1.25; }
+  .swatch__hex { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .swatch__lrv { font-size: 12px; color: var(--slate); }
+  .chip-option:hover .chip, .chip-option input:checked + .chip { transform: none; }
+  .readout { margin: 0; display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .readout__swatch { width: 12px; height: 12px; border-radius: 2px; background: var(--active-paint); box-shadow: inset 0 0 0 1px rgb(0 0 0 / .14); }
+  .readout__lrv { color: var(--slate); }
+  .panel__note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--slate); }
+
+  /* ---- narrow: scenes above the panel ---------------------------------------- */
+  @media (max-width: 899.98px) {
+    .booth { grid-template-columns: minmax(0, 1fr); }
+    .stage { padding: var(--pad) var(--pad) 0; }
+    .panel { position: static; max-height: none; overflow: visible; }
+  }
+  @media (max-width: 519.98px) {
+    .renderer { grid-template-columns: minmax(0, 1fr); }
+    .swatches { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+</head>
+<body>
+<main class="booth" id="app">
+  <section class="stage" aria-label="Room views">
+    <div class="renderer" id="renderer" data-room="livingRoom2"></div>
+    <p class="notice" id="notice" role="status"></p>
+  </section>
+
+  <aside class="panel">
+    <header>
+      <h1>Paint sheen</h1>
+      <p class="panel__intro">The same paint in four finishes, by day and by night. Sheen changes where the paint's
+        surface reflection goes: spread evenly (flat) or gathered into reflections (gloss), which also makes the
+        colour look deeper away from them.</p>
+    </header>
+
+    <fieldset class="controls" id="controls">
+      <legend class="vh">Paint options</legend>
+      <div class="field">
+        <label class="field__label" for="sheen">Sheen</label>
+        <select class="select" id="sheen" name="sheen"></select>
+        <div class="sheen-card" id="sheenCard" aria-live="polite">
+          <p class="sheen-card__meta" id="sheenMeta"></p>
+          <dl>
+            <dt>Look</dt><dd id="sheenLook"></dd>
+            <dt>Colour</dt><dd id="sheenColour"></dd>
+            <dt>Use</dt><dd id="sheenUse"></dd>
+          </dl>
+        </div>
+      </div>
+
+      <fieldset class="palette">
+        <legend>Paint colors</legend>
+        <ul class="swatches" id="chips"></ul>
+      </fieldset>
+      <p class="readout"><span class="readout__swatch"></span><span id="readoutHex"></span><span class="readout__lrv" id="readoutLrv"></span></p>
+    </fieldset>
+
+    <p class="panel__note">Rendered on the GPU from the photos: the paint is lit by each photo's own light, and glossier
+      finishes reflect the room (the window by day, the bulbs and lamp by night) through a camera model of the room.
+      Gloss levels follow the MPI scale (60° gloss units).</p>
+  </aside>
+</main>
+
+<script src="js/paintPipeline.js"></script>
+<script src="js/shaderSceneRender.js"></script>
+<script src="js/sheenModel.js"></script>
+<script type="module">
+/* ==========================================================================
+ * Page setup for sheenSceneRenderer.html.
+ *
+ * The page's config (paints, the room, its geometry and light sources), the
+ * markup built from it, the event wiring and the boot call. The controller
+ * (tiles, fades) is js/shaderSceneRender.js in its sheen mode; the GPU
+ * pipeline and colour science are js/paintPipeline.js; the sheen model is
+ * js/sheenModel.js + glsl/sheen.glsl (research: docs/sheen-science.md).
+ * ======================================================================== */
+
+if (!window.PaintPipeline || !window.ShaderSceneRender || !window.SheenModel) {
+  document.getElementById("notice").textContent =
+    "Paint previews couldn't start because a file in the js folder didn't load. Check the js folder, then reload the page.";
+  throw new Error("sheenSceneRenderer: a script in js/ is missing");
+}
+const { createRenderer } = window.ShaderSceneRender;
+const { lrv } = window.PaintPipeline;
+const { SHEENS, SHEEN_ORDER, SHEEN_COPY, solveCamera, pointOnWall, sheenJob } = window.SheenModel;
+
+// ---------------------------------------------------------------- config
+
+/**
+ * Sample paints, light to dark (lowercase #rrggbb): the five of
+ * shaderSceneRenderer.html, the five of day-to-night.html and a navy. Dark
+ * colours show the sheen's effect on colour most.
+ */
+const PAINT_COLORS = ["#e8decd", "#dee0de", "#cfdbde", "#d0ba94", "#a4aca6", "#96aab0",
+                      "#8d9e97", "#7f6743", "#607d84", "#586168", "#2f3d4c"];
+const INITIAL_PAINT = "#607d84";
+const INITIAL_SHEEN = "eggshell";
+
+/** The tiles, left to right. */
+const TIMES = [
+  { key: "day",   label: "Day" },
+  { key: "night", label: "Night" }
+];
+
+/** The room (the Room typedef in js/shaderSceneRender.js). Both photos share the mask and the framing. */
+const ROOMS = {
+  livingRoom2: {
+    label: "Living room",
+    mask: "images/sheens/living_room-2-mask.png",
+    photos: {
+      day:   "images/sheens/living_room-2-day.jpg",
+      night: "images/sheens/living_room-2-night.jpeg"
+    }
+  }
+};
+
+/**
+ * Measured in the day photo at 2000 x 2000 px (the night photo, 2048 px,
+ * matches it within 1 px once scaled). PX converts to image units.
+ */
+const PX = 1 / 2000;
+const px = a => a.map(v => v * PX);
+
+/**
+ * The room's geometry (RoomGeometry in js/sheenModel.js), from straight
+ * lines in the photo. solveCamera() turns it into the camera and the planes:
+ * f ≈ 4530 px (25° horizontal field of view), no roll, the camera looking
+ * diagonally into the corner (back wall seen at 49–61°, window wall at
+ * 19–28°); the window-wall lines fit their vanishing point within 1 px.
+ */
+const GEOMETRY = {
+  // Picture frames: the left frame's top and bottom edges, the right frame's
+  // bottom edge (edge fits on the mask).
+  backLines: [px([1060, 90.5, 1285, 36.8]), px([1060, 594.2, 1290, 581.9]), px([1445, 575.1, 1745, 560.3])],
+  // Window wall: the window's bottom rail, the sill and the radiator's top
+  // (luminance edges, fitted over 200-360 px).
+  sideLines: [px([360, 881.2, 680, 877.0]), px([360, 946.1, 720, 937.9]), px([360, 1045, 560, 1035])],
+  // Verticals: the wall corner and the right frame's edges. (The left frame
+  // leans 0.3° against them: it hangs slightly crooked, so it isn't used.)
+  verticals: [px([870, 120, 870, 920]), px([1437, 100, 1437, 560]), px([1748.93, 100, 1749.22, 560])],
+  cornerU: 872 * PX,                 // the corner line (crisp in both photos)
+  sideWall: "left",
+  floorPoint: px([1900, 1655])       // the back wall meets the floor (below the baseboard, right edge)
+};
+const CAMERA = solveCamera(GEOMETRY);
+
+/**
+ * Each photo's light sources (Emitter in js/sheenModel.js) and its key light.
+ * The photos are tone-mapped, so light sources show barely brighter than the
+ * walls they light. Each gain restores the brightness the source must have
+ * to light the wall next to it as brightly as the photo shows (energy
+ * balance through the calibrated geometry; scale ≈ 9 m per scene unit, from
+ * the sofa, sill and radiator heights; docs/sheen-science.md, 5.3):
+ *  Day: the window panes. The 60 back-wall samples the window lights most
+ *    (form factor × wall reflectance 0.059) are at 0.675; the window wall,
+ *    which its own window can't light, shows the ambient level, 0.42. The
+ *    window must then have radiance (0.675 − 0.42) / 0.059 = 4.3, ×7.2 the
+ *    photo's panes (0.60): ×7. (Taking half that ambient gives ×13; the
+ *    gain is the conservative end.) The key light is the window's centre.
+ *  Night: the bulb string and the lamp at the right edge, only their cores
+ *    (luminance ≥ 0.85). The middle bulb's glow on the back wall is 34 cm
+ *    wide at half height (a point source 18 cm from the wall) and 0.15–0.3
+ *    above the wall around it; that intensity, spread over the core's 2.4e-5
+ *    unit² in the photo, gives ×9 to ×17: ×12, also used for the lamp, which
+ *    is mostly out of frame. The key light is the bulbs, 0.03 scene units
+ *    (~25 cm) off the window wall. The window glass is dark (no gain).
+ */
+const LIGHTS = {
+  day: {
+    keyLight: pointOnWall(CAMERA, px([270, 420]), "side"),
+    emitters: [
+      { rect: px([0, 0, 135, 820]),   threshold: 0, gain: 7, note: "left pane" },
+      { rect: px([255, 0, 540, 820]), threshold: 0, gain: 7, note: "right pane" }
+    ]
+  },
+  night: {
+    keyLight: pointOnWall(CAMERA, px([805, 520]), "side", 0.03),
+    emitters: [
+      { rect: px([700, 60, 920, 1000]),   threshold: 0.85, gain: 12, note: "bulb string" },
+      { rect: px([1880, 640, 2000, 860]), threshold: 0.85, gain: 12, note: "lamp" }
+    ]
+  }
+};
+
+// ---------------------------------------------------------------- markup
+// The static HTML holds only empty containers; the select, swatches and
+// tiles are built here from the config. All interpolated values are trusted
+// constants from the config above.
+const renderer = document.getElementById("renderer");
+const room = renderer.dataset.room;
+
+document.getElementById("sheen").innerHTML = SHEEN_ORDER.map(k =>
+  `<option value="${k}"${k === INITIAL_SHEEN ? " selected" : ""}>${SHEENS[k].label}</option>`).join("");
+
+document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
+  `<li><label class="chip-option">` +
+    `<input class="vh" type="radio" name="paint" value="${hex}">` +
+    `<span class="chip" style="background:${hex}"></span>` +
+    `<span class="swatch__text"><span class="swatch__hex">${hex.toUpperCase()}</span>` +
+    `<span class="swatch__lrv">LRV ${lrv(hex)}</span></span>` +
+  `</label></li>`
+).join("");
+
+// Tiles, one per time of day (the structure js/shaderSceneRender.js expects).
+const calib = new URLSearchParams(location.search).has("calib");
+renderer.innerHTML = TIMES.map(time => `
+  <figure class="scene" data-time="${time.key}">
+    <div class="scene__frame">
+      <div class="scene__layer scene__layer--bottom" aria-hidden="true">
+        <canvas class="scene__canvas"></canvas>
+        <canvas class="scene__canvas scene__canvas--incoming"></canvas>
+      </div>
+      <div class="scene__layer scene__layer--top">
+        <img class="scene__photo" data-room="${room}" src="${ROOMS[room].photos[time.key]}"
+          alt="${ROOMS[room].label}, ${time.label.toLowerCase()}" width="2000" height="2000" decoding="async"
+          style="--mask: url('${ROOMS[room].mask}')">
+      </div>
+      ${calib ? `<canvas class="scene__calib" width="1000" height="1000" aria-hidden="true"></canvas>` : ""}
+    </div>
+    <figcaption>${time.label}</figcaption>
+  </figure>`).join("");
+
+/** The description card for a sheen. */
+function syncSheenCard(key) {
+  const s = SHEENS[key], c = SHEEN_COPY[key];
+  document.getElementById("sheenMeta").textContent = `MPI ${s.mpi} · 60° gloss ${s.gu60[0]}–${s.gu60[1]} GU`;
+  document.getElementById("sheenLook").textContent = c.look;
+  document.getElementById("sheenColour").textContent = c.colour;
+  document.getElementById("sheenUse").textContent = c.use;
+}
+syncSheenCard(INITIAL_SHEEN);
+
+// ?calib: draw the solved geometry over the tiles (vanishing-point lines,
+// the corner, a grid on each wall plane), to check the calibration by eye.
+if (calib) {
+  console.info("sheenSceneRenderer: camera", CAMERA.report);
+  for (const cv of renderer.querySelectorAll(".scene__calib")) {
+    const ctx = cv.getContext("2d"), S = cv.width, P = ([u, v]) => [u * S, v * S];
+    ctx.lineWidth = 1.5;
+    const line = (a, b, color) => { ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(...P(a)); ctx.lineTo(...P(b)); ctx.stroke(); };
+    for (const l of GEOMETRY.backLines) line([l[0], l[1]], CAMERA.report.vpBack, "rgb(255 0 0 / .6)");
+    for (const l of GEOMETRY.sideLines) line([l[0], l[1]], CAMERA.report.vpSide, "rgb(0 160 255 / .7)");
+    // Wall grids: lines of constant height and constant position along each wall.
+    const { project } = window.SheenModel;
+    const C = pointOnWall(CAMERA, [GEOMETRY.cornerU, CAMERA.c[1]], "back");
+    const along = { back: [-CAMERA.back[2], 0, CAMERA.back[0]], side: [CAMERA.side[2], 0, -CAMERA.side[0]] };
+    for (const wall of ["back", "side"]) {
+      let d = along[wall];
+      const probe = project(CAMERA, [C[0] + d[0] * 0.1, C[1], C[2] + d[2] * 0.1]);
+      if ((probe[0] - GEOMETRY.cornerU) * (wall === "side" ? CAMERA.sideSign : -CAMERA.sideSign) < 0) d = d.map(x => -x);
+      for (let h = CAMERA.floorY; h <= 0.4; h += 0.05)
+        line(project(CAMERA, [C[0], h, C[2]]), project(CAMERA, [C[0] + d[0] * 0.6, h, C[2] + d[2] * 0.6]), "rgb(255 220 0 / .7)");
+      for (let s = 0; s <= 0.6; s += 0.05) {
+        const X = [C[0] + d[0] * s, 0, C[2] + d[2] * s];
+        line(project(CAMERA, [X[0], CAMERA.floorY, X[2]]), project(CAMERA, [X[0], 0.4, X[2]]), "rgb(255 220 0 / .4)");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------- renderer
+
+const sceneRenderer = createRenderer({
+  rooms: ROOMS,
+  initialPaint: INITIAL_PAINT,
+  initialModel: "v3",
+  sheen: {
+    initial: INITIAL_SHEEN,
+    keys: SHEEN_ORDER,
+    glslUrl: "glsl/sheen.glsl",
+    jobFor: (roomKey, time, sheen) => sheenJob(sheen, CAMERA, LIGHTS[time])
+  },
+  elements: {
+    app: document.getElementById("app"),
+    renderer,
+    controls: document.getElementById("controls"),
+    notice: document.getElementById("notice"),
+    readoutHex: document.getElementById("readoutHex"),
+    readoutLrv: document.getElementById("readoutLrv")
+  }
+});
+
+// setSheen also updates the description card (for scripted calls too).
+const setSheen = sceneRenderer.setSheen;
+sceneRenderer.setSheen = key => { const done = setSheen(key); syncSheenCard(key); return done; };
+
+// One delegated listener: paint radios and the sheen select.
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.name === "paint") sceneRenderer.setPaint(t.value);
+  else if (t.name === "sheen") sceneRenderer.setSheen(t.value);
+});
+
+// Scripting and testing handle: setPaint / setSheen, sample(), ready, and
+// the solved camera.
+window.sceneRenderer = sceneRenderer;
+window.sheenCamera = CAMERA;
+
+sceneRenderer.start();
+</script>
+</body>
+</html>
