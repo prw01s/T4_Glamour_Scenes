@@ -251,9 +251,11 @@ vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.
 // instead (as a 2D canvas does) darkens every high-contrast edge: measured on
 // these photos, 1 % of 8x8 blocks come out 38-60 % too dark, and those blocks
 // are exactly the shadow and sunbeam edges.
+// Alpha is carried through (linear in an sRGB texture): opaque photos stay
+// opaque; sheenSceneRenderer.html stores a texture map there.
 uniform sampler2D src;
 uniform vec2 size;
-void main() { fragOut = vec4(texture(src, gl_FragCoord.xy / size).rgb, 1.0); }
+void main() { fragOut = texture(src, gl_FragCoord.xy / size); }
 
 //@@DECODE
 // P0: source image -> linear light, at the analysis size.

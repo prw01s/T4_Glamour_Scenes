@@ -235,6 +235,9 @@
    * @property {string} glslUrl   The sheen shader file (glsl/sheen.glsl).
    * @property {(room: string, time: string, sheen: string) => { uniforms: Record<string, any>, envKey: string }} jobFor
    *   The sheen uniforms for one photo (SheenModel.sheenJob).
+   * @property {(img: HTMLImageElement, mask: HTMLImageElement) => Promise<TexImageSource>} [prepareImage]
+   *   Turns a photo into what is uploaded (SheenModel.photoWithDetail: the
+   *   photo with its texture map in the alpha channel).
    */
 
   /**
@@ -398,14 +401,16 @@
                                            { mipmaps: true });
         pipeline.upload(mask, maskImg);
         const n = pipeline.rw;
-        const entries = imgs.map(img => {
+        const entries = [];
+        for (const img of imgs) {
           const stats = new LightStats(STATS_SIZE, STATS_SIZE);
           stats.add(img, maskImg);
-          // sRGB: resized and mipmapped in linear light (see LightPipeline.upload)
+          // sRGB: resized and mipmapped in linear light (see LightPipeline.upload).
+          // Sheen mode may add data to the photo first (its alpha channel).
           const src = pipeline.createSource(n, n, { mipmaps: n > ANALYSIS_SIZE, srgb: true });
-          pipeline.upload(src, img);
-          return { img, src, stats, lightMap: pipeline.createLightMap(), scene: null };
-        });
+          pipeline.upload(src, sheenOpts && sheenOpts.prepareImage ? await sheenOpts.prepareImage(img, maskImg) : img);
+          entries.push({ img, src, stats, lightMap: pipeline.createLightMap(), scene: null });
+        }
         const stats = LightStats.combine(entries.map(e => e.stats));
         for (const e of entries) e.scene = sceneSpec(e.stats, stats);
         return (roomData[room] = { entries, mask, stats });
@@ -593,6 +598,7 @@
       if (!(room in rooms)) throw new RangeError(`Unknown room "${room}"`);
       activeRoom = room;
       syncRadio("room", room);
+      for (const sel of app.querySelectorAll('select[name="room"]')) sel.value = room;
       const token = ++roomToken;
       if (painting) {
         try { await prepareRoom(room); } catch (err) { fail(err); }

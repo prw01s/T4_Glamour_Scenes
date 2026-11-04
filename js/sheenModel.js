@@ -1,13 +1,13 @@
 /* ==========================================================================
  * sheenModel.js — the paint sheen model behind sheenSceneRenderer.html:
  * what each sheen IS physically (SHEENS), what visitors are told about it
- * (SHEEN_COPY), and the room geometry the reflections need (solveCamera).
+ * (SHEEN_COPY), and the room geometry the reflections need (solveRoom).
  *
  *   SHEENS        Flat / Eggshell / Satin / Semi-gloss as surface-reflection
  *                 parameters, each with its source and its check
  *   SHEEN_COPY    the visitor-facing description of each sheen
- *   solveCamera() a pinhole camera + the two wall planes + the floor, from
- *                 straight lines measured in the photo
+ *   solveRoom()   a pinhole camera + the room's walls, floor and ceiling,
+ *                 from straight lines measured in the photo
  *   sheenJob()    everything RENDER's sheen code needs for one photo, as
  *                 uniforms (consumed by LightPipeline.render in paintPipeline.js)
  *
@@ -223,58 +223,81 @@
   // Camera and room geometry
   // ======================================================================
   //
-  // The reflections are traced in 3-D: each wall pixel's mirror ray is
-  // followed to the other wall or the floor, and that point is looked up in
-  // the photo. That needs the camera and the room's planes, which are
-  // recovered from straight lines in the photo (single-view metrology,
-  // Criminisi, Reid & Zisserman 1999; Hartley & Zisserman ch. 8):
+  // The reflections are traced in 3-D: each wall pixel's reflected rays are
+  // followed to the room's other planes, and the points they reach are looked
+  // up in the photo. That needs the camera and the room's planes, recovered
+  // from straight lines in the photo (single-view metrology, Criminisi, Reid
+  // & Zisserman 1999; Hartley & Zisserman ch. 8):
   //
-  //  1. Lines that are horizontal in the room and run along one wall meet at
-  //     that wall's vanishing point (VP). The back wall's VP is their least-
-  //     squares intersection.
+  //  1. Lines that are horizontal in the room and run in one direction meet
+  //     at that direction's vanishing point (VP). Direction "a" (usually the
+  //     back wall's) is the least-squares intersection of its lines.
   //  2. The photos have perspective-corrected verticals (a "shift lens"), so
   //     the camera has no pitch: the horizon is a straight line through the
-  //     VPs, tilted only by the camera's roll, which the near-vertical lines
-  //     measure.
-  //  3. The window wall's VP lies on that horizon; its position is fitted to
-  //     the window wall's lines (smallest endpoint error).
+  //     VPs, tilted only by the camera's roll, which the verticals measure.
+  //  3. The perpendicular direction "b" has its VP on that horizon, fitted to
+  //     its lines (smallest endpoint error). Any lines will do: a side wall's,
+  //     a window's, or a rug's edge when no side wall is visible.
   //  4. The principal point is the image centre's column on the horizon (the
-  //     shift lens moves it vertically only). The walls are perpendicular, so
-  //     their VP directions are too: f² = (xL - cx)(cx - xR) along the horizon.
-  //  5. The corner (a vertical line) fixes where the walls meet; the scene's
-  //     scale is arbitrary, so the corner is put at depth 1. A point where
-  //     the back wall meets the floor fixes the floor's height.
+  //     shift lens moves it vertically only). The two directions are
+  //     perpendicular, so f² = (ua - cx)(cx - ub) along the horizon.
+  //  5. Walls are vertical planes along a direction: "a", "b", or "a±b"
+  //     (a 45° chamfer). The first is anchored at depth 1 (the scene's scale
+  //     is arbitrary); each next one passes through its corner with a wall
+  //     already placed. The floor (and a ceiling, if visible) passes through
+  //     points on known walls: one point for a level plane, three for a
+  //     sloped one.
+  //
+  // A room seen from inside is (close to) convex, so the wall a pixel shows
+  // is the first wall its camera ray reaches, and a reflected ray lands on the
+  // first plane it reaches - no corner lines or wall masks are needed, and
+  // any number of walls works (glsl/sheen.glsl: visibleWall, traceRoom).
   //
   // Coordinates. Image: u, v in units of the image WIDTH, origin top-left,
   // v down (the photos are square, so both run 0..1). Camera space: x right,
   // y up, z forward (into the room), camera at the origin.
 
   /**
-   * Measured geometry of one room photo, all in image units (u, v).
+   * Measured geometry of one room photo, in image units (u, v).
    * @typedef {Object} RoomGeometry
-   * @property {number[][]} backLines  [u1, v1, u2, v2] segments that are horizontal
-   *   in the room and lie along the back wall.
-   * @property {number[][]} sideLines  Same, along the side (window) wall.
+   * @property {{ a: number[][], b?: number[][], bSloped?: number[][] }} lines
+   *   [u1, v1, u2, v2] segments that are horizontal in the room, along
+   *   direction a and along the perpendicular direction b; or, instead of b,
+   *   bSloped: two or more parallel sloped lines in walls of direction b
+   *   (a sloped ceiling's edges on two parallel walls), whose VP is straight
+   *   above or below b's. Avoid picture frames: large frames hang tilted
+   *   forward, so their edges aren't parallel to the wall.
    * @property {number[][]} verticals  Segments that are vertical in the room.
-   * @property {number} cornerU       u of the wall corner (a vertical line).
-   * @property {"left" | "right"} sideWall  Which side of the corner the side wall is on.
-   * @property {[number, number]} floorPoint  A point where the back wall meets the floor.
+   * @property {WallSpec[]} walls      In order; the first has `through`, the others `corner`.
+   * @property {PlaneSpec} floor
+   * @property {PlaneSpec} [ceiling]
+   * @property {number} [focal]  The focal length (image widths), when known (a photo's EXIF):
+   *   then direction b's VP follows from a's (perpendicular directions: qA qB = -f²) and
+   *   b lines are optional.
+   *
+   * @typedef {Object} WallSpec
+   * @property {string} id
+   * @property {"a" | "b" | "a+b" | "a-b"} dir  The direction its horizontal lines run
+   *   ("a±b": a 45° chamfer across a corner).
+   * @property {{ u: number, depth?: number }} [through]  First wall: passes through
+   *   the point at image column u on the horizon, at depth (default 1).
+   * @property {{ wall: string, u: number }} [corner]  Passes through the point of
+   *   `wall` at image column u on the horizon (their shared corner).
+   *
+   * @typedef {{ wall: string, uv: [number, number] }} WallPoint  A point seen at uv, on `wall`.
+   * @typedef {{ at: WallPoint } | { through: [WallPoint, WallPoint, WallPoint] }} PlaneSpec
+   *   at: a level plane through that point; through: the plane through three points.
    */
 
   /**
    * The solved camera and room, ready for the shader.
-   * @typedef {Object} Camera
+   * @typedef {Object} Room
    * @property {[number, number]} c     Principal point (u, v).
    * @property {number} f               Focal length, in image widths.
    * @property {[number, number]} rot   cos, sin of the roll.
-   * @property {number[]} side          Side-wall plane: [nx, ny, nz, h] with n·X = h,
-   *                                    n pointing into the room (toward the camera).
-   * @property {number[]} back          Back-wall plane, likewise.
-   * @property {number} floorY          Floor plane y = floorY (camera height is -floorY).
-   * @property {number} cornerX         The corner's x in roll-corrected image offsets
-   *                                    (u - cx after the roll), as RENDER tests it.
-   * @property {number} sideSign        +1 if the side wall is right of the corner, -1 if left.
-   * @property {Object} report          Diagnostics: VPs, horizontal FOV, wall angles, fit error.
+   * @property {{ id: string, kind: "wall" | "floor" | "ceiling", p: number[] }[]} planes
+   *   Walls first. p = [nx, ny, nz, h] with n·X = h, n pointing into the room.
+   * @property {Object} report          Diagnostics: VPs, field of view, fit error, heights.
    */
 
   const v3 = {
@@ -300,78 +323,110 @@
   }
 
   /**
-   * Solves the camera and the room planes (see the comment block above).
+   * Solves the camera and the room's planes (see the comment block above).
    * @param {RoomGeometry} g
-   * @returns {Camera}
+   * @returns {Room}
    */
-  function solveCamera(g) {
-    // 1. Back wall VP.
-    const vpB = intersectLines(g.backLines);
+  function solveRoom(g) {
+    // 1. Direction a's VP.
+    const vpA = intersectLines(g.lines.a);
     // 2. Roll: the mean lean of the verticals (length-weighted). Rotating the
     // image by the roll turns a vertical's direction (0, 1) into
     // (-sin, cos), so du/dv = -tan(roll), and the horizon's (1, 0) into
     // (cos, sin): its slope dv/du = tan(roll) = -du/dv of the verticals.
     let su = 0, sv = 0;
     for (const [x1, y1, x2, y2] of g.verticals) { const s = y2 > y1 ? 1 : -1; su += s * (x2 - x1); sv += s * (y2 - y1); }
-    const slope = -su / sv;                        // horizon: v = vpB.v + slope (u - vpB.u)
+    const slope = -su / sv;                        // horizon: v = vpA.v + slope (u - vpA.u)
     const roll = Math.atan(slope);
-    const horizon = u => vpB[1] + slope * (u - vpB[0]);
-    // 3. Side wall VP on the horizon: minimise the RMS endpoint error of the
-    // side lines when each is redrawn through the VP (pivoting at its midpoint).
-    const err = u => {
+    const horizon = u => vpA[1] + slope * (u - vpA[0]);
+    // 3. Direction b's VP on the horizon: minimise the RMS endpoint error of
+    // its lines when each is redrawn through the VP (pivoting at its midpoint).
+    const errFor = lines => u => {
       const vp = [u, horizon(u)];
       let s = 0;
-      for (const [x1, y1, x2, y2] of g.sideLines) {
+      for (const [x1, y1, x2, y2] of lines) {
         const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, half = Math.hypot(x2 - x1, y2 - y1) / 2;
         const a1 = Math.atan2(y2 - y1, x2 - x1), a2 = Math.atan2(vp[1] - my, vp[0] - mx);
         let da = Math.abs(a1 - a2) % Math.PI; da = Math.min(da, Math.PI - da);
         s += (half * Math.sin(da)) ** 2;
       }
-      return s / g.sideLines.length;
+      return s / lines.length;
     };
-    // The VP is on the far side of the image from the back wall's VP.
-    const dir = vpB[0] < 0.5 ? 1 : -1;
+    // Perpendicular directions have their VPs on opposite sides of the
+    // principal point's column (0.5).
     let best = null;
-    for (let i = 1; i <= 4000; i++) {
-      const u = 0.5 + dir * i * 0.005;             // up to 20 image widths away
-      const e = err(u);
-      if (!best || e < best.e) best = { u, e };
+    if (g.focal && !g.lines.bSloped) {
+      // Known focal length: b's VP is where perpendicularity puts it. On the
+      // horizon, the unrolled offset from the principal point is
+      // (u - 0.5)(cos + sin slope); qA qB = -f².
+      const cs = Math.cos(roll), sn = Math.sin(roll), k = cs + sn * slope;
+      const qA = k * (vpA[0] - 0.5);                          // vpA lies on the horizon
+      const qB = -g.focal * g.focal / qA;
+      best = { u: 0.5 + qB / k, e: g.lines.b && g.lines.b.length ? errFor(g.lines.b)(0.5 + qB / k) : 0 };
+    } else if (g.lines.bSloped) {
+      // Alternative: sloped lines that lie in walls of direction b (e.g.
+      // where a sloped ceiling meets two parallel walls) are parallel in 3-D
+      // and vertical-plane-bound, so - with no pitch - their VP is straight
+      // above or below b's: it gives b's column.
+      const p = intersectLines(g.lines.bSloped);
+      best = { u: p[0] - slope * (p[1] - horizon(p[0])), e: 0 };   // along the (rolled) vertical to the horizon
+    } else {
+      const err = errFor(g.lines.b), dir = vpA[0] < 0.5 ? 1 : -1;
+      for (let i = 1; i <= 4000; i++) {
+        const u = 0.5 + dir * i * 0.0025;          // up to 10 image widths away
+        const e = err(u);
+        if (!best || e < best.e) best = { u, e };
+      }
+      for (let step = 0.00125; step > 1e-7; step /= 2) {   // refine
+        for (const u of [best.u - step, best.u + step]) { const e = err(u); if (e < best.e) best = { u, e }; }
+      }
     }
-    for (let step = 0.0025; step > 1e-7; step /= 2) {   // refine
-      for (const u of [best.u - step, best.u + step]) { const e = err(u); if (e < best.e) best = { u, e }; }
-    }
-    const vpS = [best.u, horizon(best.u)];
+    const vpB = [best.u, horizon(best.u)];
     // 4. Principal point and focal length, in roll-corrected coordinates.
     const cos = Math.cos(roll), sin = Math.sin(roll);
     const c = [0.5, horizon(0.5)];
     const unroll = ([u, v]) => { const x = u - c[0], y = v - c[1]; return [cos * x + sin * y, -sin * x + cos * y]; };
-    const qB = unroll(vpB), qS = unroll(vpS);
-    const f = Math.sqrt(-qB[0] * qS[0]);
-    // Directions of the walls' horizontal lines (camera space).
-    const dB = v3.norm([qB[0] / f, 0, 1]), dS = v3.norm([qS[0] / f, 0, 1]);
-    // 5. Corner at depth 1, on the horizon (camera height). Plane normals
-    // are horizontal, perpendicular to each wall's direction, oriented toward
-    // the camera.
-    const corner = unroll([g.cornerU, horizon(g.cornerU)]);
-    const C0 = [corner[0] / f, 0, 1];
-    const plane = d => {
-      let n = v3.norm(v3.cross(d, [0, 1, 0]));
-      if (v3.dot(n, C0) > 0) n = v3.scale(n, -1);  // n·(camera - C0) > 0
-      return [n[0], n[1], n[2], v3.dot(n, C0)];
+    const qA = unroll(vpA), qB = unroll(vpB);
+    const f = Math.sqrt(-qA[0] * qB[0]);
+    const cam = { c, f, rot: [cos, sin] };
+    // Directions of horizontal lines (camera space).
+    const dirs = { a: v3.norm([qA[0] / f, 0, 1]), b: v3.norm([qB[0] / f, 0, 1]) };
+    // A 45° chamfer across the corner of an a-wall and a b-wall.
+    dirs["a+b"] = v3.norm(v3.add(dirs.a, dirs.b));
+    dirs["a-b"] = v3.norm(v3.sub(dirs.a, dirs.b));
+    // 5. Planes.
+    const planes = [], byId = {};
+    const horizonPoint = u => cameraRay(cam, [u, horizon(u)]);   // a ray at camera height
+    const onPlane = (p, ray) => v3.scale(ray, p[3] / v3.dot(p, ray));
+    const inward = (n, P) => {                    // orient n toward the camera: n·(0 - P) > 0
+      if (v3.dot(n, P) > 0) n = v3.scale(n, -1);
+      return [n[0], n[1], n[2], v3.dot(n, P)];
     };
-    const back = plane(dB), side = plane(dS);
-    // Floor: the ray through floorPoint, on the back wall.
-    const fp = unroll(g.floorPoint);
-    const ray = [fp[0] / f, -fp[1] / f, 1];
-    const t = back[3] / v3.dot(back, ray);
-    const floorY = ray[1] * t;
+    for (const w of g.walls) {
+      let P;
+      if (w.through) { const r = horizonPoint(w.through.u); P = v3.scale(r, (w.through.depth || 1) / r[2]); }
+      else P = onPlane(byId[w.corner.wall].p, horizonPoint(w.corner.u));
+      const d = dirs[w.dir];
+      const entry = { id: w.id, kind: "wall", p: inward(v3.norm(v3.cross(d, [0, 1, 0])), P) };
+      planes.push(entry); byId[w.id] = entry;
+    }
+    const pointAt = ({ wall, uv }) => onPlane(byId[wall].p, cameraRay(cam, uv));
+    const planeFrom = (spec, kind) => {
+      if (spec.at) { const P = pointAt(spec.at); return { id: kind, kind, p: inward([0, kind === "floor" ? 1 : -1, 0], P) }; }
+      const [P0, P1, P2] = spec.through.map(pointAt);
+      return { id: kind, kind, p: inward(v3.norm(v3.cross(v3.sub(P1, P0), v3.sub(P2, P0))), P0) };
+    };
+    planes.push(planeFrom(g.floor, "floor"));
+    if (g.ceiling) planes.push(planeFrom(g.ceiling, "ceiling"));
     const deg = r => r * 180 / Math.PI;
+    const floorY = planes.find(p => p.kind === "floor").p[3];
     return {
-      c, f, rot: [cos, sin], side, back, floorY, cornerX: corner[0], sideSign: g.sideWall === "right" ? 1 : -1,
+      c, f, rot: [cos, sin], planes,
       report: {
-        vpBack: vpB, vpSide: vpS, rollDeg: deg(roll), hfovDeg: deg(2 * Math.atan(0.5 / f)),
-        backWallAngleDeg: deg(Math.atan(qB[0] / f)), sideWallAngleDeg: deg(Math.atan(qS[0] / f)),
-        sideLineRmsErr: Math.sqrt(best.e), orthogonality: v3.dot(dB, dS), cameraHeight: -floorY
+        vpA, vpB, rollDeg: deg(roll), hfovDeg: deg(2 * Math.atan(0.5 / f)),
+        angleADeg: deg(Math.atan(qA[0] / f)), angleBDeg: deg(Math.atan(qB[0] / f)),
+        bLineRmsErr: Math.sqrt(best.e), cameraHeight: -floorY,
+        walls: planes.filter(p => p.kind === "wall").map(p => `${p.id}: distance ${(-p.p[3]).toFixed(3)}`)
       }
     };
   }
@@ -390,17 +445,293 @@
   }
 
   /**
-   * The 3-D point on a wall seen at image point (u, v), moved `offset` (scene
-   * units; the corner is at depth 1) into the room. For placing lights.
-   * @param {Camera} cam
+   * The 3-D point on a plane seen at image point (u, v), moved `offset`
+   * (scene units) into the room along the plane's normal. For placing lights.
+   * @param {Room} room
    * @param {[number, number]} uv
-   * @param {"side" | "back"} wall
+   * @param {string} id  A plane's id (a wall's, "floor" or "ceiling").
    * @param {number} [offset=0]
    */
-  function pointOnWall(cam, uv, wall, offset = 0) {
-    const p = cam[wall], d = cameraRay(cam, uv);
+  function pointOnWall(room, uv, id, offset = 0) {
+    const pl = room.planes.find(p => p.id === id);
+    if (!pl) throw new RangeError(`No plane "${id}"`);
+    const p = pl.p, d = cameraRay(room, uv);
     const X = v3.scale(d, p[3] / v3.dot(p, d));
     return v3.add(X, v3.scale(p, offset));
+  }
+
+  /**
+   * The 3-D point seen at image point (u, v) that is `offset` (scene units)
+   * in front of plane `id`: on the camera ray, where the ray's distance to
+   * the plane is offset. This places an object (a lamp) that the photo shows
+   * in front of a wall: it is on its pixel's ray, not on the wall behind it.
+   * @param {Room} room
+   * @param {[number, number]} uv
+   * @param {string} id
+   * @param {number} offset
+   */
+  function pointOffWall(room, uv, id, offset) {
+    const pl = room.planes.find(p => p.id === id);
+    if (!pl) throw new RangeError(`No plane "${id}"`);
+    const p = pl.p, d = cameraRay(room, uv);
+    return v3.scale(d, (p[3] + offset) / v3.dot(p, d));   // n·X = h + offset
+  }
+
+  /**
+   * Which wall the camera sees at image point (u, v): the first wall its ray
+   * reaches (the room is convex). Mirrors visibleWall() in glsl/sheen.glsl.
+   * @returns {string} The wall's id.
+   */
+  function wallAt(room, uv) {
+    const d = cameraRay(room, uv);
+    let best = null, tBest = Infinity;
+    for (const pl of room.planes) {
+      if (pl.kind !== "wall") continue;
+      const dn = v3.dot(pl.p, d);
+      if (dn < -1e-5) { const t = pl.p[3] / dn; if (t > 0 && t < tBest) { tBest = t; best = pl.id; } }
+    }
+    return best;
+  }
+
+  // ======================================================================
+  // The wall's texture, and whether the photo really shows it
+  // ======================================================================
+  //
+  // Glints come from the wall's texture: in a photo, a surface tilted toward
+  // the light is brighter, so small brightness variations give the tilts
+  // (glsl/sheen.glsl, micro-normals). But JPEG compression and 8-bit
+  // quantisation add variations of their own. Measured on these photos'
+  // walls, brightness steps across the JPEG's 8 x 8 block edges are 1.3-4.8x
+  // those inside blocks (1.0 = no blocking), and the detail INSIDE blocks -
+  // which the blocking doesn't reach - is 2.7 / 4.0 (living room 2, day /
+  // night), 1.7 / 2.4 (deck), 0.35 / 0.68 (living room) and 0.21 / 0.31
+  // (study) 8-bit levels per pixel, against a noise floor of about 0.3-0.7.
+  // In the living room and the study the walls show no measurable texture:
+  // their "texture" was compression, and glossy finishes reflected it as
+  // patchy mosaics. (Smoothing the block averages away was tried; JPEG's
+  // in-block ramps leave the steps, so it didn't help.)
+  //
+  // So each photo's texture map is scaled by how far its in-block wall
+  // detail stands above that noise floor: 0 below 0.8 levels/px, rising
+  // smoothly to 1 at 2.0. The map itself is the luminance over its local
+  // mean (3 box blurs of radius 3, Gaussian-like, sigma ≈ 3.5 px) minus 1,
+  // stored in the photo's alpha channel (128 + 512 x detail, ±0.25), which
+  // RENDER reads: no extra GPU memory.
+
+  /** sRGB byte -> linear, as a lookup table. */
+  const LINEAR = Float32Array.from({ length: 256 }, (_, i) => {
+    const c = i / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+
+  /** In-place box blur of radius r, rows then columns (`tmp` is scratch of the same size). */
+  function boxBlur(a, tmp, w, h, r) {
+    const n = 2 * r + 1;
+    for (let y = 0; y < h; y++) {
+      const o = y * w;
+      let s = 0;
+      for (let x = -r; x <= r; x++) s += a[o + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        tmp[o + x] = s / n;
+        s += a[o + Math.min(w - 1, x + r + 1)] - a[o + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        a[y * w + x] = s / n;
+        s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+  }
+
+  /**
+   * A photo's texture measurements.
+   * @param {Uint8ClampedArray} rgba  The photo's pixels (getImageData).
+   * @param {Uint8ClampedArray | null} mask  The wall mask at the same size (black = wall), or null.
+   * @param {number} w
+   * @param {number} h
+   * @returns {{ detail: Float32Array, inBlock: number, blockiness: number, gain: number }}
+   *   detail   luminance / local mean - 1, per pixel
+   *   inBlock  mean |step| between horizontal neighbours inside 8 x 8 blocks, on
+   *            wall pixels, in 8-bit levels of luma (the texture's strength)
+   *   blockiness  steps across block edges / steps inside blocks
+   *   gain     the factor the texture map is stored with (see above)
+   */
+  function textureDetail(rgba, mask, w, h) {
+    const Y = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++)
+      Y[i] = 0.2126729 * LINEAR[rgba[4 * i]] + 0.7151522 * LINEAR[rgba[4 * i + 1]] + 0.0721750 * LINEAR[rgba[4 * i + 2]];
+    let inS = 0, inN = 0, edS = 0, edN = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x + 1 < w; x++) {
+      const i = y * w + x;
+      if (mask && (mask[4 * i] > 40 || mask[4 * (i + 1)] > 40)) continue;
+      const luma = j => 0.299 * rgba[4 * j] + 0.587 * rgba[4 * j + 1] + 0.114 * rgba[4 * j + 2];
+      const g = Math.abs(luma(i + 1) - luma(i));
+      if ((x & 7) === 7) { edS += g; edN++; } else { inS += g; inN++; }
+    }
+    const inBlock = inN ? inS / inN : 0, blockiness = inS > 0 ? (edS / edN) / inBlock : 1;
+    const t = Math.min(1, Math.max(0, (inBlock - 0.8) / 1.2)), gain = t * t * (3 - 2 * t);
+    const mean = Float32Array.from(Y), tmp = new Float32Array(w * h);
+    for (let k = 0; k < 3; k++) boxBlur(mean, tmp, w, h, 3);
+    for (let i = 0; i < w * h; i++) Y[i] = mean[i] > 1e-4 ? Y[i] / mean[i] - 1 : 0;
+    return { detail: Y, inBlock, blockiness, gain };
+  }
+
+  /**
+   * The photo to upload for sheen rendering: its pixels, with its texture map
+   * (scaled by the texture gain) in the alpha channel: 128 + 512 x detail.
+   * Uploaded without premultiplication, so the colours are exactly the photo's.
+   * @param {HTMLImageElement} img   Decoded, same-origin.
+   * @param {HTMLImageElement} [maskImg]  The room's wall mask (any size).
+   * @returns {Promise<ImageBitmap & { texture?: object }>}  `.texture` holds the measurements.
+   */
+  async function photoWithDetail(img, maskImg) {
+    const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;   // an <img> or a canvas
+    const ctx = Object.assign(document.createElement("canvas"), { width: w, height: h }).getContext("2d", { willReadFrequently: true });
+    let mask = null;
+    if (maskImg) { ctx.drawImage(maskImg, 0, 0, w, h); mask = ctx.getImageData(0, 0, w, h).data; ctx.clearRect(0, 0, w, h); }
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, w, h);
+    const tex = textureDetail(data.data, mask, w, h);
+    for (let i = 0; i < w * h; i++)
+      data.data[4 * i + 3] = Math.round(128 + 512 * Math.max(-0.25, Math.min(0.248, tex.gain * tex.detail[i])));
+    const bitmap = await createImageBitmap(data, { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+    bitmap.texture = { inBlock: tex.inBlock, blockiness: tex.blockiness, gain: tex.gain };
+    return bitmap;
+  }
+
+  // ======================================================================
+  // Lamps: small light sources off the walls
+  // ======================================================================
+  //
+  // The environment treats everything in the photo as lying on the room's
+  // planes. That is right for windows (in a wall) but not for lamps that
+  // stand or hang off the walls: a bulb 20 cm from a wall reflects in a glossy
+  // wall displaced by about twice that distance, while the environment puts
+  // it on the wall, where its "reflection" falls behind the lamp itself. So
+  // lamps are lights in 3-D: placed off a wall, and reflected analytically
+  // (GGX highlight of a sphere light, glsl/sheen.glsl lampSpecular).
+  //
+  // Their intensity comes from the photo. Every configured lamp uses its own
+  // pixels ("core"): the linear RGB of the pixels above a threshold, summed,
+  // x one pixel's area at the lamp's depth (radiance x area = intensity),
+  // x the emitter gain the camera's tone curve took off (12 for bare bulbs,
+  // 5 for lit shades: the same gains the environment uses).
+  //
+  // The physically better route - fit I so that the lamp brightens the wall
+  // around it as much as the photo shows (irradiance I cos / r², least
+  // squares per channel over rings at 0.5-2x its distance) - is implemented
+  // too (no `core`), but failed on all four photos: their walls show no
+  // inverse-square falloff (fits gave zero or one-channel intensities, R²
+  // < 0.15). The night photos are tone-mapped, possibly generated; their
+  // light pools are painted, not photometric. See docs/sheen-science.md §5B.
+
+  /**
+   * A lamp as configured.
+   * @typedef {Object} LampSpec
+   * @property {[number, number]} uv     Where the lamp is in the photo (it is on that pixel's ray).
+   * @property {string} wall             The plane it is in front of.
+   * @property {number} offset           Its distance from that plane (scene units).
+   * @property {number} radius           Its radius (scene units).
+   * @property {[number, number, number]} [axis]  Main direction, for a shaded lamp...
+   * @property {number} [cone]           ... and the cosine of its half-angle (default: all around).
+   * @property {[number, number]} [glow] A wall point it visibly lights (default: the
+   *   point of `wall` nearest to it).
+   * @property {{ rect: number[], threshold: number, gain: number }} [core]  Use its own
+   *   pixels instead (rect in image units).
+   */
+
+  /**
+   * Calibrates the lamps of one photo (see above).
+   * @param {Room} room
+   * @param {LampSpec[]} specs
+   * @param {HTMLImageElement} img      The photo, decoded.
+   * @param {HTMLImageElement} maskImg  The room's mask, decoded.
+   * @returns {{ pos: number[], radius: number, I: number[], axis: number[], cone: number, report: string }[]}
+   *   I in the photo's linear units x scene units² (RENDER divides by refY).
+   */
+  function calibrateLamps(room, specs, img, maskImg) {
+    if (!specs || !specs.length) return [];
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const ctx = Object.assign(document.createElement("canvas"), { width: w, height: h }).getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(maskImg, 0, 0, w, h);
+    const mask = ctx.getImageData(0, 0, w, h).data;
+    ctx.drawImage(img, 0, 0);
+    const pix = ctx.getImageData(0, 0, w, h).data;
+    const rgbAt = ([u, v], r = 4) => {             // mean linear RGB of wall pixels around (u, v)
+      const cx = Math.round(u * w), cy = Math.round(v * h), s = [0, 0, 0];
+      let n = 0;
+      for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const i = 4 * (y * w + x);
+        if (mask[i] > 40) continue;
+        for (let k = 0; k < 3; k++) s[k] += LINEAR[pix[i + k]];
+        n++;
+      }
+      return n ? s.map(c => c / n) : null;
+    };
+    const lum = c => 0.2126729 * c[0] + 0.7151522 * c[1] + 0.0721750 * c[2];
+    return specs.map(sp => {
+      const pl = room.planes.find(p => p.id === sp.wall).p, n = [pl[0], pl[1], pl[2]];
+      const pos = pointOffWall(room, sp.uv, sp.wall, sp.offset);
+      const axis = sp.axis ? v3.norm(sp.axis) : [0, -1, 0], cone = sp.cone ?? -1;
+      let I = null, report;
+      if (sp.core) {
+        // A clipped core is white whatever the lamp's colour (measured: bulb
+        // cores 1.05 : 1 : 0.8 R:G:B against 1.6 : 0.9 : 0.25 in their
+        // unclipped halos). Then the colour comes from the halo - the pixels
+        // at 50-100 % of the threshold, mostly the bulb's own bloom - and
+        // the luminance from the core.
+        const [u0, v0, u1, v1] = sp.core.rect, s = [0, 0, 0], halo = [0, 0, 0];
+        let count = 0, clipped = 0, haloN = 0;
+        for (let y = Math.floor(v0 * h); y < v1 * h; y++) for (let x = Math.floor(u0 * w); x < u1 * w; x++) {
+          const i = 4 * (y * w + x), c = [LINEAR[pix[i]], LINEAR[pix[i + 1]], LINEAR[pix[i + 2]]], l = lum(c);
+          if (l < sp.core.threshold) {
+            if (l >= 0.5 * sp.core.threshold) { for (let k = 0; k < 3; k++) halo[k] += c[k]; haloN++; }
+            continue;
+          }
+          for (let k = 0; k < 3; k++) s[k] += c[k];
+          count++;
+          if (Math.max(pix[i], pix[i + 1], pix[i + 2]) >= 250) clipped++;
+        }
+        const area = (pos[2] / room.f / w) ** 2;  // one pixel's area at the lamp's depth (image width = 1)
+        const useHalo = count > 0 && clipped > 0.25 * count && haloN >= 20 && lum(halo) > 0;
+        const colour = useHalo ? v3.scale(halo, lum(s) / lum(halo)) : s;
+        I = colour.map(c => c * area * sp.core.gain);
+        report = `core: ${count} px (${Math.round(100 * clipped / Math.max(1, count))} % clipped)` +
+                 (useHalo ? `, colour from ${haloN} halo px` : "");
+      } else {
+        // Samples of the visible wall around the lamp: rings at 0.5-2x its
+        // distance from the wall, around its foot (or a given lit point).
+        // Each gives dW = wall - ambient and the geometric factor
+        // g = 0.88 cos / (pi r²) (the cone too, for a shaded lamp); I is the
+        // least-squares fit dW = I g (per channel). Ambient: the median of a
+        // ring at 4x the distance.
+        const G = sp.glow ? pointOnWall(room, sp.glow, sp.wall) : v3.sub(pos, v3.scale(n, sp.offset));
+        const t = v3.norm(v3.cross(n, [0, 1, 0])), up = [0, 1, 0], base = sp.offset;
+        const around = (R, k) => { const a = 2 * Math.PI * k / 16; return v3.add(G, v3.add(v3.scale(t, R * Math.cos(a)), v3.scale(up, R * Math.sin(a)))); };
+        const ring = [];
+        for (let k = 0; k < 16; k++) { const P = around(4 * base, k); if (P[2] > 0) { const c = rgbAt(project(room, P)); if (c) ring.push(c); } }
+        const samples = [];
+        for (const f of [0, 0.5, 1, 1.5, 2]) for (let k = 0; k < (f ? 16 : 1); k++) {
+          const P = around(f * base, k); if (P[2] <= 0) continue;
+          const c = rgbAt(project(room, P)); if (!c) continue;
+          const toL = v3.sub(pos, P), r = Math.hypot(...toL), cos = v3.dot(n, toL) / r;
+          const coneW = cone < -0.99 ? 1 : Math.min(1, Math.max(0, (v3.dot(v3.scale(toL, -1 / r), axis) - cone + 0.1) / 0.2));
+          if (cos > 0 && coneW > 0) samples.push({ c, g: 0.88 * cos * coneW / (Math.PI * r * r) });
+        }
+        if (ring.length >= 4 && samples.length >= 3) {
+          ring.sort((x, y) => lum(x) - lum(y));
+          const amb = ring[Math.floor(ring.length / 2)];
+          let gg = 0; const gw = [0, 0, 0];
+          for (const sm of samples) { gg += sm.g * sm.g; for (let k = 0; k < 3; k++) gw[k] += sm.g * (sm.c[k] - amb[k]); }
+          I = gw.map(v => Math.max(0, v / gg));
+          report = `glow: ${samples.length} wall samples, ambient ${lum(amb).toFixed(3)}`;
+        } else { I = [0, 0, 0]; report = `glow: too few wall samples (${samples.length}, ring ${ring.length})`; }
+      }
+      return { pos, radius: sp.radius, I, axis, cone, report };
+    });
   }
 
   // ======================================================================
@@ -408,7 +739,61 @@
   // ======================================================================
 
   /** RENDER's emitter slots (glsl/sheen.glsl: emitRect / emitGain arrays). */
-  const MAX_EMITTERS = 4;
+  const MAX_EMITTERS = 6;
+  /** RENDER's plane slots (glsl/sheen.glsl: roomPlanes). */
+  const MAX_PLANES = 8;
+  /** RENDER's lamp slots (glsl/sheen.glsl: lampPos / lampI / lampAxis). */
+  const MAX_LAMPS = 4;
+  /** RENDER's window slots (glsl/sheen.glsl: winO / winU / winV / winL). */
+  const MAX_WINDOWS = 3;
+
+  // ======================================================================
+  // Windows outside the photo
+  // ======================================================================
+  //
+  // The environment only holds what the photo shows. A window outside the
+  // frame (or mostly outside: the living room's, whose edge shows at the
+  // photo's right border) lights the room and is mirrored by glossy walls,
+  // but no reflected ray finds it in the photo. Such windows are rectangles
+  // on a room plane, given by one vertical edge seen in the photo and a width
+  // along their wall; a reflected ray that reaches one reads its radiance
+  // (glsl/sheen.glsl radianceFrom, filtered to the ray's cone like the
+  // environment).
+
+  /**
+   * A window as configured.
+   * @typedef {Object} WindowSpec
+   * @property {string} wall              The plane it is in (a wall's id).
+   * @property {[number, number, number]} edge  One vertical edge in the photo: [u, vTop, vBottom]
+   *   (image units; u may lie outside 0..1 if extrapolated).
+   * @property {number} [start=0]         Where it starts along the wall from that edge (scene
+   *   units, in the `toward` direction): for a window known only from a reflection.
+   * @property {number} width             Its width along the wall (scene units).
+   * @property {"camera" | "away"} toward Which way along the wall it extends from that edge.
+   * @property {number | number[]} radiance  Linear radiance in the photo's units (1 = a
+   *   white the photo just reaches), a number (neutral) or RGB.
+   */
+
+  /**
+   * Places windows in 3-D.
+   * @param {Room} room
+   * @param {WindowSpec[]} specs
+   * @returns {{ O: number[], U: number[], V: number[], L: number[] }[]}  O the bottom
+   *   corner on the edge, U along the wall (width), V up (height), L radiance.
+   */
+  function placeWindows(room, specs) {
+    return (specs || []).map(sp => {
+      const pl = room.planes.find(p => p.id === sp.wall);
+      if (!pl) throw new RangeError(`No plane "${sp.wall}"`);
+      const [u, vTop, vBot] = sp.edge;
+      const top = pointOnWall(room, [u, vTop], sp.wall), bot = pointOnWall(room, [u, vBot], sp.wall);
+      let t = v3.norm(v3.cross([0, 1, 0], pl.p.slice(0, 3)));          // horizontal, along the wall
+      const toCamera = v3.dot(t, v3.scale(bot, -1)) > 0;
+      if (toCamera !== (sp.toward === "camera")) t = v3.scale(t, -1);
+      const L = typeof sp.radiance === "number" ? [sp.radiance, sp.radiance, sp.radiance] : sp.radiance;
+      return { O: v3.add(bot, v3.scale(t, sp.start || 0)), U: v3.scale(t, sp.width), V: v3.sub(top, bot), L };
+    });
+  }
 
   /**
    * A region of the photo whose light sources the camera compressed: the
@@ -426,30 +811,44 @@
    * The sheen part of a RenderJob for one photo: uniforms (names as in
    * glsl/sheen.glsl) plus a key for the cached environment.
    * @param {keyof SHEENS} sheenKey
-   * @param {Camera} cam
-   * @param {{ emitters: Emitter[], keyLight: number[] }} photo
+   * @param {Room} room
+   * @param {{ emitters: Emitter[], keyLight: number[], lamps?: object[], windows?: object[] }} photo
    *   keyLight: camera-space position of the light that rakes the walls
-   *   (from pointOnWall), for the micro-normals.
+   *   (from pointOnWall), for the micro-normals. lamps: from calibrateLamps.
    * @returns {{ uniforms: Record<string, any>, envKey: string }}
    */
-  function sheenJob(sheenKey, cam, photo) {
+  function sheenJob(sheenKey, room, photo) {
     const s = SHEENS[toSheen(sheenKey)];
+    if (photo.emitters.length > MAX_EMITTERS) throw new RangeError(`At most ${MAX_EMITTERS} emitters`);
+    if (room.planes.length > MAX_PLANES) throw new RangeError(`At most ${MAX_PLANES} planes`);
     const rects = new Float32Array(4 * MAX_EMITTERS), gains = new Float32Array(2 * MAX_EMITTERS);
-    photo.emitters.slice(0, MAX_EMITTERS).forEach((e, i) => {
+    photo.emitters.forEach((e, i) => {
       rects.set(e.rect, 4 * i);
       gains.set([e.threshold, e.gain], 2 * i);
     });
     for (let i = photo.emitters.length; i < MAX_EMITTERS; i++) gains.set([2, 1], 2 * i);   // unused: gain 1
+    const planes = new Float32Array(4 * MAX_PLANES);
+    room.planes.forEach((pl, i) => planes.set(pl.p, 4 * i));
+    const lamps = (photo.lamps || []).slice(0, MAX_LAMPS);
+    const lampPos = new Float32Array(4 * MAX_LAMPS), lampI = new Float32Array(3 * MAX_LAMPS), lampAxis = new Float32Array(4 * MAX_LAMPS);
+    lamps.forEach((l, i) => { lampPos.set([...l.pos, l.radius], 4 * i); lampI.set(l.I, 3 * i); lampAxis.set([...l.axis, l.cone], 4 * i); });
+    const wins = photo.windows || [];
+    if (wins.length > MAX_WINDOWS) throw new RangeError(`At most ${MAX_WINDOWS} windows`);
+    const winO = new Float32Array(3 * MAX_WINDOWS), winU = new Float32Array(3 * MAX_WINDOWS),
+          winV = new Float32Array(3 * MAX_WINDOWS), winL = new Float32Array(3 * MAX_WINDOWS);
+    wins.forEach((w, i) => { winO.set(w.O, 3 * i); winU.set(w.U, 3 * i); winV.set(w.V, 3 * i); winL.set(w.L, 3 * i); });
     return {
       uniforms: {
         sheenP: [s.alpha, s.v, s.k], sheenAlb: albedoTable(s.alpha), sheenIor: BINDER_N, sheenFloor: DARKEN_FLOOR,
-        camC: cam.c, camF: cam.f, camRot: cam.rot,
-        planeSide: cam.side, planeBack: cam.back, floorY: cam.floorY, cornerX: cam.cornerX, sideSign: cam.sideSign,
-        keyLight: photo.keyLight, emitRect: rects, emitGain: gains
+        camC: room.c, camF: room.f, camRot: room.rot,
+        roomPlanes: planes, roomWalls: room.planes.filter(p => p.kind === "wall").length, roomPlaneCount: room.planes.length,
+        keyLight: photo.keyLight, emitRect: rects, emitGain: gains,
+        lampPos, lampI, lampAxis, lampCount: lamps.length,
+        winO, winU, winV, winL, winCount: wins.length
       },
       // The environment holds the photo and the painted walls, not the sheen,
       // so it only depends on the geometry and the emitters.
-      envKey: JSON.stringify([cam.c, cam.f, cam.side, cam.back, photo.emitters])
+      envKey: JSON.stringify([room.c, room.f, room.planes.map(p => p.p), photo.emitters])
     };
   }
 
@@ -457,6 +856,7 @@
   window.SheenModel = {
     SURFACE_F0, BINDER_N, DARKEN_FLOOR, SHEENS, SHEEN_ORDER, SHEEN_COPY, MAX_EMITTERS, ALBEDO_N, toSheen,
     fresnel, specularAlbedo, albedoTable,
-    intersectLines, solveCamera, cameraRay, project, pointOnWall, sheenJob
+    MAX_PLANES, intersectLines, solveRoom, cameraRay, project, pointOnWall, pointOffWall, wallAt, sheenJob,
+    textureDetail, photoWithDetail, calibrateLamps, MAX_LAMPS, placeWindows, MAX_WINDOWS
   };
 })();

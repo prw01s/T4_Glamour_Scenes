@@ -44,7 +44,7 @@
     display: block; width: 100%; height: 100%;
   }
   .scene__canvas--incoming { opacity: 0; }
-  .scene__photo { object-fit: cover; }
+  .scene__photo { object-fit: cover; visibility: hidden; }
   /* Masks are opt-in: until .is-painted, visitors see the plain photos.
      Black in the mask is wall, so luminance mode hides exactly the walls. */
   .is-painted .scene__photo {
@@ -54,7 +54,8 @@
     mask-size: cover;
     mask-mode: luminance;
   }
-  .scene__calib { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; pointer-events: none; }
+  .scene__calib { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; pointer-events: none; visibility: hidden; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation-duration: 240ms; }
   .notice {
     margin: 12px 0 0;
     padding: 10px 14px;
@@ -92,6 +93,19 @@
   }
   .select:focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
 
+  .upload { padding: 14px 16px; background: rgb(255 255 255 / .55); border: 1px solid var(--rule); border-radius: 3px; }
+  .upload.is-over { border-color: var(--graphite); background: #fff; }
+  .upload h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+  .upload p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.45; color: var(--slate); }
+  .upload code { font-size: 12.5px; color: var(--graphite); }
+  .upload__pick { display: inline-block; padding: 7px 14px; font-size: 14px; font-weight: 600; color: var(--booth);
+                  background: var(--graphite); border-radius: 3px; cursor: pointer; }
+  .upload__pick:focus-within { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .upload__status { margin: 10px 0 0 !important; color: var(--graphite) !important; }
+  .upload__status.is-error { color: #a12622 !important; }
+  .upload__actions { margin: 8px 0 0 !important; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .upload__actions a, .upload__actions button { padding: 0; border: 0; background: none; font: inherit; font-size: 13.5px;
+                  color: var(--graphite); text-decoration: underline; text-underline-offset: .14em; cursor: pointer; }
   .sheen-card { margin: 12px 0 0; padding: 14px 16px; background: rgb(255 255 255 / .55); border: 1px solid var(--rule); border-radius: 3px; }
   .sheen-card__meta { margin: 0 0 10px; font-size: 13px; color: var(--slate); font-variant-numeric: tabular-nums; }
   .sheen-card dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; font-size: 14px; line-height: 1.45; }
@@ -126,20 +140,24 @@
 <body>
 <main class="booth" id="app">
   <section class="stage" aria-label="Room views">
-    <div class="renderer" id="renderer" data-room="livingRoom2"></div>
+    <div class="renderer" id="renderer"></div>
     <p class="notice" id="notice" role="status"></p>
   </section>
 
   <aside class="panel">
     <header>
       <h1>Paint sheen</h1>
-      <p class="panel__intro">The same paint in four finishes, by day and by night. Sheen changes where the paint's
+      <p class="panel__intro">The same paint in four finishes, in four rooms, by day and by night. Sheen changes where the paint's
         surface reflection goes: spread evenly (flat) or gathered into reflections (gloss), which also makes the
         colour look deeper away from them.</p>
     </header>
 
     <fieldset class="controls" id="controls">
       <legend class="vh">Paint options</legend>
+      <div class="field">
+        <label class="field__label" for="room">Scene</label>
+        <select class="select" id="room" name="room"></select>
+      </div>
       <div class="field">
         <label class="field__label" for="sheen">Sheen</label>
         <select class="select" id="sheen" name="sheen"></select>
@@ -160,8 +178,21 @@
       <p class="readout"><span class="readout__swatch"></span><span id="readoutHex"></span><span class="readout__lrv" id="readoutLrv"></span></p>
     </fieldset>
 
+    <section class="upload" id="upload" aria-labelledby="uploadTitle">
+      <h2 id="uploadTitle">Your own room</h2>
+      <p>Upload three photos of one room, taken from the same spot: <code>day.jpg</code>, <code>night.jpg</code> and
+        <code>mask.png</code> (black where the walls are). They become the scene above.</p>
+      <label class="upload__pick">Choose the 3 files…
+        <input class="vh" type="file" id="uploadFiles" multiple accept=".jpg,.jpeg,.png,image/jpeg,image/png"></label>
+      <p class="upload__status" id="uploadStatus" role="status" aria-live="polite"></p>
+      <p class="upload__actions" id="uploadActions" hidden>
+        <a href="sheenCalibrate.html" id="refineLink">Refine the calibration</a>
+        <button type="button" id="removeUpload">Remove this room</button>
+      </p>
+    </section>
+
     <p class="panel__note">Rendered on the GPU from the photos: the paint is lit by each photo's own light, and glossier
-      finishes reflect the room (the window by day, the bulbs and lamp by night) through a camera model of the room.
+      finishes reflect the room (windows by day, lamps by night) through a camera model of each room.
       Gloss levels follow the MPI scale (60° gloss units).</p>
   </aside>
 </main>
@@ -169,6 +200,8 @@
 <script src="js/paintPipeline.js"></script>
 <script src="js/shaderSceneRender.js"></script>
 <script src="js/sheenModel.js"></script>
+<script src="js/sheenCalib.js"></script>
+<script src="js/sheenCustomRoom.js"></script>
 <script type="module">
 /* ==========================================================================
  * Page setup for sheenSceneRenderer.html.
@@ -187,7 +220,7 @@ if (!window.PaintPipeline || !window.ShaderSceneRender || !window.SheenModel) {
 }
 const { createRenderer } = window.ShaderSceneRender;
 const { lrv } = window.PaintPipeline;
-const { SHEENS, SHEEN_ORDER, SHEEN_COPY, solveCamera, pointOnWall, sheenJob } = window.SheenModel;
+const { SHEENS, SHEEN_ORDER, SHEEN_COPY, solveRoom, pointOffWall, sheenJob, photoWithDetail, calibrateLamps, placeWindows } = window.SheenModel;
 
 // ---------------------------------------------------------------- config
 
@@ -198,8 +231,9 @@ const { SHEENS, SHEEN_ORDER, SHEEN_COPY, solveCamera, pointOnWall, sheenJob } = 
  */
 const PAINT_COLORS = ["#e8decd", "#dee0de", "#cfdbde", "#d0ba94", "#a4aca6", "#96aab0",
                       "#8d9e97", "#7f6743", "#607d84", "#586168", "#2f3d4c"];
-const INITIAL_PAINT = "#607d84";
-const INITIAL_SHEEN = "eggshell";
+const DEFAULT_PAINT = "#607d84";
+const DEFAULT_SHEEN = "eggshell";
+const DEFAULT_ROOM = "livingRoom2";
 
 /** The tiles, left to right. */
 const TIMES = [
@@ -207,93 +241,276 @@ const TIMES = [
   { key: "night", label: "Night" }
 ];
 
-/** The room (the Room typedef in js/shaderSceneRender.js). Both photos share the mask and the framing. */
-const ROOMS = {
-  livingRoom2: {
-    label: "Living room",
-    mask: "images/sheens/living_room-2-mask.png",
-    photos: {
-      day:   "images/sheens/living_room-2-day.jpg",
-      night: "images/sheens/living_room-2-night.jpeg"
-    }
-  }
-};
-
 /**
- * Measured in the day photo at 2000 x 2000 px (the night photo, 2048 px,
- * matches it within 1 px once scaled). PX converts to image units.
+ * Everything below is measured in the day photo at 2000 x 2000 px (every
+ * night photo, 2048 px, matches its day photo within 1 px once scaled). PX
+ * converts to image units. Lines are luminance edges fitted to sub-pixel
+ * precision (RMS residual 0.3-4 px).
  */
 const PX = 1 / 2000;
 const px = a => a.map(v => v * PX);
 
 /**
- * The room's geometry (RoomGeometry in js/sheenModel.js), from straight
- * lines in the photo. solveCamera() turns it into the camera and the planes:
- * f ≈ 4530 px (25° horizontal field of view), no roll, the camera looking
- * diagonally into the corner (back wall seen at 49–61°, window wall at
- * 19–28°); the window-wall lines fit their vanishing point within 1 px.
+ * The rooms. Each has the Room fields of js/shaderSceneRender.js (label,
+ * mask, photos) plus:
+ *   geometry  RoomGeometry (js/sheenModel.js): lines in the photo from which
+ *             solveRoom() recovers the camera, the walls, the floor and the
+ *             ceiling. The numbers in each comment are solveRoom's results.
+ *   lights    per photo: the light sources the camera compressed (Emitter)
+ *             and the key light raking the walls ({ uv, wall, offset }: on
+ *             the pixel's camera ray, offset in front of that wall).
+ *
+ * Emitter gains. The photos are tone-mapped (real-estate HDR): a window or a
+ * lamp shows barely brighter than the wall it lights - in the deck and the
+ * study the daylit view outside is even DARKER than the walls (0.22-0.54 vs
+ * 0.77-0.91). A glossy wall must reflect it as bright as it really is. The
+ * gain is how much brighter: near a window, about 60 % of a wall's light comes
+ * from it directly (daylight-factor theory: 40-80 %), so the window's radiance
+ * is 0.6 x the brightest-lit wall samples / their form factor to the window
+ * (computed through each room's geometry). Fitting the walls' brightness
+ * against the form factors instead fails on these photos (R² 0.00-0.15): local
+ * tone mapping flattens the gradients a window casts (docs/sheen-science.md
+ * §6).
+ *
+ * Lamps off the walls are 3-D lights (`lamps`: placed on their pixel's camera
+ * ray, `offset` in front of a wall), so their reflections fall where a mirror
+ * image would; their pixels stay in the environment unboosted (gain 1) and
+ * still show unpainted. Their intensity comes from their own pixels
+ * (luminance x apparent area at their depth) x a gain: x12 for bare bulbs
+ * and lamp mouths (living room 2's bulb glows), x5 for fabric shades (a lit
+ * shade is 1500-3000 cd/m² next to walls of 150-300, shown about 2x the wall).
+ * Fitting it to the walls' brightening around each lamp (calibrateLamps'
+ * other mode) was tried: on these photos it gives near-zero or one-channel
+ * results for every lamp but the living room's wall lamp - the night
+ * photos don't keep the inverse-square falloff either.
  */
-const GEOMETRY = {
-  // Picture frames: the left frame's top and bottom edges, the right frame's
-  // bottom edge (edge fits on the mask).
-  backLines: [px([1060, 90.5, 1285, 36.8]), px([1060, 594.2, 1290, 581.9]), px([1445, 575.1, 1745, 560.3])],
-  // Window wall: the window's bottom rail, the sill and the radiator's top
-  // (luminance edges, fitted over 200-360 px).
-  sideLines: [px([360, 881.2, 680, 877.0]), px([360, 946.1, 720, 937.9]), px([360, 1045, 560, 1035])],
-  // Verticals: the wall corner and the right frame's edges. (The left frame
-  // leans 0.3° against them: it hangs slightly crooked, so it isn't used.)
-  verticals: [px([870, 120, 870, 920]), px([1437, 100, 1437, 560]), px([1748.93, 100, 1749.22, 560])],
-  cornerU: 872 * PX,                 // the corner line (crisp in both photos)
-  sideWall: "left",
-  floorPoint: px([1900, 1655])       // the back wall meets the floor (below the baseboard, right edge)
-};
-const CAMERA = solveCamera(GEOMETRY);
-
-/**
- * Each photo's light sources (Emitter in js/sheenModel.js) and its key light.
- * The photos are tone-mapped, so light sources show barely brighter than the
- * walls they light. Each gain restores the brightness the source must have
- * to light the wall next to it as brightly as the photo shows (energy
- * balance through the calibrated geometry; scale ≈ 9 m per scene unit, from
- * the sofa, sill and radiator heights; docs/sheen-science.md, 5.3):
- *  Day: the window panes. The 60 back-wall samples the window lights most
- *    (form factor × wall reflectance 0.059) are at 0.675; the window wall,
- *    which its own window can't light, shows the ambient level, 0.42. The
- *    window must then have radiance (0.675 − 0.42) / 0.059 = 4.3, ×7.2 the
- *    photo's panes (0.60): ×7. (Taking half that ambient gives ×13; the
- *    gain is the conservative end.) The key light is the window's centre.
- *  Night: the bulb string and the lamp at the right edge, only their cores
- *    (luminance ≥ 0.85). The middle bulb's glow on the back wall is 34 cm
- *    wide at half height (a point source 18 cm from the wall) and 0.15–0.3
- *    above the wall around it; that intensity, spread over the core's 2.4e-5
- *    unit² in the photo, gives ×9 to ×17: ×12, also used for the lamp, which
- *    is mostly out of frame. The key light is the bulbs, 0.03 scene units
- *    (~25 cm) off the window wall. The window glass is dark (no gain).
- */
-const LIGHTS = {
-  day: {
-    keyLight: pointOnWall(CAMERA, px([270, 420]), "side"),
-    emitters: [
-      { rect: px([0, 0, 135, 820]),   threshold: 0, gain: 7, note: "left pane" },
-      { rect: px([255, 0, 540, 820]), threshold: 0, gain: 7, note: "right pane" }
-    ]
+const ROOMS = {
+  livingRoom: {
+    label: "Living room",
+    mask: "images/sheens/living_room_mask.jpg",
+    photos: { day: "images/sheens/living_room-noon.jpg", night: "images/sheens/living-room_night.jpg" },
+    // One wall seen from the left (f ≈ 3040 px, 36°). Direction a: the two
+    // frames' top and bottom edges and the baseboard; direction b: the rug's
+    // left edge (the rug is laid square to the wall; the frames then come out
+    // 0.79 and 0.76 wide-to-high, both standard). The window wall (right,
+    // behind the curtain) isn't visible, so it isn't modelled.
+    geometry: {
+      lines: { a: [px([316, 283.7, 691, 330.9]), px([307, 804.6, 685, 819.9]), px([838, 856.9, 1268, 863.8]), px([20, 1675.7, 370, 1640.5])],
+               b: [px([200, 1732.1, 505, 1964.3])] },
+      // The right frame's edge and the lamp's wall rail (the left frame hangs 1° crooked).
+      verticals: [px([849, 220, 849.5, 840]), px([1472.2, 300, 1471, 830])],
+      // The window wall: direction b (the window sash's top edge in the
+      // photo's top-right corner runs toward b's vanishing point: slope -0.31
+      // measured, -0.35 for b, +0.22 for a). Its corner with the back wall is
+      // hidden by the curtain; the picture glass places it (see the day
+      // windows below): at the curtain's left edge.
+      walls: [{ id: "back", dir: "a", through: { u: 0.5 } },
+              { id: "right", dir: "b", corner: { wall: "back", u: 1550 * PX } }],
+      floor: { at: { wall: "back", uv: px([200, 1698.4]) } }         // the baseboard's foot
+    },
+    lights: {
+      // Day: the window wall's windows, almost all outside the photo. The
+      // glass of the two framed prints (n ≈ 1.52, a smooth reflector like a
+      // gloss meter's standard) mirrors them, which places and measures them:
+      // * the right print shows a clear window with its mullion at u 0.50-0.60:
+      //   0.04-0.22 along the wall from the glass edge seen at x 1945 (the
+      //   far edge mirrors to u 0.63), so 0.22 wide; its reflection adds up
+      //   to 0.53 (linear, blue) at 32° (Fresnel 0.044): radiance ≈ 12 x
+      //   the photo's white (red and green clip, so it is a lower bound);
+      // * the left print shows a window with sheer curtains at u 0.20-0.315:
+      //   0.66-1.1 along the wall, beside the camera; +0.33 in the unclipped
+      //   red channel at 21° (Fresnel 0.043): radiance ≈ 7.7.
+      // The visible strip of glass gets the same x12 in the environment.
+      // Key light: the window.
+      day: { keyLight: { uv: px([1975, 540]), wall: "right", offset: 0 },
+             emitters: [{ rect: px([1945, 40, 2000, 1030]), threshold: 0, gain: 12, note: "window" }],
+             windows: [{ wall: "right", edge: [1945 * PX, 60 * PX, 1023 * PX], width: 0.22, toward: "camera", radiance: 12, note: "window" },
+                       { wall: "right", edge: [1945 * PX, 60 * PX, 1023 * PX], start: 0.66, width: 0.44, toward: "camera", radiance: 7.7,
+                         note: "window with sheer curtains, beside the camera" }] },
+      // Night: the wall lamp, a downlight on an arm about 45 cm off the wall
+      // (0.07 units at ≈ 6 m/unit), calibrated on the glow it casts on the
+      // wall below it; and two candles (small, far from the wall: kept in the
+      // environment).
+      night: { keyLight: { uv: px([1180, 680]), wall: "back", offset: 0.07 },
+               emitters: [{ rect: px([1110, 640, 1260, 720]), threshold: 0.85, gain: 1, note: "wall lamp (a lamp below)" },
+                          { rect: px([1270, 1550, 1480, 1610]), threshold: 0.6, gain: 12, note: "candles" }],
+               lamps: [{ uv: px([1182, 682]), wall: "back", offset: 0.07, radius: 0.01, axis: [0.25, -1, 0], cone: 0.5,
+                         core: { rect: px([1110, 640, 1260, 720]), threshold: 0.85, gain: 12 }, note: "wall lamp" }] }
+    }
   },
-  night: {
-    keyLight: pointOnWall(CAMERA, px([805, 520]), "side", 0.03),
-    emitters: [
-      { rect: px([700, 60, 920, 1000]),   threshold: 0.85, gain: 12, note: "bulb string" },
-      { rect: px([1880, 640, 2000, 860]), threshold: 0.85, gain: 12, note: "lamp" }
-    ]
+  livingRoom2: {
+    label: "Living room 2",
+    mask: "images/sheens/living_room-2-mask.png",
+    photos: { day: "images/sheens/living_room-2-day.jpg", night: "images/sheens/living_room-2-night.jpeg" },
+    // Two walls, the camera looking diagonally into the corner (f ≈ 4530 px,
+    // 25°; back wall seen at 49-61°, window wall at 19-28°).
+    geometry: {
+      // a: the picture frames' edges (on the mask); b: the window's bottom
+      // rail, the sill and the radiator's top (fit within 1 px).
+      lines: { a: [px([1060, 90.5, 1285, 36.8]), px([1060, 594.2, 1290, 581.9]), px([1445, 575.1, 1745, 560.3])],
+               b: [px([360, 881.2, 680, 877.0]), px([360, 946.1, 720, 937.9]), px([360, 1045, 560, 1035])] },
+      // The wall corner and the right frame's edges (the left frame hangs 0.3° crooked).
+      verticals: [px([870, 120, 870, 920]), px([1437, 100, 1437, 560]), px([1748.93, 100, 1749.22, 560])],
+      walls: [{ id: "back", dir: "a", through: { u: 872 * PX } },
+              { id: "window", dir: "b", corner: { wall: "back", u: 872 * PX } }],
+      floor: { at: { wall: "back", uv: px([1900, 1655]) } }
+    },
+    lights: {
+      // Day: the window panes, x7 (derived with the whole window, including
+      // the part out of frame). Night: the bulb string and the lamp at the
+      // right edge (cores, luminance ≥ 0.85), x12.
+      day: { keyLight: { uv: px([270, 420]), wall: "window", offset: 0 },
+             emitters: [{ rect: px([0, 0, 135, 820]), threshold: 0, gain: 7, note: "left pane" },
+                        { rect: px([255, 0, 540, 820]), threshold: 0, gain: 7, note: "right pane" }] },
+      // The bulbs hang about 20 cm off the window wall (0.025 units at ≈ 9
+      // m/unit): three lamps, one per cluster, calibrated on their glows.
+      night: { keyLight: { uv: px([805, 520]), wall: "window", offset: 0.025 },
+               emitters: [{ rect: px([700, 60, 920, 1000]), threshold: 0.85, gain: 1, note: "bulb string (lamps below)" },
+                          { rect: px([1880, 640, 2000, 860]), threshold: 0.85, gain: 12, note: "lamp" }],
+               lamps: [{ uv: px([830, 190]), wall: "window", offset: 0.025, radius: 0.004, note: "top bulbs",
+                         core: { rect: px([700, 120, 920, 260]), threshold: 0.85, gain: 12 } },
+                       { uv: px([845, 545]), wall: "window", offset: 0.025, radius: 0.004, note: "middle bulb",
+                         core: { rect: px([780, 480, 900, 600]), threshold: 0.85, gain: 12 } },
+                       { uv: px([800, 900]), wall: "window", offset: 0.025, radius: 0.004, note: "bottom bulbs",
+                         core: { rect: px([700, 840, 880, 960]), threshold: 0.85, gain: 12 } }] }
+    }
+  },
+  deck: {
+    label: "Deck room",
+    mask: "images/sheens/living_room_deck-mask.png",
+    photos: { day: "images/sheens/living_room_deck.jpg", night: "images/sheens/living_room_deck-night.jpg" },
+    // Ultra-wide (f ≈ 850 px, 99°): four walls - left, back (with the opening
+    // to the dining room), a 45° chamfer, right (sliding door) - a floor and
+    // a ceiling sloping up toward the camera. Door heads and the opening come
+    // out at the same height (0.586 / 0.584 units ≈ 2.05 m, ≈ 3.5 m/unit),
+    // the camera at 1.5 m. The verticals lean progressively (0.3-0.8°): a
+    // little pitch the model (no pitch) ignores.
+    geometry: {
+      // a: the back wall's top edge, the opening's head, the barn picture's
+      // top. b: from the sloped ceiling's edges on the left wall and over the
+      // right wall's clerestory, whose VP is straight above b's. (The left
+      // wall's big frame can't be used: it hangs tilted forward.)
+      lines: { a: [px([640, 747.1, 1470, 790.6]), px([700, 886, 905, 890.3]), px([975, 827.8, 1255, 840.9])],
+               bSloped: [px([368.4, 30, 609.7, 720]), px([1940, 443.3, 1600, 728.2])] },
+      verticals: [px([969.9, 840, 967.4, 1275]), px([1263.5, 850, 1260.3, 1225]), px([1562.5, 840, 1554.9, 1410])],
+      walls: [{ id: "back", dir: "a", through: { u: 618.8 * PX } },
+              { id: "left", dir: "b", corner: { wall: "back", u: 618.8 * PX } },
+              { id: "chamfer", dir: "a-b", corner: { wall: "back", u: 1482 * PX } },
+              { id: "right", dir: "b", corner: { wall: "chamfer", u: 1550 * PX } }],
+      floor: { at: { wall: "back", uv: px([930, 1290]) } },
+      ceiling: { through: [{ wall: "back", uv: px([618.8, 746]) }, { wall: "back", uv: px([1470, 790.6]) },
+                           { wall: "left", uv: px([430.3, 207]) }] }
+    },
+    lights: {
+      // Day: the sliding door, the clerestory and the dining room's windows,
+      // x5 (energy balance: 0.6 x 0.542 / 0.0613 = 5.3).
+      day: { keyLight: { uv: px([1780, 1130]), wall: "right", offset: 0 },
+             emitters: [{ rect: px([1590, 840, 1975, 1425]), threshold: 0, gain: 5, note: "sliding door" },
+                        { rect: px([1580, 430, 1975, 755]), threshold: 0, gain: 5, note: "clerestory" },
+                        { rect: px([955, 860, 1230, 1040]), threshold: 0, gain: 5, note: "dining windows" }] },
+      // Night: the two table lamps and the floor lamp as lamps off the walls
+      // (≈ 3.5 m/unit: the left lamp ≈ 35 cm off the left wall, its shade
+      // ≈ 20 cm in radius; the back lamp ≈ 20 cm off the back wall; the floor
+      // lamp ≈ 30 cm), calibrated on their glows; the dining pendant, beyond
+      // the opening, stays in the environment (x12).
+      night: { keyLight: { uv: px([437, 1290]), wall: "left", offset: 0.1 },
+               emitters: [{ rect: px([215, 1140, 660, 1455]), threshold: 0.35, gain: 1, note: "left shade (a lamp below)" },
+                          { rect: px([665, 1000, 815, 1100]), threshold: 0.35, gain: 1, note: "back shade (a lamp below)" },
+                          { rect: px([1430, 900, 1500, 975]), threshold: 0.85, gain: 1, note: "floor lamp (a lamp below)" },
+                          { rect: px([970, 925, 1025, 985]), threshold: 0.85, gain: 12, note: "pendant" }],
+               lamps: [{ uv: px([437, 1295]), wall: "left", offset: 0.1, radius: 0.06, note: "left table lamp",
+                         core: { rect: px([215, 1140, 660, 1455]), threshold: 0.35, gain: 5 } },
+                       { uv: px([740, 1050]), wall: "back", offset: 0.06, radius: 0.04, note: "back table lamp",
+                         core: { rect: px([665, 1000, 815, 1100]), threshold: 0.35, gain: 5 } },
+                       { uv: px([1465, 937]), wall: "back", offset: 0.08, radius: 0.015, note: "floor lamp",
+                         core: { rect: px([1430, 900, 1500, 975]), threshold: 0.85, gain: 12 } }] }
+    }
+  },
+  study: {
+    label: "Study",
+    mask: "images/sheens/study_mask.jpg",
+    photos: { day: "images/sheens/study_noon.jpg", night: "images/sheens/study_night.jpg" },
+    // Two walls (f ≈ 4170 px, 27°): the fireplace wall (left, with the tall
+    // window) and the glazed wall. The camera is low, ≈ 0.4 m (fireplace top
+    // ≈ 1.1 m, door head ≈ 2.3 m on a common scale).
+    geometry: {
+      // a: the doors' head and the clerestory's sill; b: the fireplace's top
+      // and the art's lower edge.
+      lines: { a: [px([1190, 622.6, 1990, 527.2]), px([1190, 311.6, 1990, 167.7])],
+               b: [px([120, 971, 605, 988.9]), px([70, 862.9, 640, 915.9])] },
+      verticals: [px([1184.2, 640, 1184.8, 1330])],                 // the door frame
+      walls: [{ id: "back", dir: "a", through: { u: 1055 * PX } },
+              { id: "left", dir: "b", corner: { wall: "back", u: 1055 * PX } }],
+      floor: { at: { wall: "left", uv: px([1000, 1352]) } }
+    },
+    lights: {
+      // Day: the doors, the tall window and the clerestory, x5 (energy
+      // balance: 0.6 x 0.666 / 0.0741 = 5.4). Night: the floor lamp's head, x12.
+      day: { keyLight: { uv: px([1580, 950]), wall: "back", offset: 0 },
+             emitters: [{ rect: px([1215, 585, 1940, 1295]), threshold: 0, gain: 5, note: "doors" },
+                        { rect: px([890, 590, 975, 1370]), threshold: 0, gain: 5, note: "tall window" },
+                        { rect: px([1150, 80, 2000, 315]), threshold: 0, gain: 5, note: "clerestory" }] },
+      // The floor lamp stands ≈ 1 m in front of the glazing (0.07 units at
+      // ≈ 13.5 m/unit); no wall next to it shows its light, so it is
+      // calibrated on its own pixels (x12).
+      night: { keyLight: { uv: px([1310, 925]), wall: "back", offset: 0.07 },
+               emitters: [{ rect: px([1260, 880, 1370, 960]), threshold: 0.85, gain: 1, note: "floor lamp (a lamp below)" }],
+               lamps: [{ uv: px([1310, 925]), wall: "back", offset: 0.07, radius: 0.004, axis: [-0.4, -1, -0.3], cone: 0.3,
+                         core: { rect: px([1260, 880, 1370, 960]), threshold: 0.85, gain: 12 }, note: "floor lamp" }] }
+    }
   }
 };
 
+// The visitor's own room - uploaded below, or calibrated in
+// sheenCalibrate.html - kept in IndexedDB with its images
+// (js/sheenCustomRoom.js): in the list whenever there is one; shown first
+// with ?custom (after an upload, and from the calibration page). ?sheen= and
+// ?paint= carry the visitor's choices across that reload.
+const params = new URLSearchParams(location.search);
+if (window.SheenCustomRoom) {
+  try {
+    const custom = await window.SheenCustomRoom.roomEntry();
+    // Its name is user text and goes into markup and attributes below.
+    if (custom) ROOMS.custom = { ...custom, label: String(custom.label || "Your room").replace(/[<>&"'`]/g, "") };
+    else if (params.has("custom")) document.getElementById("notice").textContent = "No room of your own saved yet: upload your photos in the panel.";
+  } catch (err) { console.warn("sheenSceneRenderer: couldn't load the saved room", err); }
+}
+const INITIAL_ROOM = ROOMS.custom && params.has("custom") ? "custom" : DEFAULT_ROOM;
+const INITIAL_SHEEN = SHEEN_ORDER.includes(params.get("sheen")) ? params.get("sheen") : DEFAULT_SHEEN;
+const INITIAL_PAINT = PAINT_COLORS.includes("#" + params.get("paint")) ? "#" + params.get("paint") : DEFAULT_PAINT;
+
+/** Each room's solved camera and planes (Room in js/sheenModel.js). */
+// (An uploaded room whose lines gave no camera carries a default room as `solved`.)
+const SOLVED = Object.fromEntries(Object.entries(ROOMS).map(([key, r]) => [key, r.solved || solveRoom(r.geometry)]));
+/** Each room's lights with the key lights placed in 3-D; `lamps` are filled in by calibrateLamps when the photo loads. */
+const LIGHTS = Object.fromEntries(Object.entries(ROOMS).map(([key, r]) => [key, Object.fromEntries(
+  Object.entries(r.lights).map(([time, l]) => [time, {
+    emitters: l.emitters,
+    keyLight: pointOffWall(SOLVED[key], l.keyLight.uv, l.keyLight.wall, l.keyLight.offset),
+    windows: placeWindows(SOLVED[key], l.windows),
+    lamps: []
+  }]))]));
+
+/**
+ * Prepares a photo for upload (js/shaderSceneRender.js calls it per photo):
+ * its texture map in the alpha channel, and its lamps calibrated on it.
+ */
+async function preparePhoto(img, maskImg) {
+  const room = img.dataset.room, time = img.closest(".scene").dataset.time;
+  const specs = ROOMS[room].lights[time].lamps;
+  if (specs) LIGHTS[room][time].lamps = calibrateLamps(SOLVED[room], specs, img, maskImg);
+  return photoWithDetail(img, maskImg);
+}
+
 // ---------------------------------------------------------------- markup
-// The static HTML holds only empty containers; the select, swatches and
+// The static HTML holds only empty containers; the selects, swatches and
 // tiles are built here from the config. All interpolated values are trusted
 // constants from the config above.
 const renderer = document.getElementById("renderer");
-const room = renderer.dataset.room;
+renderer.dataset.room = INITIAL_ROOM;
 
+document.getElementById("room").innerHTML = Object.entries(ROOMS).map(([k, r]) =>
+  `<option value="${k}"${k === INITIAL_ROOM ? " selected" : ""}>${r.label}</option>`).join("");
 document.getElementById("sheen").innerHTML = SHEEN_ORDER.map(k =>
   `<option value="${k}"${k === INITIAL_SHEEN ? " selected" : ""}>${SHEENS[k].label}</option>`).join("");
 
@@ -306,21 +523,28 @@ document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
   `</label></li>`
 ).join("");
 
-// Tiles, one per time of day (the structure js/shaderSceneRender.js expects).
+// Only the shown room's photos are visible (renderer[data-room]); the others
+// keep loading and decoding, so a room switch never shows a half-loaded mask.
+document.head.insertAdjacentHTML("beforeend", `<style>${Object.keys(ROOMS).map(k =>
+  `.renderer[data-room="${k}"] .scene__photo[data-room="${k}"], .renderer[data-room="${k}"] .scene__calib[data-room="${k}"] { visibility: visible; }`).join("\n")}</style>`);
+
+// Tiles, one per time of day, each with one photo per room (the structure
+// js/shaderSceneRender.js expects). Rooms that start hidden load at low priority.
 const calib = new URLSearchParams(location.search).has("calib");
 renderer.innerHTML = TIMES.map(time => `
   <figure class="scene" data-time="${time.key}">
-    <div class="scene__frame">
+    <div class="scene__frame" style="view-transition-name: scene-${time.key}">
       <div class="scene__layer scene__layer--bottom" aria-hidden="true">
         <canvas class="scene__canvas"></canvas>
         <canvas class="scene__canvas scene__canvas--incoming"></canvas>
       </div>
       <div class="scene__layer scene__layer--top">
-        <img class="scene__photo" data-room="${room}" src="${ROOMS[room].photos[time.key]}"
-          alt="${ROOMS[room].label}, ${time.label.toLowerCase()}" width="2000" height="2000" decoding="async"
-          style="--mask: url('${ROOMS[room].mask}')">
+        ${Object.entries(ROOMS).map(([key, r]) =>
+          `<img class="scene__photo" data-room="${key}" src="${r.photos[time.key]}"` +
+          ` alt="${r.label}, ${time.label.toLowerCase()}" width="2000" height="2000" decoding="async"` +
+          `${key === INITIAL_ROOM ? "" : ` fetchpriority="low"`} style="--mask: url('${r.mask}')">`).join("")}
       </div>
-      ${calib ? `<canvas class="scene__calib" width="1000" height="1000" aria-hidden="true"></canvas>` : ""}
+      ${calib ? Object.keys(ROOMS).map(key => `<canvas class="scene__calib" data-room="${key}" width="1000" height="1000" aria-hidden="true"></canvas>`).join("") : ""}
     </div>
     <figcaption>${time.label}</figcaption>
   </figure>`).join("");
@@ -335,30 +559,33 @@ function syncSheenCard(key) {
 }
 syncSheenCard(INITIAL_SHEEN);
 
-// ?calib: draw the solved geometry over the tiles (vanishing-point lines,
-// the corner, a grid on each wall plane), to check the calibration by eye.
+// ?calib: draw each room's solved geometry over its tiles - the measured
+// lines extended to their vanishing points, and a grid on every wall (lines
+// of constant height and constant position, drawn where that wall is the one
+// seen) - to check the calibration by eye.
 if (calib) {
-  console.info("sheenSceneRenderer: camera", CAMERA.report);
+  const { project, wallAt } = window.SheenModel;
   for (const cv of renderer.querySelectorAll(".scene__calib")) {
+    const key = cv.dataset.room, g = ROOMS[key].geometry || { lines: { a: [] } }, room = SOLVED[key];
+    console.info(`sheenSceneRenderer: ${key}`, room.report);
     const ctx = cv.getContext("2d"), S = cv.width, P = ([u, v]) => [u * S, v * S];
     ctx.lineWidth = 1.5;
     const line = (a, b, color) => { ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(...P(a)); ctx.lineTo(...P(b)); ctx.stroke(); };
-    for (const l of GEOMETRY.backLines) line([l[0], l[1]], CAMERA.report.vpBack, "rgb(255 0 0 / .6)");
-    for (const l of GEOMETRY.sideLines) line([l[0], l[1]], CAMERA.report.vpSide, "rgb(0 160 255 / .7)");
-    // Wall grids: lines of constant height and constant position along each wall.
-    const { project } = window.SheenModel;
-    const C = pointOnWall(CAMERA, [GEOMETRY.cornerU, CAMERA.c[1]], "back");
-    const along = { back: [-CAMERA.back[2], 0, CAMERA.back[0]], side: [CAMERA.side[2], 0, -CAMERA.side[0]] };
-    for (const wall of ["back", "side"]) {
-      let d = along[wall];
-      const probe = project(CAMERA, [C[0] + d[0] * 0.1, C[1], C[2] + d[2] * 0.1]);
-      if ((probe[0] - GEOMETRY.cornerU) * (wall === "side" ? CAMERA.sideSign : -CAMERA.sideSign) < 0) d = d.map(x => -x);
-      for (let h = CAMERA.floorY; h <= 0.4; h += 0.05)
-        line(project(CAMERA, [C[0], h, C[2]]), project(CAMERA, [C[0] + d[0] * 0.6, h, C[2] + d[2] * 0.6]), "rgb(255 220 0 / .7)");
-      for (let s = 0; s <= 0.6; s += 0.05) {
-        const X = [C[0] + d[0] * s, 0, C[2] + d[2] * s];
-        line(project(CAMERA, [X[0], CAMERA.floorY, X[2]]), project(CAMERA, [X[0], 0.4, X[2]]), "rgb(255 220 0 / .4)");
-      }
+    for (const l of g.lines.a) line([l[0], l[1]], room.report.vpA, "rgb(255 0 0 / .6)");
+    for (const l of g.lines.b || []) line([l[0], l[1]], room.report.vpB, "rgb(0 160 255 / .7)");
+    const floorY = room.planes.find(p => p.kind === "floor").p[3];
+    for (const pl of room.planes.filter(p => p.kind === "wall")) {
+      const n = pl.p, B = [n[0] * n[3], 0, n[2] * n[3]], t = [-n[2], 0, n[0]];
+      const seg = (X0, X1) => {                    // draw where this wall is the one seen
+        for (let i = 0; i < 40; i++) {
+          const A = X0.map((v, k) => v + (X1[k] - v) * i / 40), C = X0.map((v, k) => v + (X1[k] - v) * (i + 1) / 40);
+          if (A[2] < 0.02 || C[2] < 0.02) continue;
+          const a = project(room, A), c = project(room, C);
+          if (wallAt(room, a) === pl.id && wallAt(room, c) === pl.id) line(a, c, "rgb(255 220 0 / .7)");
+        }
+      };
+      for (let y = floorY; y <= floorY + 1.2; y += 0.1) seg([B[0] - t[0] * 3, y, B[2] - t[2] * 3], [B[0] + t[0] * 3, y, B[2] + t[2] * 3]);
+      for (let s = -3; s <= 3; s += 0.1) seg([B[0] + t[0] * s, floorY, B[2] + t[2] * s], [B[0] + t[0] * s, floorY + 1.2, B[2] + t[2] * s]);
     }
   }
 }
@@ -373,7 +600,8 @@ const sceneRenderer = createRenderer({
     initial: INITIAL_SHEEN,
     keys: SHEEN_ORDER,
     glslUrl: "glsl/sheen.glsl",
-    jobFor: (roomKey, time, sheen) => sheenJob(sheen, CAMERA, LIGHTS[time])
+    jobFor: (roomKey, time, sheen) => sheenJob(sheen, SOLVED[roomKey], LIGHTS[roomKey][time]),
+    prepareImage: preparePhoto             // texture map (alpha) + calibrated lamps
   },
   elements: {
     app: document.getElementById("app"),
@@ -389,19 +617,129 @@ const sceneRenderer = createRenderer({
 const setSheen = sceneRenderer.setSheen;
 sceneRenderer.setSheen = key => { const done = setSheen(key); syncSheenCard(key); return done; };
 
-// One delegated listener: paint radios and the sheen select.
+// One delegated listener: paint radios and the room and sheen selects.
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.name === "paint") sceneRenderer.setPaint(t.value);
   else if (t.name === "sheen") sceneRenderer.setSheen(t.value);
+  else if (t.name === "room") sceneRenderer.setRoom(t.value);
 });
 
-// Scripting and testing handle: setPaint / setSheen, sample(), ready, and
-// the solved camera.
+// Scripting and testing handle: setPaint / setSheen / setRoom, sample(),
+// ready, and each room's solved camera and planes.
 window.sceneRenderer = sceneRenderer;
-window.sheenCamera = CAMERA;
+window.sheenRooms = SOLVED;
+window.sheenLights = LIGHTS;
 
 sceneRenderer.start();
+
+// ---------------------------------------------------------------- upload
+// The visitor's own photos: exactly day.jpg, night.jpg and mask.png (by
+// file name), cropped to their centre squares, calibrated automatically
+// (js/sheenCalib.js autoCalibrate: camera and walls from the photo's lines,
+// or a default room; light sources; lamps), stored with the images
+// (js/sheenCustomRoom.js) and shown after a reload. The same proposals go to
+// the calibration page, which opens with them for refining.
+const UPLOAD_NAMES = { "day.jpg": "day", "night.jpg": "night", "mask.png": "mask" };
+const uploadBox = document.getElementById("upload"), uploadStatus = document.getElementById("uploadStatus");
+function showUploadStatus(text, isError = false) { uploadStatus.textContent = text; uploadStatus.classList.toggle("is-error", isError); }
+async function decodeBlob(blob) { const img = new Image(); img.src = URL.createObjectURL(blob); await img.decode(); return img; }
+async function decodeUrl(url) { const img = new Image(); img.src = url; await img.decode(); return img; }
+
+/**
+ * The built-in room whose three photos these are, or null. A 24 x 24 grey
+ * thumbnail of each image; all three must differ by under 2.5 levels on
+ * average (re-encoding and resizing change them by well under 1; another
+ * photo of the same room, by tens). Identical photos get the room's measured
+ * calibration: the automatic one can't match it (docs/sheen-science.md §8).
+ */
+async function matchBuiltInRoom(imgs) {
+  const sig = img => {
+    const c = Object.assign(document.createElement("canvas"), { width: 24, height: 24 }), x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0, 24, 24);
+    const d = x.getImageData(0, 0, 24, 24).data;
+    return Float32Array.from({ length: 576 }, (_, i) => 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]);
+  };
+  const diff = (a, b) => a.reduce((t, v, i) => t + Math.abs(v - b[i]), 0) / a.length;
+  const mine = { day: sig(imgs.day), night: sig(imgs.night), mask: sig(imgs.mask) };
+  for (const [key, r] of Object.entries(ROOMS)) {
+    if (key === "custom") continue;
+    try {
+      if (diff(mine.day, sig(await decodeUrl(r.photos.day))) > 2.5) continue;
+      if (diff(mine.night, sig(await decodeUrl(r.photos.night))) > 2.5) continue;
+      if (diff(mine.mask, sig(await decodeUrl(r.mask))) > 2.5) continue;
+      return key;
+    } catch { /* an image that didn't load: no match */ }
+  }
+  return null;
+}
+
+async function useUploadedFiles(fileList) {
+  if (!window.SheenCalib || !window.SheenCustomRoom) { showUploadStatus("Uploading needs js/sheenCalib.js and js/sheenCustomRoom.js.", true); return; }
+  const byKind = {}, unused = [];
+  for (const f of fileList) { const k = UPLOAD_NAMES[f.name.toLowerCase()]; if (k && !byKind[k]) byKind[k] = f; else unused.push(f.name); }
+  const missing = Object.keys(UPLOAD_NAMES).filter(n => !byKind[UPLOAD_NAMES[n]]);
+  if (missing.length || unused.length) {
+    showUploadStatus("Choose exactly three files named day.jpg, night.jpg and mask.png." +
+      (missing.length ? ` Missing: ${missing.join(", ")}.` : "") + (unused.length ? ` Not used: ${unused.join(", ")}.` : ""), true);
+    return;
+  }
+  const SC = window.SheenCalib;
+  try {
+    showUploadStatus("Preparing your photos…");
+    const sq = {};
+    for (const k of ["day", "night", "mask"]) sq[k] = await SC.squareImage(byKind[k], k === "mask" ? "image/png" : "image/jpeg");
+    const aspect = k => sq[k].width / sq[k].height;
+    if (Math.abs(aspect("day") - aspect("night")) > 0.01 || Math.abs(aspect("day") - aspect("mask")) > 0.01)
+      throw new Error("The three images must have the same shape: they have to line up with each other.");
+    const imgs = {};
+    for (const k of ["day", "night", "mask"]) imgs[k] = await decodeBlob(sq[k].blob);
+    showUploadStatus("Finding the room's walls and light sources…");
+    await new Promise(r => setTimeout(r, 30));
+    const blobs = { day: sq.day.blob, night: sq.night.blob, mask: sq.mask.blob };
+    const cropped = Object.keys(sq).filter(k => sq[k].cropped);
+    const builtIn = (window.sheenUploadOptions || {}).recognize === false ? null : await matchBuiltInRoom(imgs);
+    let config, calibState;
+    if (builtIn) {
+      // The same photos as a built-in room: its measured calibration.
+      const r = ROOMS[builtIn];
+      config = { label: `${r.label} (your upload)`, geometry: r.geometry, lights: r.lights,
+                 auto: { method: "builtin", builtIn, cropped, notes: [`These are the photos of the built-in "${r.label}": using its measured calibration.`] } };
+      calibState = SC.calibStateFromConfig(r, solveRoom(r.geometry));
+    } else {
+      // The camera's focal length from the day photo's EXIF, when recorded.
+      const f35 = await SC.exifFocal35(byKind.day).catch(() => null);
+      const focal = f35 ? SC.focalForSquare(f35, sq.day.width, sq.day.height) : undefined;
+      const auto = SC.autoCalibrate(imgs, { focal });
+      if (f35) auto.notes.unshift(`EXIF: ${f35} mm (35 mm equivalent), a ${(2 * Math.atan(0.5 / focal) * 180 / Math.PI).toFixed(0)}° field of view across the square.`);
+      config = { label: "Your room", ...auto.entry, auto: { method: auto.method, notes: auto.notes, cropped } };
+      calibState = auto.calibState;
+    }
+    await window.SheenCustomRoom.save("customRoom", { config, blobs });
+    const files = Object.fromEntries(["day", "night", "mask"].map(k => [k, { name: k === "mask" ? "mask.png" : k + ".jpg", blob: blobs[k], cropped: sq[k].cropped, size: sq[k].size }]));
+    await window.SheenCustomRoom.save("calibState", { state: { ...calibState, name: config.label, files }, nextId: calibState.lines.length + 1 });
+    showUploadStatus("Done: opening your room…");
+    const paint = (document.querySelector('input[name="paint"]:checked') || {}).value || INITIAL_PAINT;
+    location.href = `${location.pathname}?custom&sheen=${encodeURIComponent(document.getElementById("sheen").value)}&paint=${encodeURIComponent(paint.replace("#", ""))}`;
+  } catch (err) {
+    console.error("sheenSceneRenderer: upload failed", err);
+    showUploadStatus(`Couldn't use these photos: ${err.message}`, true);
+  }
+}
+document.getElementById("uploadFiles").addEventListener("change", e => { if (e.target.files.length) useUploadedFiles([...e.target.files]); e.target.value = ""; });
+uploadBox.addEventListener("dragover", e => { e.preventDefault(); uploadBox.classList.add("is-over"); });
+uploadBox.addEventListener("dragleave", () => uploadBox.classList.remove("is-over"));
+uploadBox.addEventListener("drop", e => { e.preventDefault(); uploadBox.classList.remove("is-over"); useUploadedFiles([...e.dataTransfer.files]); });
+document.getElementById("removeUpload").addEventListener("click", async () => {
+  await window.SheenCustomRoom.remove("customRoom");
+  location.href = location.pathname;
+});
+if (ROOMS.custom) {
+  document.getElementById("uploadActions").hidden = false;
+  const a = ROOMS.custom.auto;
+  showUploadStatus(a ? `"${ROOMS.custom.label}" is in the scene list. ${a.cropped && a.cropped.length ? `Cropped to a square: ${a.cropped.join(", ")}. ` : ""}${a.notes.join(" ")}`
+                     : `"${ROOMS.custom.label}" (calibrated) is in the scene list.`);
+}
 </script>
 </body>
 </html>

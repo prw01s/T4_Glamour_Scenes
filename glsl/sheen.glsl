@@ -106,11 +106,12 @@
 // ---------------------------------------------------------------------------
 // THE GEOMETRY (reflections)
 //
-// js/sheenModel.js solveCamera() recovers the camera (focal length, roll,
-// principal point) and the room's planes - side (window) wall, back wall,
-// floor - from straight lines in the photo (single-view metrology). Here,
-// for each wall pixel: the camera ray hits its wall at X; the mirror ray R
-// is traced to the other wall or the floor (Y); Y is projected back into the
+// js/sheenModel.js solveRoom() recovers the camera (focal length, roll,
+// principal point) and the room's planes - any number of walls, the floor
+// and, where visible, the ceiling - from straight lines in the photo (single-
+// view metrology). Here, for each wall pixel: the camera ray's first wall is
+// the one seen (the room is convex), hit at X; reflected rays are traced to
+// the first other plane they reach (Y); Y is projected back into the
 // photo and looked up in the ENVIRONMENT, a blurred, HDR copy of the photo in
 // which the walls carry the new paint (a navy wall reflects navy, not the
 // original white). The lobe is integrated by filtered importance sampling
@@ -198,12 +199,11 @@ void main() {
 // sheenFloor  darkening floor (see 7. in the header)
 // camC, camF, camRot   the camera: principal point (image units, v down),
 //             focal length (image widths), cos/sin of the roll
-// planeSide, planeBack  the walls: xyz = normal (into the room), w = h,
-//             points X on the wall satisfy dot(n, X) = h. Camera space:
-//             x right, y up, z forward, camera at the origin.
-// floorY      the floor plane y = floorY
-// cornerX, sideSign  the corner, in roll-corrected image offsets; pixels
-//             with (x - cornerX) * sideSign > 0 are on the side wall
+// roomPlanes  the room's planes, walls first, then the floor (and a
+//             ceiling): xyz = normal (into the room), w = h; points X on the
+//             plane satisfy dot(n, X) = h. Camera space: x right, y up,
+//             z forward, camera at the origin. roomWalls of them are walls,
+//             roomPlaneCount in all (js/sheenModel.js solveRoom).
 // keyLight    camera-space position of the light raking the walls
 // emitRect[i] emitter regions [u0, v0, u1, v1]; emitGain[i] = (threshold, gain)
 uniform sampler2D envTex;
@@ -214,11 +214,31 @@ uniform vec4  sheenAlb[8];
 uniform float sheenIor, sheenFloor;
 uniform vec2  camC, camRot;
 uniform float camF;
-uniform vec4  planeSide, planeBack;
-uniform float floorY, cornerX, sideSign;
+#define MAX_PLANES 8
+#define MAX_EMITTERS 6
+uniform vec4  roomPlanes[MAX_PLANES];
+uniform int   roomWalls, roomPlaneCount;
 uniform vec3  keyLight;
-uniform vec4  emitRect[4];
-uniform vec2  emitGain[4];
+uniform vec4  emitRect[MAX_EMITTERS];
+uniform vec2  emitGain[MAX_EMITTERS];
+// Lamps off the walls (js/sheenModel.js calibrateLamps): lampPos = (camera-
+// space position, radius), lampI = intensity (the photo's linear units x
+// scene units^2; divided by refY here), lampAxis = (main direction, cosine of
+// the half-angle; -1 = all around).
+#define MAX_LAMPS 4
+uniform vec4  lampPos[MAX_LAMPS];
+uniform vec3  lampI[MAX_LAMPS];
+uniform vec4  lampAxis[MAX_LAMPS];
+uniform int   lampCount;
+// Windows outside the photo (js/sheenModel.js placeWindows): rectangles
+// winO + s winU + q winV (s, q in 0..1, camera space), radiance winL (the
+// photo's linear units; divided by refY here).
+#define MAX_WINDOWS 3
+uniform vec3  winO[MAX_WINDOWS];
+uniform vec3  winU[MAX_WINDOWS];
+uniform vec3  winV[MAX_WINDOWS];
+uniform vec3  winL[MAX_WINDOWS];
+uniform int   winCount;
 
 const float PI = 3.14159265;
 
@@ -245,22 +265,23 @@ vec2 project(vec3 X) {
 // channel, but only the bulbs' cores are bright in all three.
 float emitterGainAt(vec2 uv, vec3 lin) {
   float g = 1.0, mx = lum(lin);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < MAX_EMITTERS; i++) {
     vec4 r = emitRect[i];
     if (uv.x >= r.x && uv.x <= r.z && uv.y >= r.y && uv.y <= r.w)
       g = max(g, mix(1.0, emitGain[i].y, smoothstep(emitGain[i].x - 0.05, emitGain[i].x + 0.05, mx)));
   }
   return g;
 }
-// How much a pixel is a light source (0..1): 1 where emitterGainAt applies
-// its full gain. RENDER shows such pixels as the photo, unpainted: a mask may
-// leave light sources partly see-through (the glass bulbs are grey in this
-// room's mask), and paint there would tint the bulbs.
+// How much a pixel is a light source (0..1): 1 where a thresholded
+// emitter region's threshold is passed. RENDER shows such pixels as the
+// photo, unpainted: a mask may leave light sources partly see-through (the
+// glass bulbs are grey in living room 2's mask), and paint there would tint
+// them. (Windows have no threshold: their glass isn't wall anyway.)
 float sheenEmitter(vec2 uv, vec3 lin) {
   float w = 0.0, mx = lum(lin);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < MAX_EMITTERS; i++) {
     vec4 r = emitRect[i];
-    if (emitGain[i].y > 1.0 && emitGain[i].x > 0.0 && uv.x >= r.x && uv.x <= r.z && uv.y >= r.y && uv.y <= r.w)
+    if (emitGain[i].x > 0.0 && uv.x >= r.x && uv.x <= r.z && uv.y >= r.y && uv.y <= r.w)
       w = max(w, smoothstep(emitGain[i].x - 0.05, emitGain[i].x + 0.05, mx));
   }
   return w;
@@ -309,15 +330,32 @@ float fresnelExact(float c, float n) {
   return 0.5 * (rs * rs + rp * rp);
 }
 
-// Distance along R from X (on one wall) to the other wall or the floor,
-// whichever comes first; -1 if neither. Normals point into the room, so a
-// ray heading into a plane has dot(n, R) < 0. nY = the normal of the plane hit.
-float traceRoom(vec3 X, vec3 R, vec4 other, out vec3 nY) {
+// The wall the camera sees along ray d: the first wall the ray reaches. A
+// room seen from inside is convex, so this is exact without corner lines or
+// a wall map (js/sheenModel.js wallAt). Normals point into the room, so a ray
+// heading into a plane has dot(n, d) < 0.
+int visibleWall(vec3 d) {
+  int k = 0;
+  float tBest = 1e9;
+  for (int i = 0; i < MAX_PLANES; i++) {
+    if (i >= roomWalls) break;
+    float dn = dot(roomPlanes[i].xyz, d);
+    if (dn < -1e-5) { float t = roomPlanes[i].w / dn; if (t > 0.0 && t < tBest) { tBest = t; k = i; } }
+  }
+  return k;
+}
+// Distance along R from X (on plane `self`) to the first other plane it
+// reaches (wall, floor or ceiling); -1 if none. nY = the normal of the plane hit.
+float traceRoom(vec3 X, vec3 R, int self, out vec3 nY) {
   float t = 1e9;
-  nY = other.xyz;
-  float dn = dot(other.xyz, R);
-  if (dn < -1e-5) { float to = (other.w - dot(other.xyz, X)) / dn; if (to > 1e-4) t = to; }
-  if (R.y < -1e-5) { float tf = (floorY - X.y) / R.y; if (tf > 1e-4 && tf < t) { t = tf; nY = vec3(0.0, 1.0, 0.0); } }
+  nY = vec3(0.0, 1.0, 0.0);
+  for (int i = 0; i < MAX_PLANES; i++) {
+    if (i >= roomPlaneCount) break;
+    if (i == self) continue;
+    vec4 P = roomPlanes[i];
+    float dn = dot(P.xyz, R);
+    if (dn < -1e-5) { float to = (P.w - dot(P.xyz, X)) / dn; if (to > 1e-4 && to < t) { t = to; nY = P.xyz; } }
+  }
   return t < 1e8 ? t : -1.0;
 }
 
@@ -326,18 +364,72 @@ vec3 envMean() { return textureLod(envTex, vec2(0.5), envMaxLod).rgb; }
 // The share of a room's interior surface that is walls: 4 x 5 x 2.5 m gives
 // 45 m2 of walls against 40 m2 of floor and ceiling.
 const float WALL_SHARE = 0.53;
+// A white ceiling's luminance relative to the room's mean wall light. Ceilings
+// get little direct light from windows or shaded lamps; in daylit rooms with
+// light finishes they measure about 0.6-1.0 of the walls.
+const float CEILING_SHARE = 0.8;
+
+// What a reflected ray that leaves the photo sees: the unseen room. Rays
+// heading up see the ceiling (white, lit at about the room's mean wall
+// level); the others see walls painted the same colour (c, this wall's own
+// flat colour) and the room's mean (furniture, floor, windows). The ceiling
+// is often among the brightest things an upward reflection sees; without
+// it, upward rays saw a dark mix and showed a seam where they left the photo.
+vec3 unseenRoom(vec3 R, vec3 c, vec3 ceilingRad) {
+  return mix(mix(envMean(), c, WALL_SHARE), ceilingRad, smoothstep(0.15, 0.6, R.y));
+}
+
+// The share of a ray's cone (solid angle omegaS around L from X) that falls
+// on window i, if the window isn't behind the first room plane the ray
+// reaches (distance tRoom; -1 = none). The cone's footprint at the window is
+// approximated by a square of the same area, whose overlap with the
+// rectangle factors into two 1-D overlaps: a box filter, matching the
+// environment's filtered reads, so a window's reflection has the blur of the
+// lobe sample and no aliased edges.
+float windowCover(int i, vec3 X, vec3 L, float omegaS, float tRoom) {
+  vec3 nw = normalize(cross(winU[i], winV[i]));
+  float dn = dot(L, nw);
+  if (abs(dn) < 1e-5) return 0.0;
+  float tw = dot(winO[i] - X, nw) / dn;
+  if (tw <= 1e-4 || (tRoom > 0.0 && tw > tRoom * 1.01 + 1e-3)) return 0.0;
+  vec3 P = X + tw * L - winO[i];
+  float lu = length(winU[i]), lv = length(winV[i]);
+  float x = dot(P, winU[i]) / lu, y = dot(P, winV[i]) / lv;
+  // Half-width of the footprint: the cone's radius (sqrt(omegaS / pi) rad)
+  // x distance, stretched by the slant; at least a hair, to keep an edge.
+  float h = max(tw * sqrt(omegaS / PI) * 0.886 / max(abs(dn), 0.05), 1e-4);
+  float cx = clamp(min(x + h, lu) - max(x - h, 0.0), 0.0, 2.0 * h) / (2.0 * h);
+  float cy = clamp(min(y + h, lv) - max(y - h, 0.0), 0.0, 2.0 * h) / (2.0 * h);
+  return cx * cy;
+}
 
 // Radiance arriving at X from direction L, blurred over solid angle omegaS
-// (the share of the lobe one sample stands for). `room` is what a ray that
-// leaves the photo sees (behind the camera, the ceiling): the unseen room.
-vec3 radianceFrom(vec3 X, vec3 L, vec4 other, float omegaS, vec3 room) {
+// (the share of the lobe one sample stands for): the room (photo or unseen
+// room, radianceEnv) with any window outside the photo over it.
+vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad);
+vec3 radianceFrom(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad) {
+  vec3 r = radianceEnv(X, L, self, omegaS, c, ceilingRad);
+  if (winCount == 0) return r;
   vec3 nY;
-  float t = traceRoom(X, L, other, nY);
+  float t = traceRoom(X, L, self, nY);
+  for (int i = 0; i < MAX_WINDOWS; i++) {
+    if (i >= winCount) break;
+    r = mix(r, winL[i] / max(refY, 1e-4), windowCover(i, X, L, omegaS, t));
+  }
+  return r;
+}
+
+// Radiance from the room alone. `room` is what a ray that leaves the photo
+// sees (behind the camera, the ceiling): the unseen room.
+vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad) {
+  vec3 room = unseenRoom(L, c, ceilingRad);
+  vec3 nY;
+  float t = traceRoom(X, L, self, nY);
   if (t < 0.0) return room;
   vec3 Y = X + t * L;
   if (Y.z < 1e-3) return room;                       // behind the camera
   vec2 uvY = project(Y);
-  float edge = smoothstep(0.0, 0.05, min(min(uvY.x, uvY.y), min(1.0 - uvY.x, 1.0 - uvY.y)));
+  float edge = smoothstep(0.0, 0.08, min(min(uvY.x, uvY.y), min(1.0 - uvY.x, 1.0 - uvY.y)));
   if (edge <= 0.0) return room;                      // outside the photo
   // Filtered importance sampling (Krivanek & Colbert 2008, GPU Gems 3 ch. 20):
   // read the pyramid at the level whose texel covers the sample's solid
@@ -365,7 +457,7 @@ vec3 radianceFrom(vec3 X, vec3 L, vec4 other, float omegaS, vec3 room) {
 // per pixel); each reflected direction is traced to the room and read with
 // filtered importance sampling, weighted by NoL (Karis 2013 prefiltering).
 #define LOBE_SAMPLES 16
-vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, vec4 other, vec3 room, float rot) {
+vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, int self, vec3 c, vec3 ceilingRad, float rot) {
   vec3 up = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
   vec3 T = normalize(cross(up, n)), B = cross(n, T);
   float a2 = alpha * alpha;
@@ -384,10 +476,48 @@ vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, vec4 other, vec3 room, fl
     if (NoL <= 0.0) continue;
     float dd = cosT * cosT * (a2 - 1.0) + 1.0;
     float pdf = a2 / (PI * dd * dd) * cosT / (4.0 * VoH);       // of L
-    sum += NoL * radianceFrom(X, L, other, 1.0 / (float(LOBE_SAMPLES) * pdf), room);
+    sum += NoL * radianceFrom(X, L, self, 1.0 / (float(LOBE_SAMPLES) * pdf), c, ceilingRad);
     wsum += NoL;
   }
-  return wsum > 0.0 ? sum / wsum : room;
+  return wsum > 0.0 ? sum / wsum : unseenRoom(reflect(-V, n), c, ceilingRad);
+}
+
+// The highlights of the lamps off the walls (js/sheenModel.js
+// calibrateLamps): each is a sphere light; its reflected radiance is the GGX
+// BRDF (D x height-correlated Smith visibility x exact Fresnel) times its
+// irradiance I N.L / d^2. A sphere of radius r at distance d is handled by
+// widening the lobe to alpha' = alpha + r / (2 d) (Karis 2013): the
+// highlight takes the size of the lamp's mirror image. D(alpha') still
+// integrates to 1, so the reflected energy is the point light's; its peak,
+// L F r^2 / (4 alpha'^2 d^2) with L = I / (pi r^2), never exceeds the
+// lamp's own radiance x Fresnel (a mirror's image), since alpha' >= r / 2d.
+// (Karis's extra factor (alpha / alpha')^2 belongs to his other half: D at
+// the ORIGINAL alpha toward the sphere's representative point. Applied to
+// the widened D, as this file did until the multi-scene review, it dims
+// highlights by (alpha / alpha')^2 - most for the glossiest finishes, so
+// semi-gloss lamp highlights came out no brighter than satin's.)
+// A shaded lamp emits only within its cone (soft edge).
+vec3 lampSpecular(vec3 X, vec3 n, vec3 V, float alpha) {
+  vec3 sum = vec3(0.0);
+  float NoV = max(dot(n, V), 1e-3);
+  for (int i = 0; i < MAX_LAMPS; i++) {
+    if (i >= lampCount) break;
+    vec3 Lv = lampPos[i].xyz - X;
+    float d2 = dot(Lv, Lv), d = sqrt(d2);
+    vec3 l = Lv / d;
+    float NoL = dot(n, l);
+    if (NoL <= 0.0) continue;
+    float cone = lampAxis[i].w < -0.99 ? 1.0
+               : smoothstep(lampAxis[i].w - 0.1, lampAxis[i].w + 0.1, dot(-l, lampAxis[i].xyz));
+    float a = clamp(alpha + lampPos[i].w / (2.0 * d), 0.0, 1.0);
+    vec3 h = normalize(l + V);
+    float NoH = max(dot(n, h), 0.0), VoH = max(dot(V, h), 0.0);
+    float a2 = a * a, dd = NoH * NoH * (a2 - 1.0) + 1.0;
+    float D = a2 / (PI * dd * dd);
+    float vis = 0.5 / (NoL * sqrt(NoV * NoV * (1.0 - a2) + a2) + NoV * sqrt(NoL * NoL * (1.0 - a2) + a2));
+    sum += D * vis * fresnelExact(VoH, sheenIor) * NoL * cone * lampI[i] / (d2 * max(refY, 1e-4));
+  }
+  return sum;
 }
 
 // The sheen of one wall pixel. c and W from v3Lit (before adaptation), L the
@@ -395,41 +525,51 @@ vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, vec4 other, vec3 room, fl
 // before adaptation and gamut mapping (RENDER does both).
 vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv) {
   vec3 d = camRay(uv);
-  bool onSide = (unroll(uv).x - cornerX) * sideSign > 0.0;
-  vec4 P = onSide ? planeSide : planeBack;
-  vec4 O = onSide ? planeBack : planeSide;
+  int self = visibleWall(d);
+  vec4 P = roomPlanes[self];
   vec3 n = P.xyz;
   vec3 X = d * (P.w / dot(n, d));                    // where the camera ray meets the wall
 
-  // Micro-normal from the wall's texture (see the header). The detail ratio
-  // is read from a smoothed source (lod 1.5: about 3 px) so JPEG noise and
-  // single pixels don't sparkle; the light map's .w is the blurred luminance
-  // at the same place. Tilts are capped at 0.025 rad (1.4 deg), the top of
-  // what this photo's texture measures (0.6-1.4 deg) and the low end of
-  // roller stipple (1-5 deg). Only the tilt toward the light is visible in a
-  // photo's shading, so only that component is recovered.
-  vec3 s = textureLod(src, uv, 1.5).rgb;
-  float dev = (L.w > 1e-6 ? lum(srcLinear == 1 ? s : toLinear(s)) / L.w : 1.0) - 1.0;
+  // Micro-normal from the wall's texture (see the header). The texture map
+  // (luminance / local mean - 1, already scaled to 0 where the photo shows
+  // no texture above JPEG and 8-bit noise; js/sheenModel.js photoWithDetail)
+  // is in the source's alpha channel: 128/255 + 512/255 x detail. Read at
+  // lod 0.5 (about 1.4 px) so single pixels don't sparkle.
+  float dev = (textureLod(src, uv, 0.5).a * 255.0 - 128.0) / 512.0;
   vec3 toL = keyLight - X;
   float nl = dot(n, toL);
   vec3 tg = toL - n * nl;                            // toward the light, along the wall
   float tl = length(tg);
+  // Shading changes by delta x t for a tilt delta toward the light, t =
+  // tan(theta_i). Inverting that is ill-conditioned when the light is
+  // frontal (t -> 0: any noise becomes a large tilt), so the regularised
+  // (Tikhonov / Wiener) inverse is used: delta = dev t / (t^2 + l^2), with
+  // l = noise / expected tilt = 0.007 / 0.015 rad, about 0.5. Under raking
+  // light (t >> l) it is dev / t; under frontal light it fades to 0, as the
+  // texture really is invisible there. Tilts are capped at 0.025 rad (1.4
+  // deg): the top of living room 2's measured 0.6-1.4 deg, the low end of
+  // roller stipple's 1-5 deg. Only the tilt toward the light is visible in
+  // a photo's shading, so only that component is recovered.
   float delta = 0.0;
-  if (nl > 1e-4 && tl > 1e-5)
-    delta = clamp(dev * nl / tl, -0.025, 0.025) * (1.0 - smoothstep(0.1, 0.25, abs(dev)));
+  if (nl > 1e-4 && tl > 1e-5) {
+    float t = tl / nl;
+    delta = clamp(dev * t / (t * t + 0.25), -0.025, 0.025) * (1.0 - smoothstep(0.1, 0.25, abs(dev)));
+  }
   vec3 n2 = normalize(n + delta * tg / max(tl, 1e-5));
 
   vec3 V = -d;
   float NoV = clamp(dot(n2, V), 1e-3, 1.0);
-  vec3 room = mix(envMean(), c, WALL_SHARE);
-  vec3 Ll = lobeRadiance(X, n2, V, sheenP.x, O, room, hash(gl_FragCoord.xy));
+  // The room's mean wall light (MEAN), in reference-white units: a white
+  // ceiling's luminance is CEILING_SHARE of it.
+  vec3 ceilingRad = CEILING_SHARE * texelFetch(frameMean, ivec2(0), 0).rgb / max(refY, 1e-4);
+  vec3 Ll = lobeRadiance(X, n2, V, sheenP.x, self, c, ceilingRad, hash(gl_FragCoord.xy));
   // Near grazing, a share S of the whole surface reflection is a mirror
   // reflection (Rayleigh); it reflects the mirror direction, with exact Fresnel.
   float kc = sheenP.z * NoV, S = exp(-kc * kc);
-  vec3 Lm = S > 1e-4 ? radianceFrom(X, reflect(d, n2), O, 1e-7, room) : W;
+  vec3 Lm = S > 1e-4 ? radianceFrom(X, reflect(d, n2), self, 1e-7, c, ceilingRad) : W;
   // Each part reflects what it sees instead of the veil the swatch holds for
   // it (the same albedo spread evenly): zero under even surroundings.
-  vec3 dl = (1.0 - S) * (1.0 - sheenP.y) * albedoAt(NoV) * (Ll - W)
+  vec3 dl = (1.0 - S) * (1.0 - sheenP.y) * (albedoAt(NoV) * (Ll - W) + lampSpecular(X, n2, V, sheenP.x))
           + S * fresnelExact(NoV, sheenIor) * (Lm - W);
 
   // Darkening floor (see 7. in the header): x = the largest share of itself

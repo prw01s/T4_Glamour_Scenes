@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T4 Sheen: calibrate a room</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  /* Shared tokens and base: css/visualizer.css. This page's layout: */
+  .cal { display: grid; grid-template-columns: minmax(0, 1fr) 440px; height: 100vh; height: 100svh; background: var(--booth); }
+  .viewer { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #1E1E1E; color: #EEE; }
+  .viewer__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 12px; font-size: 13px; background: #2A2A2A; }
+  .viewer__bar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .viewer__stage { position: relative; flex: 1; min-height: 0; }
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint { position: absolute; left: 12px; bottom: 10px; right: 12px; margin: 0; padding: 6px 10px; border-radius: 3px;
+          font-size: 13px; background: rgb(0 0 0 / .65); pointer-events: none; }
+  .hint:empty { display: none; }
+  .panel { overflow-y: auto; padding: 20px 22px 40px; display: flex; flex-direction: column; gap: 22px; font-size: 14px; }
+  .panel h1 { margin: 0; font-size: 22px; line-height: 1.2; }
+  .panel h2 { margin: 0 0 6px; font-size: 15px; }
+  .panel p { margin: 0 0 8px; color: var(--slate); line-height: 1.45; }
+  .step { border-top: 1px solid var(--rule); padding-top: 14px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 6px 0; }
+  .row > label { display: inline-flex; align-items: center; gap: 6px; }
+  button, select, input[type="text"], input[type="number"] { font: inherit; font-size: 13px; }
+  button { padding: 4px 10px; border: 1px solid var(--graphite); border-radius: 3px; background: #fff; color: var(--graphite); cursor: pointer; }
+  button.primary { background: var(--graphite); color: var(--booth); }
+  button[aria-pressed="true"] { background: #FFD54A; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type="number"] { width: 5.5em; }
+  input[type="text"] { width: 14em; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  td, th { padding: 3px 4px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: middle; }
+  td input[type="number"] { width: 4.2em; }
+  .report { font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--graphite); background: #fff; padding: 8px; border-radius: 3px; margin: 6px 0 0; }
+  .warn { color: #8a3b00; }
+  .legend span { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; }
+  .legend i { display: inline-block; width: 16px; height: 3px; }
+  .tabs { display: inline-flex; border: 1px solid var(--rule); border-radius: 3px; }
+  .tabs button { border: 0; border-radius: 0; }
+  .tabs button[aria-selected="true"] { background: var(--graphite); color: var(--booth); }
+  textarea { width: 100%; height: 160px; font: 11px ui-monospace, Menlo, monospace; }
+  @media (max-width: 899.98px) { .cal { grid-template-columns: 1fr; height: auto; } .viewer { height: 80vh; } }
+</style>
+</head>
+<body>
+<main class="cal">
+  <section class="viewer" aria-label="Photo">
+    <div class="viewer__bar">
+      <span class="tabs" role="tablist" id="viewTabs">
+        <button role="tab" data-view="day" aria-selected="true">Day</button>
+        <button role="tab" data-view="night" aria-selected="false">Night</button>
+        <button role="tab" data-view="mask" aria-selected="false">Mask</button>
+      </span>
+      <label><input type="checkbox" id="showWalls"> Tint walls</label>
+      <label><input type="checkbox" id="showGrid" checked> Room grid</label>
+      <label><input type="checkbox" id="showVP" checked> Extend lines</label>
+      <label><input type="checkbox" id="showOff"> Unused lines</label>
+      <button id="fit">Fit</button>
+    </div>
+    <div class="viewer__stage">
+      <canvas id="view"></canvas>
+      <p class="hint" id="hint"></p>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <header>
+      <h1>Calibrate a room</h1>
+      <p>Turns a day photo, a night photo and a wall mask into a room for the sheen visualizer: the camera and the
+        walls (from straight lines in the photo) and the light sources. Detection proposes; you check the room grid and correct.
+        Wheel to zoom, drag to pan (or right-drag / Space-drag in other modes), Esc to cancel a tool.</p>
+    </header>
+
+    <section class="step" aria-labelledby="h1">
+      <h2 id="h1">1. Photos</h2>
+      <p>Same camera, same framing; the mask is black where the wall is (white elsewhere). Non-square images are cropped to their centre square.</p>
+      <div class="row"><label>Name <input type="text" id="name" value="My room"></label></div>
+      <div class="row"><label>Day <input type="file" id="fileDay" accept="image/*"></label></div>
+      <div class="row"><label>Night <input type="file" id="fileNight" accept="image/*"></label></div>
+      <div class="row"><label>Mask <input type="file" id="fileMask" accept="image/*"></label></div>
+      <div class="row"><label>Path for export <input type="text" id="prefix" value="images/sheens/"></label></div>
+      <p id="fileStatus"></p>
+    </section>
+
+    <section class="step" aria-labelledby="h2">
+      <h2 id="h2">2. Camera lines</h2>
+      <p>The camera comes from lines that are straight in the room: <b>verticals</b> (corners, door and window sides) and
+        two families of <b>horizontals at right angles</b>, a and b (frames, baseboards, sills, ceiling edges, tiles).
+        The photo must have upright verticals (perspective-corrected).</p>
+      <div class="row"><button class="primary" id="detect">Detect lines</button> <span id="detectStatus"></span></div>
+      <p class="legend"><span><i style="background:#ff4040"></i>a</span><span><i style="background:#30a0ff"></i>b</span>
+        <span><i style="background:#30d050"></i>vertical</span><span><i style="background:#e040e0"></i>b sloped</span>
+        <span><i style="background:#999"></i>unused</span></p>
+      <p>Click a line to cycle its type (a → b → vertical → unused), or hover it and press <kbd>A</kbd> <kbd>B</kbd> <kbd>V</kbd>
+        <kbd>S</kbd> (sloped) <kbd>X</kbd> (unused) <kbd>Del</kbd>. Drawn lines snap to the edge under them.</p>
+      <div class="row"><button id="drawLine" data-mode="draw-line">Draw a line</button>
+        <label>as <select id="drawClass"><option value="a">a</option><option value="b">b</option><option value="v">vertical</option><option value="s">b sloped</option></select></label>
+        <button id="clearAuto">Remove detected</button></div>
+      <p class="hint-inline">"b sloped": lines in two walls of direction b that are parallel but not horizontal (a sloped
+        ceiling's edges), when the room shows no horizontal b lines.</p>
+    </section>
+
+    <section class="step" aria-labelledby="h3">
+      <h2 id="h3">3. Walls, floor, ceiling</h2>
+      <p>Add the walls you see. The first is anchored anywhere on it; each next one at its corner with a wall already
+        placed. Then click where a wall meets the floor (a baseboard's foot). Check the yellow grid: its lines must run
+        along each wall and stop at the corners.</p>
+      <div class="row"><label>New wall along <select id="wallDir"><option value="a">a</option><option value="b">b</option>
+        <option value="a+b">45° (a+b)</option><option value="a-b">45° (a−b)</option></select></label>
+        <button id="addWall" data-mode="add-wall">Add wall…</button></div>
+      <table id="wallTable"><thead><tr><th>Wall</th><th>Along</th><th>Joins</th><th>u</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="row"><button id="setFloor" data-mode="floor">Floor point…</button>
+        <button id="addCeil" data-mode="ceiling">Ceiling point…</button> <button id="clearCeil">Clear ceiling</button></div>
+      <p>Ceiling: none (the renderer assumes one), 1 point (flat, where it meets a wall) or 3 points (sloped).</p>
+      <div class="row"><label>Camera height <input type="number" id="camH" value="1.2" step="0.05" min="0.3" max="3"> m</label>
+        <span>(sets the scale for lamp distances)</span></div>
+      <div class="report" id="solveReport">No solution yet.</div>
+    </section>
+
+    <section class="step" aria-labelledby="h4">
+      <h2 id="h4">4. Light sources</h2>
+      <p>Per photo (the view tab above chooses which): emitters are regions whose brightness the camera compressed
+        (window glass, bulbs, lit shades), restored by a gain for the reflections. Lamps that stand off the walls are
+        also placed in 3-D. Defaults: windows ×6, bulbs ×12, shades ×5.</p>
+      <div class="row"><button class="primary" id="detectLights">Detect lights in this photo</button>
+        <button id="drawEmitter" data-mode="draw-emitter">Draw an emitter</button>
+        <button id="addLamp" data-mode="lamp">Add a lamp…</button></div>
+      <table id="emitTable"><thead><tr><th>#</th><th>Type</th><th>Gain</th><th>Threshold</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="lampTable"><thead><tr><th>Lamp</th><th>Off wall (cm)</th><th>Size (cm)</th><th>Emits</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="row"><button id="setKey" data-mode="key">Key light…</button> <span id="keyStatus">automatic</span>
+        <button id="autoKey">Automatic</button></div>
+      <p>Windows outside the photo (optional): click the top, then the bottom of the window's visible vertical edge.</p>
+      <div class="row"><button id="addWindow" data-mode="win-edge">Add a window…</button></div>
+      <table id="winTable"><thead><tr><th>Wall</th><th>Width m</th><th>Start m</th><th>Toward</th><th>Radiance</th><th></th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="step" aria-labelledby="h5">
+      <h2 id="h5">5. Use it</h2>
+      <div class="row"><button class="primary" id="openViz">Open in the visualizer</button>
+        <button id="copyCfg">Copy config</button> <button id="downloadCfg">Download JSON</button>
+        <label><button id="loadCfgBtn">Load JSON…</button><input type="file" id="loadCfg" accept="application/json" hidden></label>
+        <button id="resetAll">Start over</button></div>
+      <p id="useStatus"></p>
+      <textarea id="cfgOut" readonly aria-label="Room config" hidden></textarea>
+    </section>
+  </aside>
+</main>
+
+<script src="js/sheenModel.js"></script>
+<script src="js/sheenCalib.js"></script>
+<script src="js/sheenCustomRoom.js"></script>
+<script type="module">
+/* ==========================================================================
+ * sheenCalibrate.html: semi-automatic calibration of a new room for the
+ * sheen visualizer. Detection (js/sheenCalib.js) proposes lines and light
+ * sources; the user corrects them over the photo; js/sheenModel.js
+ * solveRoom solves the camera and planes live; the result is a ROOMS entry
+ * for sheenSceneRenderer.html (exported as JSON, or handed over through
+ * IndexedDB: js/sheenCustomRoom.js, sheenSceneRenderer.html?custom).
+ * ======================================================================== */
+const SM = window.SheenModel, SC = window.SheenCalib, store = window.SheenCustomRoom;
+const $ = s => document.querySelector(s);
+const CLASS_COLOR = { a: "#ff4040", b: "#30a0ff", v: "#30d050", s: "#e040e0", off: "rgba(160,160,160,.75)" };
+const TYPE_DEFAULTS = { window: { threshold: 0, gain: 6 }, bulb: { threshold: 0.85, gain: 12 }, shade: { threshold: 0.35, gain: 5 } };
+const EMITS = { all: null, down: { axis: [0, -1, 0], cone: 0.3 }, up: { axis: [0, 1, 0], cone: 0.3 } };
+const MAX_SIDE = 2048;
+
+// ---------------------------------------------------------------- state
+const blankLights = () => ({ emitters: [], lamps: [], key: null, windows: [] });
+const initialState = () => ({
+  name: "My room", prefix: "images/sheens/", files: { day: null, night: null, mask: null },
+  lines: [], walls: [], floor: null, ceiling: [], cameraHeightM: 1.2,
+  lights: { day: blankLights(), night: blankLights() }
+});
+let state = initialState();
+let nextId = 1;
+const imgs = { day: null, night: null, mask: null };   // decoded <img>
+let gray = null, graySize = 0;                          // day photo luma, for snapping
+let solved = null;                                      // { room, ok, report, warnings, config? }
+let viewKey = "day", mode = "pan", pending = null;     // pending: partial clicks (window edge)
+let hover = -1;
+
+// ---------------------------------------------------------------- images
+/** A file as a square Blob (centre crop, at most MAX_SIDE px). */
+const squareBlob = (file, type) => SC.squareImage(file, type, MAX_SIDE);
+async function decode(blob) {
+  const img = new Image(); img.src = URL.createObjectURL(blob); await img.decode(); return img;
+}
+/** RGBA of an image at n x n. */
+function pixels(img, n) {
+  const cv = Object.assign(document.createElement("canvas"), { width: n, height: n });
+  const c = cv.getContext("2d", { willReadFrequently: true }); c.drawImage(img, 0, 0, n, n);
+  return c.getImageData(0, 0, n, n).data;
+}
+async function setFile(key, file) {
+  const isMask = key === "mask";
+  const { blob, cropped, size } = await squareBlob(file, isMask ? "image/png" : "image/jpeg");
+  const ext = isMask ? ".png" : ".jpg";
+  state.files[key] = { name: file.name.replace(/\.[^.]+$/, "") + (cropped || !file.name.toLowerCase().endsWith(ext) ? "-square" + ext : ext), blob, cropped, size };
+  await loadImages();
+  changed();
+}
+async function loadImages() {
+  for (const k of ["day", "night", "mask"]) imgs[k] = state.files[k] ? await decode(state.files[k].blob) : null;
+  if (imgs.day) { graySize = Math.min(2000, imgs.day.naturalWidth); gray = SC.gray(pixels(imgs.day, graySize), graySize, graySize); }
+  const f = state.files;
+  $("#fileStatus").textContent = ["day", "night", "mask"].map(k => f[k] ? `${k}: ${f[k].size} px${f[k].cropped ? " (cropped)" : ""}` : `${k}: missing`).join(" · ");
+}
+
+// ---------------------------------------------------------------- solving
+const wallId = i => `wall${i + 1}`;
+function geometryFrom(st, provisionalRoom) {
+  const L = st.lines, of = c => L.filter(l => l.cls === c).map(l => l.seg);
+  const g = { lines: { a: of("a"), b: of("b") }, verticals: of("v") };
+  if (of("s").length >= 2) g.lines.bSloped = of("s");
+  g.walls = st.walls.length ? st.walls.map((w, i) => i === 0 ? { id: w.id, dir: w.dir, through: { u: w.u } }
+                                                             : { id: w.id, dir: w.dir, corner: { wall: w.joins, u: w.u } })
+                            : [{ id: "provisional", dir: "a", through: { u: 0.5 } }];
+  const wallFor = uv => provisionalRoom ? SM.wallAt(provisionalRoom, uv) : g.walls[0].id;
+  g.floor = { at: { wall: wallFor(st.floor || [0.5, 0.97]), uv: st.floor || [0.5, 0.97] } };
+  if (st.ceiling.length === 1) g.ceiling = { at: { wall: wallFor(st.ceiling[0]), uv: st.ceiling[0] } };
+  else if (st.ceiling.length === 3) g.ceiling = { through: st.ceiling.map(uv => ({ wall: wallFor(uv), uv })) };
+  return g;
+}
+function solve() {
+  const warnings = [], L = state.lines, n = c => L.filter(l => l.cls === c).length;
+  if (n("a") < 2) warnings.push("Need at least 2 lines of type a.");
+  if (n("b") < 1 && n("s") < 2) warnings.push("Need at least 1 line of type b (or 2 sloped b lines).");
+  if (n("v") < 1) warnings.push("Need at least 1 vertical line.");
+  if (warnings.length) return { ok: false, warnings };
+  try {
+    const first = SM.solveRoom(geometryFrom(state, null));        // walls only (floor provisional)
+    const room = SM.solveRoom(geometryFrom(state, first));
+    if (!isFinite(room.f) || room.f <= 0) return { ok: false, warnings: ["The lines give no valid camera: a and b must be at right angles (their vanishing points on opposite sides)."] };
+    if (!state.walls.length) warnings.push("Add the walls (step 3).");
+    if (!state.floor) warnings.push("Click a floor point (step 3): the camera height is a guess until then.");
+    if (state.ceiling.length === 2) warnings.push("Ceiling: 1 or 3 points (2 are ignored).");
+    if (room.planes.length > SM.MAX_PLANES) warnings.push(`At most ${SM.MAX_PLANES} planes (walls + floor + ceiling).`);
+    const spread = uncertainty(geometryFrom(state, first), room);
+    if (spread.fRel > 0.08) warnings.push(`The camera is poorly pinned down (focal length ±${(100 * spread.fRel).toFixed(0)} %): add long lines in direction ${spread.weakest}.`);
+    return { ok: true, room, warnings, spread, mpu: state.cameraHeightM / room.report.cameraHeight };
+  } catch (e) { return { ok: false, warnings: ["Solver: " + e.message] }; }
+}
+/**
+ * How much the solution moves with line noise: 24 solves with every line
+ * endpoint jittered by a Gaussian of 0.5 px (at 2000 px), as a whole and
+ * per line family (which family to strengthen).
+ */
+function uncertainty(g, room) {
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-9)) * Math.cos(2 * Math.PI * rand());
+  const jit = segs => segs && segs.map(sg => sg.map(v => v + gauss() * 0.5 / 2000));
+  const run = (which, n) => {
+    const fs = [], ang = [];
+    for (let i = 0; i < n; i++) {
+      const lines = { a: which.includes("a") ? jit(g.lines.a) : g.lines.a, b: which.includes("b") ? jit(g.lines.b) : g.lines.b };
+      if (g.lines.bSloped) lines.bSloped = which.includes("b") ? jit(g.lines.bSloped) : g.lines.bSloped;
+      try {
+        const r = SM.solveRoom({ ...g, lines, verticals: which.includes("v") ? jit(g.verticals) : g.verticals });
+        if (isFinite(r.f)) { fs.push(r.f); ang.push(r.report.angleADeg); }
+      } catch { /* a degenerate draw: skip */ }
+    }
+    const m = a => a.reduce((x, y) => x + y, 0) / a.length, sd = a => Math.sqrt(m(a.map(x => (x - m(a)) ** 2)));
+    return fs.length > 2 ? { fRel: sd(fs) / room.f, angDeg: sd(ang) } : { fRel: Infinity, angDeg: Infinity };
+  };
+  const all = run("abv", 24), byA = run("a", 10), byB = run("b", 10);
+  return { ...all, weakest: byA.fRel > byB.fRel ? "a" : "b" };
+}
+function reportText(s) {
+  if (!s.ok) return s.warnings.join("\n");
+  const r = s.room.report, N = state.files.day ? state.files.day.size : 2000;
+  return [`focal length ${(s.room.f * N).toFixed(0)} px (${N} px wide), field of view ${r.hfovDeg.toFixed(1)}°, roll ${r.rollDeg.toFixed(2)}°`,
+          `uncertainty from ±0.5 px line noise: focal length ±${(100 * s.spread.fRel).toFixed(1)} %, wall angles ±${s.spread.angDeg.toFixed(1)}°`,
+          `  (noise only: lines on furniture or texture that isn't square to the room can be far worse - check the grid)`,
+          `a at ${r.angleADeg.toFixed(1)}°, b at ${r.angleBDeg.toFixed(1)}° from the view axis; b-line fit ${(r.bLineRmsErr * N).toFixed(2)} px RMS`,
+          `camera ${r.cameraHeight.toFixed(3)} units above the floor = ${state.cameraHeightM} m → 1 unit = ${s.mpu.toFixed(2)} m`,
+          ...r.walls, ...s.warnings.map(w => "⚠ " + w)].join("\n");
+}
+
+// ---------------------------------------------------------------- config
+const r5 = x => Array.isArray(x) ? x.map(r5) : typeof x === "number" ? Math.round(x * 1e5) / 1e5 : x;
+/** Lamp radius (scene units): from its size, or from its emitter's rectangle at its depth. */
+function lampRadius(lamp, lights, s) {
+  if (lamp.sizeCm) return lamp.sizeCm / 200 / s.mpu;
+  const e = lights.emitters[lamp.emitter], wall = SM.wallAt(s.room, lamp.uv);
+  const z = SM.pointOffWall(s.room, lamp.uv, wall, (lamp.offsetCm / 100) / s.mpu)[2];
+  const half = e ? 0.5 * Math.min(e.rect[2] - e.rect[0], e.rect[3] - e.rect[1]) : 0.005;
+  return half * z / s.room.f;
+}
+function lightsConfig(t, s) {
+  const Ls = state.lights[t], room = s.room, out = {};
+  // An emitter that a lamp stands for stays at gain 1 in the environment:
+  // the lamp reflects it (with the emitter's gain as its intensity), where
+  // its mirror image falls; boosted in the environment too, it was
+  // reflected twice, the second time painted onto the wall behind it.
+  const lampOf = new Set(Ls.lamps.map(l => l.emitter).filter(i => i != null));
+  out.emitters = Ls.emitters.map((e, i) => ({ rect: r5(e.rect), threshold: e.threshold, gain: lampOf.has(i) ? 1 : e.gain,
+                                               note: e.type + (lampOf.has(i) ? " (a lamp below)" : "") }));
+  out.lamps = Ls.lamps.map(l => {
+    const e = Ls.emitters[l.emitter], wall = SM.wallAt(room, l.uv);
+    const lamp = { uv: r5(l.uv), wall, offset: r5(l.offsetCm / 100 / s.mpu), radius: r5(lampRadius(l, Ls, s)),
+                   core: e ? { rect: r5(e.rect), threshold: Math.max(e.threshold, 0.35), gain: e.gain }
+                           : { rect: r5([l.uv[0] - 0.015, l.uv[1] - 0.015, l.uv[0] + 0.015, l.uv[1] + 0.015]), threshold: 0.85, gain: 12 } };
+    if (EMITS[l.emits]) Object.assign(lamp, EMITS[l.emits]);
+    return lamp;
+  });
+  out.windows = Ls.windows.map(w => ({ wall: w.wall, edge: r5(w.edge), width: r5(w.widthM / s.mpu), start: r5(w.startM / s.mpu),
+                                       toward: w.toward, radiance: w.radiance }));
+  out.keyLight = keyLightFor(t, s);
+  return out;
+}
+/** The key light: as set, else the first lamp (night) or the largest window (day), else the image centre. */
+function keyLightFor(t, s) {
+  const Ls = state.lights[t], room = s.room;
+  const at = (uv, offsetCm) => ({ uv: r5(uv), wall: SM.wallAt(room, uv), offset: r5((offsetCm || 0) / 100 / s.mpu) });
+  if (Ls.key) return at(Ls.key.uv, Ls.key.offsetCm);
+  if (t === "night" && Ls.lamps.length) return at(Ls.lamps[0].uv, Ls.lamps[0].offsetCm);
+  const e = Ls.emitters[0];
+  if (e) return at([(e.rect[0] + e.rect[2]) / 2, (e.rect[1] + e.rect[3]) / 2], 0);
+  return at([0.5, 0.4], 0);
+}
+function buildConfig() {
+  const s = solved;
+  if (!s || !s.ok) throw new Error("Solve the room first (steps 2-3).");
+  if (!state.walls.length || !state.floor) throw new Error("Add the walls and a floor point (step 3).");
+  const f = state.files;
+  if (!f.day || !f.night || !f.mask) throw new Error("Load the day photo, the night photo and the mask (step 1).");
+  for (const t of ["day", "night"]) {
+    const Ls = state.lights[t];
+    if (Ls.emitters.length > SM.MAX_EMITTERS) throw new Error(`${t}: at most ${SM.MAX_EMITTERS} emitters.`);
+    if (Ls.lamps.length > SM.MAX_LAMPS) throw new Error(`${t}: at most ${SM.MAX_LAMPS} lamps.`);
+    if (Ls.windows.length > SM.MAX_WINDOWS) throw new Error(`${t}: at most ${SM.MAX_WINDOWS} windows.`);
+  }
+  const g = geometryFrom(state, s.room);
+  const geometry = { lines: { a: r5(g.lines.a), b: r5(g.lines.b) }, verticals: r5(g.verticals), walls: r5(g.walls), floor: r5(g.floor) };
+  if (g.lines.bSloped) geometry.lines.bSloped = r5(g.lines.bSloped);
+  if (g.ceiling) geometry.ceiling = r5(g.ceiling);
+  const { files, ...rest } = state;
+  return {
+    label: state.name || "Custom room",
+    photos: { day: state.prefix + f.day.name, night: state.prefix + f.night.name },
+    mask: state.prefix + f.mask.name,
+    geometry,
+    lights: { day: lightsConfig("day", s), night: lightsConfig("night", s) },
+    _calib: { version: 1, state: rest, files: Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v && { name: v.name, size: v.size }])) }
+  };
+}
+
+// ---------------------------------------------------------------- view
+const cv = $("#view"), ctx = cv.getContext("2d");
+let view = { z: 1, cx: 0.5, cy: 0.5 }, cssW = 1, cssH = 1;
+function layout() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cssW = r.width; cssH = r.height; cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw();
+}
+const side = () => Math.min(cssW, cssH) * view.z;
+const toScreen = ([u, v]) => [(u - view.cx) * side() + cssW / 2, (v - view.cy) * side() + cssH / 2];
+const toImage = (x, y) => [(x - cssW / 2) / side() + view.cx, (y - cssH / 2) / side() + view.cy];
+const lightsTime = () => viewKey === "night" ? "night" : "day";
+
+let maskTint = null;
+function draw() {
+  ctx.clearRect(0, 0, cssW, cssH);
+  const img = imgs[viewKey] || imgs.day;
+  const [x0, y0] = toScreen([0, 0]), S = side();
+  if (img) ctx.drawImage(img, x0, y0, S, S);
+  else { ctx.fillStyle = "#888"; ctx.font = "16px system-ui"; ctx.fillText("Load the photos (step 1).", 20, 30); return; }
+  if ($("#showWalls").checked && imgs.mask) {
+    if (!maskTint) {                                   // walls tinted red (mask black = wall)
+      const n = 1000, d = pixels(imgs.mask, n), c = Object.assign(document.createElement("canvas"), { width: n, height: n }), cc = c.getContext("2d");
+      const o = cc.createImageData(n, n);
+      for (let i = 0; i < n * n; i++) { const wall = 255 - d[4 * i]; o.data[4 * i] = 255; o.data[4 * i + 1] = 40; o.data[4 * i + 2] = 40; o.data[4 * i + 3] = wall * 0.35; }
+      cc.putImageData(o, 0, 0); maskTint = c;
+    }
+    ctx.drawImage(maskTint, x0, y0, S, S);
+  }
+  const room = solved && solved.ok ? solved.room : null;
+  const line = (a, b, color, width = 1.5, dash = []) => { ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(...toScreen(a)); ctx.lineTo(...toScreen(b)); ctx.stroke(); ctx.setLineDash([]); };
+  const dot = (p, color, r = 5) => { const [x, y] = toScreen(p); ctx.fillStyle = color; ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.stroke(); };
+  const label = (p, text, color = "#fff") => { const [x, y] = toScreen(p); ctx.font = "600 12px system-ui"; ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(x + 6, y - 14, ctx.measureText(text).width + 6, 16); ctx.fillStyle = color; ctx.fillText(text, x + 9, y - 2); };
+  // Room grid.
+  if (room && $("#showGrid").checked && state.walls.length) {
+    const floorY = room.planes.find(p => p.kind === "floor").p[3];
+    for (const pl of room.planes.filter(p => p.kind === "wall")) {
+      const n = pl.p, B = [n[0] * n[3], 0, n[2] * n[3]], t = [-n[2], 0, n[0]];
+      const seg = (X0, X1) => {
+        for (let i = 0; i < 40; i++) {
+          const A = X0.map((v, k) => v + (X1[k] - v) * i / 40), C = X0.map((v, k) => v + (X1[k] - v) * (i + 1) / 40);
+          if (A[2] < 0.02 || C[2] < 0.02) continue;
+          const a = SM.project(room, A), c = SM.project(room, C);
+          if (SM.wallAt(room, a) === pl.id && SM.wallAt(room, c) === pl.id) line(a, c, "rgba(255,220,0,.55)", 1);
+        }
+      };
+      const span = 4 * Math.abs(n[3]) + 1, step = span / 30;
+      for (let y = floorY; y <= floorY + 4 * Math.abs(floorY) + 0.2; y += Math.abs(floorY) / 3) seg([B[0] - t[0] * span, y, B[2] - t[2] * span], [B[0] + t[0] * span, y, B[2] + t[2] * span]);
+      for (let s = -span; s <= span; s += step) seg([B[0] + t[0] * s, floorY, B[2] + t[2] * s], [B[0] + t[0] * s, floorY + 4 * Math.abs(floorY), B[2] + t[2] * s]);
+    }
+    // Horizon.
+    const slope = room.rot[1] / room.rot[0];
+    line([-1, room.c[1] - slope * 1.5], [2, room.c[1] + slope * 1.5], "rgba(255,255,255,.5)", 1, [6, 6]);
+  }
+  // Lines.
+  state.lines.forEach((l, i) => {
+    if (l.cls === "off" && !$("#showOff").checked && i !== hover) return;
+    const s = l.seg, col = CLASS_COLOR[l.cls];
+    if ($("#showVP").checked && room && (l.cls === "a" || l.cls === "b")) {
+      const vp = l.cls === "a" ? room.report.vpA : room.report.vpB;
+      line([(s[0] + s[2]) / 2, (s[1] + s[3]) / 2], vp, l.cls === "a" ? "rgba(255,64,64,.3)" : "rgba(48,160,255,.3)", 1);
+    }
+    line([s[0], s[1]], [s[2], s[3]], col, i === hover ? 4 : l.src === "drawn" ? 2.5 : 1.8, l.cls === "off" ? [4, 4] : []);
+  });
+  // Walls' anchors, floor, ceiling.
+  if (room) {
+    const slope = room.rot[1] / room.rot[0];
+    state.walls.forEach((w, i) => { const v = room.c[1] + slope * (w.u - 0.5); line([w.u, v - 0.06], [w.u, v + 0.06], "#ffd54a", 2); label([w.u, v - 0.06], `${i + 1}: ${w.dir}`, "#ffd54a"); });
+  }
+  if (state.floor) { dot(state.floor, "#ff9800"); label(state.floor, "floor", "#ff9800"); }
+  state.ceiling.forEach((p, i) => { dot(p, "#ff80c0"); label(p, `ceiling ${i + 1}`, "#ff80c0"); });
+  // Lights of the shown photo.
+  const t = lightsTime(), Ls = state.lights[t];
+  Ls.emitters.forEach((e, i) => {
+    const [a, b] = [toScreen([e.rect[0], e.rect[1]]), toScreen([e.rect[2], e.rect[3]])];
+    ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 1.5; ctx.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+    label([e.rect[0], e.rect[1] + 0.012], `${i + 1} ${e.type} ×${e.gain}`, "#00e5ff");
+  });
+  Ls.lamps.forEach((l, i) => { dot(l.uv, "#fff176", 6); label(l.uv, `lamp ${i + 1}`, "#fff176"); });
+  if (room) { const k = keyLightFor(t, solved); dot(k.uv, Ls.key ? "#ff5252" : "#ff8a80", 4); label(k.uv, Ls.key ? "key" : "key (auto)", "#ff8a80"); }
+  Ls.windows.forEach(w => line([w.edge[0], w.edge[1]], [w.edge[0], w.edge[2]], "#80ffea", 3));
+  // In progress.
+  if (drag && drag.cur && mode === "draw-line") line(drag.u, drag.cur, CLASS_COLOR[$("#drawClass").value], 2, [5, 4]);
+  if (drag && drag.cur && mode === "draw-emitter") { const [a, b] = [toScreen(drag.u), toScreen(drag.cur)]; ctx.strokeStyle = "#00e5ff"; ctx.setLineDash([5, 4]); ctx.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]); ctx.setLineDash([]); }
+  if (pending && pending.top) dot(pending.top, "#80ffea");
+}
+
+// ---------------------------------------------------------------- interaction
+const HINTS = {
+  pan: "", "draw-line": "Drag along a straight edge; it snaps to the edge under it.",
+  "add-wall": "Click the new wall's corner with the wall it joins (the first wall: anywhere on it).",
+  floor: "Click where a wall meets the floor (the foot of a baseboard).",
+  ceiling: "Click where the ceiling meets a wall.",
+  "draw-emitter": "Drag a rectangle around a light source.",
+  lamp: "Click the lamp (its bulb or shade).", key: "Click the main light (window or lamp).",
+  "win-edge": "Click the top of the window's vertical edge, then its bottom."
+};
+function setMode(m) {
+  mode = m; pending = null;
+  document.querySelectorAll("[data-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+  $("#hint").textContent = HINTS[mode] || "";
+  cv.style.cursor = mode === "pan" ? "grab" : "crosshair";
+  draw();
+}
+document.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => setMode(mode === b.dataset.mode ? "pan" : b.dataset.mode)));
+
+let drag = null, space = false;
+const posOf = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+function nearestLine(x, y) {
+  let best = -1, bd = 8;
+  state.lines.forEach((l, i) => {
+    if (l.cls === "off" && !$("#showOff").checked) return;
+    const a = toScreen([l.seg[0], l.seg[1]]), b = toScreen([l.seg[2], l.seg[3]]);
+    const dx = b[0] - a[0], dy = b[1] - a[1], t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+    const d = Math.hypot(a[0] + t * dx - x, a[1] + t * dy - y);
+    if (d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+cv.addEventListener("pointerdown", e => {
+  cv.setPointerCapture(e.pointerId);
+  const p = posOf(e);
+  drag = { x: p[0], y: p[1], u: toImage(...p), moved: false, pan: e.button !== 0 || space || mode === "pan", view0: { ...view } };
+});
+cv.addEventListener("pointermove", e => {
+  const p = posOf(e);
+  if (!drag) { const h = mode === "pan" ? nearestLine(...p) : -1; if (h !== hover) { hover = h; draw(); } return; }
+  if (Math.hypot(p[0] - drag.x, p[1] - drag.y) > 3) drag.moved = true;
+  if (drag.pan) { view.cx = drag.view0.cx - (p[0] - drag.x) / side(); view.cy = drag.view0.cy - (p[1] - drag.y) / side(); }
+  else drag.cur = toImage(...p);
+  draw();
+});
+cv.addEventListener("pointerup", e => {
+  const d = drag; drag = null;
+  if (!d) return;
+  const p = toImage(...posOf(e));
+  if (d.pan) { if (!d.moved && mode === "pan") { const i = nearestLine(d.x, d.y); if (i >= 0) cycle(i); } draw(); return; }
+  if (mode === "draw-line" && d.moved) addLine([...d.u, ...p], $("#drawClass").value);
+  else if (mode === "draw-emitter" && d.moved) addEmitter([Math.min(d.u[0], p[0]), Math.min(d.u[1], p[1]), Math.max(d.u[0], p[0]), Math.max(d.u[1], p[1])]);
+  else if (!d.moved) clickAt(p);
+  draw();
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const p = posOf(e), before = toImage(...p);
+  view.z = Math.max(0.5, Math.min(40, view.z * Math.exp(-e.deltaY * 0.0015)));
+  const after = toImage(...p); view.cx += before[0] - after[0]; view.cy += before[1] - after[1];
+  draw();
+}, { passive: false });
+addEventListener("keydown", e => {
+  if (e.target.matches("input, select, textarea")) return;
+  if (e.key === " ") { space = true; e.preventDefault(); }
+  if (e.key === "Escape") setMode("pan");
+  if (hover >= 0) {
+    const k = e.key.toLowerCase(), map = { a: "a", b: "b", v: "v", s: "s", x: "off" };
+    if (map[k]) { state.lines[hover].cls = map[k]; changed(); }
+    if (e.key === "Delete" || e.key === "Backspace") { state.lines.splice(hover, 1); hover = -1; changed(); }
+  }
+});
+addEventListener("keyup", e => { if (e.key === " ") space = false; });
+
+function cycle(i) {
+  const order = ["a", "b", "v", "off"], l = state.lines[i];
+  l.cls = order[(order.indexOf(l.cls) + 1) % order.length];
+  changed();
+}
+function addLine(seg, cls) {
+  let s = seg, note = "";
+  if (gray) {
+    // A crisp edge first; then a soft one (a corner seen as a change of
+    // shading), which needs the 40-point consistency check to hold.
+    let r = SC.snapLine(gray, graySize, graySize, seg);
+    if (!r || r.rms >= 1.5) { r = SC.snapLine(gray, graySize, graySize, seg, 10, 1.5); if (r && (r.rms >= 1 || r.points < 24)) r = null; if (r) note = " (snapped to a soft edge)"; }
+    if (r && r.rms < 1.5) s = r.seg; else note = " (no edge found: kept as drawn)";
+  }
+  state.lines.push({ id: nextId++, seg: s, cls, src: "drawn" });
+  $("#detectStatus").textContent = `Line added${note}.`;
+  changed();
+}
+function addEmitter(rect) {
+  const t = lightsTime(), type = t === "day" ? "window" : "bulb";
+  state.lights[t].emitters.push({ type, rect, ...TYPE_DEFAULTS[type] });
+  changed();
+}
+function clickAt(p) {
+  const room = solved && solved.ok ? solved.room : null, t = lightsTime(), Ls = state.lights[t];
+  const toHorizon = ([u, v]) => { if (!room) return u; const slope = room.rot[1] / room.rot[0]; return u - slope * (v - (room.c[1] + slope * (u - 0.5))); };
+  if (mode === "add-wall") {
+    const i = state.walls.length;
+    state.walls.push({ id: wallId(i), dir: $("#wallDir").value, u: toHorizon(p), joins: i ? state.walls[i - 1].id : null });
+    setMode("pan");
+  } else if (mode === "floor") { state.floor = p; setMode("pan"); }
+  else if (mode === "ceiling") { if (state.ceiling.length >= 3) state.ceiling = []; state.ceiling.push(p); if (state.ceiling.length === 1 || state.ceiling.length === 3) setMode("pan"); }
+  else if (mode === "lamp") {
+    if (Ls.lamps.length >= SM.MAX_LAMPS) { alert(`At most ${SM.MAX_LAMPS} lamps.`); return; }
+    const inside = Ls.emitters.findIndex(e => p[0] >= e.rect[0] && p[0] <= e.rect[2] && p[1] >= e.rect[1] && p[1] <= e.rect[3]);
+    Ls.lamps.push({ uv: p, emitter: inside >= 0 ? inside : null, offsetCm: 30, sizeCm: null, emits: "all" });
+    setMode("pan");
+  } else if (mode === "key") { Ls.key = { uv: p, offsetCm: 0 }; setMode("pan"); }
+  else if (mode === "win-edge") {
+    if (!pending) { pending = { top: p }; draw(); return; }
+    if (!room) { alert("Solve the room first."); setMode("pan"); return; }
+    const u = (pending.top[0] + p[0]) / 2, wall = SM.wallAt(room, [u, (pending.top[1] + p[1]) / 2]);
+    Ls.windows.push({ edge: [u, Math.min(pending.top[1], p[1]), Math.max(pending.top[1], p[1])], wall, widthM: 1.2, startM: 0, toward: "camera", radiance: 10 });
+    setMode("pan");
+  }
+  changed();
+}
+
+// ---------------------------------------------------------------- detection
+async function detectLines() {
+  if (!imgs.day) { $("#detectStatus").textContent = "Load the day photo first."; return; }
+  $("#detectStatus").textContent = "Detecting…";
+  await new Promise(r => setTimeout(r, 20));
+  const n = 1000, d = pixels(imgs.day, n);
+  const segs = SC.detectSegments(SC.gray(d, n, n), n, n).map(s => [s.x1 / n, s.y1 / n, s.x2 / n, s.y2 / n]);
+  const weights = imgs.mask ? SC.wallWeights(segs, pixels(imgs.mask, n), n, n) : undefined;
+  const c = SC.classifyLines(segs, { weights });
+  const cls = new Map([...c.verticals.map(s => [s, "v"]), ...c.a.map(s => [s, "a"]), ...c.b.map(s => [s, "b"])]);
+  state.lines = state.lines.filter(l => l.src === "drawn").concat(segs.map(s => ({ id: nextId++, seg: s, cls: cls.get(s) || "off", src: "auto" })));
+  $("#detectStatus").textContent = `${segs.length} lines: ${c.a.length} a, ${c.b.length} b, ${c.verticals.length} vertical.` +
+    (c.warnings.length ? " " + c.warnings.join(" ") : "") + " Check the grid: the room's second direction often has few lines.";
+  changed();
+}
+async function detectLightsNow() {
+  const t = lightsTime(), img = imgs[t];
+  if (!img) { alert(`Load the ${t} photo first.`); return; }
+  const n = 800, d = pixels(img, n), m = imgs.mask ? pixels(imgs.mask, n) : null;
+  const found = SC.detectLights(d, m, n, n, t, { night: t === "day" && imgs.night ? pixels(imgs.night, n) : undefined });
+  const Ls = state.lights[t];
+  Ls.emitters = found.map(f => ({ type: f.type, rect: f.rect, threshold: f.threshold, gain: f.gain }));
+  Ls.lamps = t === "night" ? found.map((f, i) => ({ f, i })).filter(x => x.f.type !== "window").slice(0, SM.MAX_LAMPS)
+                              .map(({ f, i }) => ({ uv: f.centroid, emitter: i, offsetCm: f.type === "shade" ? 25 : 30, sizeCm: null, emits: "all" })) : [];
+  changed();
+}
+
+// ---------------------------------------------------------------- panel tables
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function renderTables() {
+  const room = solved && solved.ok ? solved.room : null;
+  const wallOpts = sel => (room ? room.planes.filter(p => p.kind === "wall").map(p => p.id) : state.walls.map(w => w.id))
+    .map(id => `<option${id === sel ? " selected" : ""}>${esc(id)}</option>`).join("");
+  $("#wallTable tbody").innerHTML = state.walls.map((w, i) => `<tr>
+    <td>${i + 1} (${esc(w.id)})</td>
+    <td><select data-wall="${i}" data-k="dir">${["a", "b", "a+b", "a-b"].map(d => `<option${d === w.dir ? " selected" : ""}>${d}</option>`).join("")}</select></td>
+    <td>${i ? `<select data-wall="${i}" data-k="joins">${state.walls.slice(0, i).map(o => `<option${o.id === w.joins ? " selected" : ""}>${esc(o.id)}</option>`).join("")}</select>` : "(anchor)"}</td>
+    <td>${w.u.toFixed(3)}</td><td><button data-delwall="${i}">Remove</button></td></tr>`).join("");
+  const t = lightsTime(), Ls = state.lights[t];
+  $("#emitTable tbody").innerHTML = Ls.emitters.map((e, i) => `<tr><td>${i + 1}</td>
+    <td><select data-emit="${i}" data-k="type">${Object.keys(TYPE_DEFAULTS).map(k => `<option${k === e.type ? " selected" : ""}>${k}</option>`).join("")}</select></td>
+    <td><input type="number" step="0.5" min="1" data-emit="${i}" data-k="gain" value="${e.gain}"></td>
+    <td><input type="number" step="0.05" min="0" max="1" data-emit="${i}" data-k="threshold" value="${e.threshold}"></td>
+    <td><button data-delemit="${i}">Remove</button></td></tr>`).join("") || `<tr><td colspan="5">No emitters in the ${t} photo.</td></tr>`;
+  $("#lampTable tbody").innerHTML = Ls.lamps.map((l, i) => {
+    const r = room ? lampRadius(l, Ls, solved) * solved.mpu * 200 : null;
+    return `<tr><td>${i + 1}${l.emitter != null ? ` (emitter ${l.emitter + 1})` : ""}</td>
+    <td><input type="number" step="5" min="1" data-lamp="${i}" data-k="offsetCm" value="${l.offsetCm}"></td>
+    <td><input type="number" step="1" min="1" data-lamp="${i}" data-k="sizeCm" value="${l.sizeCm ?? ""}" placeholder="${r ? r.toFixed(0) : ""}"></td>
+    <td><select data-lamp="${i}" data-k="emits">${Object.keys(EMITS).map(k => `<option${k === l.emits ? " selected" : ""}>${k}</option>`).join("")}</select></td>
+    <td><button data-dellamp="${i}">Remove</button></td></tr>`; }).join("") || `<tr><td colspan="5">No lamps in the ${t} photo.</td></tr>`;
+  $("#winTable tbody").innerHTML = Ls.windows.map((w, i) => `<tr>
+    <td><select data-win="${i}" data-k="wall">${wallOpts(w.wall)}</select></td>
+    <td><input type="number" step="0.1" min="0.1" data-win="${i}" data-k="widthM" value="${w.widthM}"></td>
+    <td><input type="number" step="0.1" min="0" data-win="${i}" data-k="startM" value="${w.startM}"></td>
+    <td><select data-win="${i}" data-k="toward"><option${w.toward === "camera" ? " selected" : ""}>camera</option><option${w.toward === "away" ? " selected" : ""}>away</option></select></td>
+    <td><input type="number" step="0.5" min="1" data-win="${i}" data-k="radiance" value="${w.radiance}"></td>
+    <td><button data-delwin="${i}">Remove</button></td></tr>`).join("") || `<tr><td colspan="6">None.</td></tr>`;
+  $("#keyStatus").textContent = Ls.key ? `set at (${Ls.key.uv.map(v => v.toFixed(3)).join(", ")})` : "automatic";
+}
+document.addEventListener("change", e => {
+  const el = e.target, d = el.dataset, num = el.type === "number", val = num ? (el.value === "" ? null : +el.value) : el.value;
+  const Ls = state.lights[lightsTime()];
+  if (d.wall != null) state.walls[+d.wall][d.k] = val;
+  else if (d.emit != null) { const em = Ls.emitters[+d.emit]; em[d.k] = val; if (d.k === "type") Object.assign(em, TYPE_DEFAULTS[val]); }
+  else if (d.lamp != null) Ls.lamps[+d.lamp][d.k] = val;
+  else if (d.win != null) Ls.windows[+d.win][d.k] = val;
+  else return;
+  changed();
+});
+document.addEventListener("click", e => {
+  const d = e.target.dataset, Ls = state.lights[lightsTime()];
+  if (d.delwall != null) {
+    const i = +d.delwall, id = state.walls[i].id;
+    state.walls.splice(i, 1);
+    state.walls.forEach((w, k) => { if (w.joins === id) w.joins = k ? state.walls[k - 1].id : null; });
+    if (state.walls[0]) state.walls[0].joins = null;
+  } else if (d.delemit != null) {
+    const i = +d.delemit; Ls.emitters.splice(i, 1);
+    Ls.lamps.forEach(l => { if (l.emitter === i) l.emitter = null; else if (l.emitter > i) l.emitter--; });
+  } else if (d.dellamp != null) Ls.lamps.splice(+d.dellamp, 1);
+  else if (d.delwin != null) Ls.windows.splice(+d.delwin, 1);
+  else return;
+  changed();
+});
+
+// ---------------------------------------------------------------- wiring
+let saveTimer = 0;
+function changed() {
+  solved = solve();
+  $("#solveReport").textContent = reportText(solved);
+  renderTables();
+  draw();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => store.save("calibState", { state, nextId }).catch(() => {}), 400);
+}
+$("#viewTabs").addEventListener("click", e => {
+  const b = e.target.closest("[data-view]"); if (!b) return;
+  viewKey = b.dataset.view;
+  document.querySelectorAll("#viewTabs [data-view]").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+  renderTables(); draw();
+});
+for (const id of ["showWalls", "showGrid", "showVP", "showOff"]) $("#" + id).addEventListener("change", draw);
+$("#fit").addEventListener("click", () => { view = { z: 1, cx: 0.5, cy: 0.5 }; draw(); });
+$("#fileDay").addEventListener("change", e => e.target.files[0] && setFile("day", e.target.files[0]));
+$("#fileNight").addEventListener("change", e => e.target.files[0] && setFile("night", e.target.files[0]));
+$("#fileMask").addEventListener("change", e => e.target.files[0] && (maskTint = null, setFile("mask", e.target.files[0])));
+$("#name").addEventListener("input", e => { state.name = e.target.value; changed(); });
+$("#prefix").addEventListener("input", e => { state.prefix = e.target.value; changed(); });
+$("#camH").addEventListener("change", e => { state.cameraHeightM = +e.target.value || 1.2; changed(); });
+$("#detect").addEventListener("click", detectLines);
+$("#clearAuto").addEventListener("click", () => { state.lines = state.lines.filter(l => l.src === "drawn"); changed(); });
+$("#clearCeil").addEventListener("click", () => { state.ceiling = []; changed(); });
+$("#detectLights").addEventListener("click", detectLightsNow);
+$("#autoKey").addEventListener("click", () => { state.lights[lightsTime()].key = null; changed(); });
+
+function useStatus(text, isError) { const p = $("#useStatus"); p.textContent = text; p.className = isError ? "warn" : ""; }
+$("#openViz").addEventListener("click", async () => {
+  try {
+    const config = buildConfig(), f = state.files;
+    await store.save("customRoom", { config, blobs: { day: f.day.blob, night: f.night.blob, mask: f.mask.blob } });
+    useStatus("Saved. Opening the visualizer…");
+    open("sheenSceneRenderer.html?custom", "_blank");
+  } catch (e) { useStatus(e.message, true); }
+});
+$("#copyCfg").addEventListener("click", async () => {
+  try {
+    const text = JSON.stringify(buildConfig(), null, 2), ta = $("#cfgOut");
+    ta.hidden = false; ta.value = text;
+    try { await navigator.clipboard.writeText(text); useStatus("Copied. Paste it into ROOMS in sheenSceneRenderer.html as a new entry, and copy the three images to the path above."); }
+    catch { useStatus("Select the text below and copy it."); }
+  } catch (e) { useStatus(e.message, true); }
+});
+$("#downloadCfg").addEventListener("click", () => {
+  try {
+    const blob = new Blob([JSON.stringify(buildConfig(), null, 2)], { type: "application/json" });
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: (state.name || "room").replace(/\W+/g, "-") + ".json" });
+    a.click(); URL.revokeObjectURL(a.href);
+  } catch (e) { useStatus(e.message, true); }
+});
+$("#loadCfgBtn").addEventListener("click", () => $("#loadCfg").click());
+$("#loadCfg").addEventListener("change", async e => {
+  const file = e.target.files[0]; if (!file) return;
+  try {
+    const cfg = JSON.parse(await file.text());
+    if (!cfg._calib || !cfg._calib.state) throw new Error("Not a config exported by this page (no _calib section).");
+    const files = state.files;
+    state = { ...initialState(), ...cfg._calib.state, files };
+    nextId = Math.max(0, ...state.lines.map(l => l.id)) + 1;
+    syncInputs(); changed();
+    useStatus("Loaded. Load the matching images if they aren't here already.");
+  } catch (err) { useStatus(err.message, true); }
+});
+$("#resetAll").addEventListener("click", async () => {
+  if (!confirm("Clear everything on this page (photos, lines, walls, lights)?")) return;
+  state = initialState(); for (const k in imgs) imgs[k] = null; gray = null; maskTint = null;
+  await store.remove("calibState"); syncInputs(); changed();
+});
+function syncInputs() { $("#name").value = state.name; $("#prefix").value = state.prefix; $("#camH").value = state.cameraHeightM; }
+
+// ---------------------------------------------------------------- start
+new ResizeObserver(layout).observe(cv);
+setMode("pan");
+try {
+  const saved = await store.load("calibState");
+  if (saved && saved.state) { state = { ...initialState(), ...saved.state }; nextId = saved.nextId || 1; await loadImages(); syncInputs(); }
+} catch (e) { console.warn("sheenCalibrate: couldn't restore the saved work", e); }
+changed();
+window.sheenCalibrate = { get state() { return state; }, set state(s) { state = s; }, solved: () => solved, buildConfig, setFile, loadImages, changed, detectLines, detectLightsNow, addLine, clickAt, setMode };
+</script>
+</body>
+</html>

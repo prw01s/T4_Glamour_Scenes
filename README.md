@@ -24,7 +24,8 @@ Then open:
 | http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side) |
 | http://localhost:8000/videoShaderRenderer.html | One room in a video whose light changes; every frame is repainted |
 | http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one): autoplay loop, time points, drag through the day |
-| http://localhost:8000/sheenSceneRenderer.html | One room by day and by night in Flat, Eggshell, Satin or Semi-gloss: reflections, sheen bands and the colour shift of each finish (see "Paint sheen" below; `?calib` draws the solved room geometry) |
+| http://localhost:8000/sheenSceneRenderer.html | Four rooms (chosen from a Scene list), each by day and by night in Flat, Eggshell, Satin or Semi-gloss: reflections, sheen bands and the colour shift of each finish (see "Paint sheen" below; `?calib` draws the solved room geometry) |
+| http://localhost:8000/sheenCalibrate.html | Calibrates a new room for the sheen page from a day photo, a night photo and a wall mask (see "Calibrating a new room" below); `sheenSceneRenderer.html?custom` then shows it |
 | http://localhost:8000/tests/ | Automated tests of the colour science and the shaders |
 
 Add `?nogl` to a page's address to see its fallback (plain photos / video).
@@ -41,7 +42,7 @@ original image, so only the walls change.
 shaderSceneRenderer.html ─ js/shaderSceneRender.js ─┐   tiles, rooms, fades, room switching
 videoShaderRenderer.html ─ js/videoShaderRender.js ─┤   video frames, frame-locked layers, paint fades
 day-to-night.html ──────── js/videoShaderRender.js ─┤   (one renderer per video, shared statistics)
-sheenSceneRenderer.html ── js/shaderSceneRender.js ─┤   (sheen mode) + js/sheenModel.js: sheens, camera
+sheenSceneRenderer.html ── js/shaderSceneRender.js ─┤   (sheen mode) + js/sheenModel.js: sheens, rooms, lamps
                            glsl/sheen.glsl          │   ENV + ENVDOWN passes, sheen code in RENDER
                            js/dayNightSequence.js   │   eased loop and moves, crossfades, scrubbing
                            js/tuningControls.js ────┤   Tinting algo, sliders (markup + wiring)
@@ -169,24 +170,106 @@ research, with sources and measurements, is in `docs/sheen-science.md`.
   85° sheen. A virtual ASTM D523 gloss meter puts them inside the MPI levels:
   60° GU 0.2 / 10.9 / 23.7 / 48.5, 85° 3.5 / 22.1 / 47.8 / 84.9 (G1, G3, G4,
   G5). The lobe's albedo uses exact Fresnel (n = 1.5) and Smith masking.
-* **Reflections are traced**: `solveCamera` recovers the camera (f ≈ 4530 px,
-  25°) and the two walls and floor from straight lines in the photo; for each
-  wall pixel, 16 directions drawn from the GGX lobe for that pixel's viewing
-  direction are traced to the other wall or the floor and read from an HDR
+* **Four scenes** (Scene list; `ROOMS` in the page): living room, living
+  room 2, deck and study, each with a day and a night photo. Every room's
+  geometry is measured lines in its photo (`?calib` overlays the result).
+* **Reflections are traced**: `solveRoom` recovers the camera (f from 848 px
+  / 99° on the deck to 4532 px / 25°) and up to 8 planes - walls at any of
+  4 directions, the floor and a ceiling - from straight lines in the photo;
+  for each wall pixel, 16 directions drawn from the GGX lobe for that
+  pixel's viewing direction are traced to the nearest plane and read from an HDR
   blur pyramid of the photo whose walls carry the new paint (filtered
   importance sampling), so reflections have the right blur and stretch.
   Window panes and bulbs are restored to light-source brightness with gains
-  from energy balance (×7, ×12), and show unpainted.
+  from energy balance (×5–7, ×12), and show unpainted. Lamps that stand
+  off the walls are lights in 3-D, calibrated from their own pixels.
 * **Glints** come from the wall's own texture (linear shape from shading
-  against each photo's key light), so they sit where real ones would.
+  against each photo's key light), so they sit where real ones would; a
+  gate drops texture that is only JPEG blocking.
 * Measured in the app (teal #607D84, back wall): off-highlight ΔL\* −0.9 /
   −1.5 / −2.1 (day) and −1.3 / −1.8 / −2.4 (night) for Eggshell / Satin /
   Semi-gloss, with chroma rising; in the window's reflection +13 / +20 / +29
   with chroma falling (the light's colour). docs/sheen-science.md §5A lists
-  what a second review corrected.
+  what a second review corrected and §5B the four-scene evaluation (wall
+  statistics per scene and the fixes it led to).
+* **Windows outside the photo** (`windows` in a room's lights;
+  `placeWindows`): rectangles on a room plane that reflected rays can reach.
+  The living room's two windows are located and measured in the reflections
+  in its framed prints' glass (radiance ×12 and ×7.7).
 
 `python3 -I tests/sheen_check.py` prints the gloss-meter readings and the
 colour shifts for sample paints, and fails if a sheen leaves its MPI band.
+
+## Your own room (upload in sheenSceneRenderer.html)
+
+The panel's **Your own room** box takes three files, by name: `day.jpg`,
+`night.jpg` and `mask.png` (black = wall), taken from the same spot. Choose
+or drop all three at once. They are cropped to their centre squares,
+calibrated automatically (`autoCalibrate` in `js/sheenCalib.js`), stored in
+the browser with the images (IndexedDB, `js/sheenCustomRoom.js`) and shown at
+once as **Your room**, in every sheen and colour. The current sheen and paint
+carry over (`?custom&sheen=…&paint=…`). The room stays in the scene list on
+later visits until *Remove this room*.
+
+The automatic calibration accepts every proposal of the calibration page:
+* the camera and walls from the photo's lines (an inside corner shows the
+  wall whose lines run to the right vanishing point on its left, so only the
+  corner's column is searched);
+* the floor where the mask's wall comes lowest without running off the
+  photo;
+* a camera 1.2 m above the floor;
+* the light sources and lamps.
+Uploads of a built-in room's own photos are recognised and get that room's
+measured calibration. A photo's EXIF focal length (35 mm equivalent), when
+recorded, fixes the camera's field of view. Measured against the built-in
+rooms (docs/sheen-science.md §8), fully automatic uploads differ from the
+preloaded rooms by ΔE 1.0-1.8 (living room 2) up to 3.3-5.7 (the deck: four
+walls and a sloped ceiling, which automatic layout doesn't find); about three
+quarters of that is geometry. When the lines give no plausible camera, a
+default room (one wall facing the camera, 60° field of view) is used: the colour shift and soft sheen still
+work, reflections are approximate. The status line says which. The camera
+from lines alone is often off (−54 % to +155 % in focal length on the built-in
+rooms), so *Refine the calibration* opens the calibration page with
+everything filled in. Uploading replaces any work in progress there.
+
+## Calibrating a new room (sheenCalibrate.html)
+
+The sheen shaders and `js/sheenModel.js` hold nothing specific to a photo:
+each room is a description - straight lines that give the camera, the walls,
+the light sources - in `ROOMS` in `sheenSceneRenderer.html`. The four built-in
+rooms were measured by hand. `sheenCalibrate.html` does it semi-automatically
+for new photos (square or centre-cropped; the same camera by day and night;
+a wall mask, black = wall; upright verticals, i.e. perspective-corrected):
+
+1. **Photos**: load the three images.
+2. **Camera lines**: *Detect lines* finds straight segments (`js/sheenCalib.js`:
+   a simplified LSD line detector) and sorts them into verticals and the two
+   horizontal directions at right angles (RANSAC for vanishing-point pairs on
+   a common horizon, long lines and lines along walls weighted most). Click a
+   line to change its type; draw missing ones - drawn lines snap to the edge
+   under them (sub-pixel, RANSAC through texture).
+3. **Walls**: add each wall (its direction, its corner with a wall already
+   placed), a floor point, optionally the ceiling. The room grid is drawn
+   live; the report gives the camera and its **uncertainty** (re-solved with
+   ±0.5 px line noise) and says which line family to strengthen.
+4. **Lights**: *Detect lights* proposes emitters - by day, regions bright in
+   the day photo and dark in the night photo (window glass; white objects
+   indoors stay lit at night); by night, bulbs (clipped cores) and lit
+   shades (partly clipped) - with lamps placed in front of them. Edit gains,
+   distances and sizes; optionally add windows outside the photo.
+5. **Use it**: *Open in the visualizer* stores the room and its images in the
+   browser (IndexedDB; `js/sheenCustomRoom.js`) and opens
+   `sheenSceneRenderer.html?custom`; *Copy config* / *Download JSON* give a
+   `ROOMS` entry to add to the page for good (copy the images to the path set
+   in step 1). Work in progress is kept between visits.
+
+How well it works on the four built-in rooms (docs/sheen-science.md §8):
+night lights are found as measured by hand (bulb clusters, the study's
+lamp); day windows mostly (the deck's only in part); the camera from
+detection alone is often wrong (the rooms' second direction has few lines -
+furniture outvotes it), so step 2 needs a look every time. With the lines
+checked and snapped, living room 2 came out at f = 4346 px against 4532 px by
+hand, inside the tool's own ±3.5 % uncertainty.
 
 ## Controls
 
@@ -245,10 +328,19 @@ transfer curves, Oklab, matrices, Display P3, colour temperature, the spectral
 paint fit, statistics and adaptation, and GPU tests of every model on small
 synthetic images (the swatch identity under white light, interreflection,
 mask-weighted blur, the detail layer, warm light, the sliders, P3 output).
-Sheen: the camera solver recovers a known camera; Flat equals v3's swatch;
+Calibration: the line detector finds a polygon's edges to 0.01 px, snapping
+recovers an edge through texture to 0.06 px, detection + solving recover a
+known camera (f within 2 %) from a cluttered line set, and light detection
+tells windows from white objects and bulbs from shades; the automatic walls
+find a corner between two line families on the correct sides; the automatic
+floor point skips furniture; the default room renders.
+Sheen: the room solver recovers a known camera and its walls; lamps sit on
+their pixel's ray; the texture gate drops JPEG blocking; Flat equals v3's swatch;
 each glossier sheen is darker and more saturated off-highlight (most for
 dark paints, < 1.5 L\* for off-white); reflected light adds the light's
-colour, not the paint's.
+colour, not the paint's; a lamp's highlight is neutral and sharpens and
+brightens from Flat to Semi-gloss; a window outside the photo is placed from
+its edge in the photo and reflected in its own colour.
 Results are listed on the page and in `window.testResults`.
 
 ## Editing notes
