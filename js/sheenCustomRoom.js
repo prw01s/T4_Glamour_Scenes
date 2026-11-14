@@ -3,7 +3,8 @@
  * sheenSceneRenderer.html (?custom): the room's config and its three images
  * (day, night, mask) are kept in IndexedDB, which stores image Blobs
  * directly (localStorage's ~5 MB would not hold them). Also keeps the
- * calibration page's work between visits.
+ * calibration page's work between visits, and the scene uploaded on
+ * shaderSceneRenderer.html (key "sceneUpload": its four images).
  *
  * Classic script: defines window.SheenCustomRoom.
  * ======================================================================== */

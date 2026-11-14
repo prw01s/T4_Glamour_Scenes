@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Room movie prototype</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  body { margin: 0; background: #1c1d1f; color: #e9e7e3; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { max-width: 1500px; margin: 0 auto; padding: 20px; display: grid; gap: 18px;
+         grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
+  .stage { position: relative; }
+  .stage canvas { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 4px; background: #000; }
+  .stage .notice { position: absolute; inset: 0; display: grid; place-items: center; font-size: 15px; color: #bbb; }
+  .stage .notice:empty { display: none; }
+  .panel { display: flex; flex-direction: column; gap: 20px; }
+  .panel h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .panel p { margin: 0; font-size: 13.5px; line-height: 1.5; color: #b9b6b0; }
+  fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  legend { padding: 0; margin-bottom: 8px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: #9b978f; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg label { position: relative; }
+  .seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .seg span { display: inline-block; padding: 7px 11px; border: 1px solid #4a4a4c; border-radius: 4px; font-size: 13.5px; cursor: pointer; }
+  .seg input:checked + span { background: #e9e7e3; color: #1c1d1f; border-color: #e9e7e3; }
+  .seg input:focus-visible + span { outline: 2px solid #e9e7e3; outline-offset: 2px; }
+  .chips { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .chips label { position: relative; }
+  .chips input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+  .chips span { display: block; aspect-ratio: 1; border-radius: 4px; box-shadow: inset 0 0 0 1px rgb(255 255 255 / .12); cursor: pointer; }
+  .chips input:checked + span { outline: 2px solid #e9e7e3; outline-offset: 2px; }
+  .chips input:focus-visible + span { outline: 2px solid #8ab4ff; outline-offset: 2px; }
+  .readout { font-size: 13.5px; color: #b9b6b0; font-variant-numeric: tabular-nums; }
+  .debug { font: 12px ui-monospace, monospace; color: #8f8b84; white-space: pre; }
+  @media (max-width: 900px) { .app { grid-template-columns: minmax(0, 1fr); } }
+</style>
+</head>
+<body>
+<main class="app">
+  <div class="stage">
+    <canvas id="movie" aria-label="The room, rendered live"></canvas>
+    <p class="notice" id="notice">Loading the room…</p>
+  </div>
+  <div class="panel">
+    <div>
+      <h1>Room movie prototype</h1>
+      <p>Rebuilt live on the GPU from light layers rendered in Blender: any paint, under any lighting. Every change
+        animates the light itself (docs/room-movie-plan.md).</p>
+    </div>
+    <fieldset id="time">
+      <legend>Time of day</legend>
+      <div class="seg">
+        <label><input type="radio" name="time" value="morning" checked><span>Morning</span></label>
+        <label><input type="radio" name="time" value="sunset"><span>Afternoon sunset</span></label>
+        <label><input type="radio" name="time" value="night"><span>Night</span></label>
+      </div>
+    </fieldset>
+    <fieldset id="lamp">
+      <legend>Lamp</legend>
+      <div class="seg">
+        <label><input type="radio" name="lamp" value="0" checked><span>Off</span></label>
+        <label><input type="radio" name="lamp" value="1800"><span>1800 K</span></label>
+        <label><input type="radio" name="lamp" value="2700"><span>2700 K</span></label>
+        <label><input type="radio" name="lamp" value="4000"><span>4000 K</span></label>
+        <label><input type="radio" name="lamp" value="6000"><span>6000 K</span></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Paint</legend>
+      <div class="chips" id="chips"></div>
+      <p class="readout" id="readout"></p>
+    </fieldset>
+    <p class="debug" id="debug" hidden></p>
+  </div>
+</main>
+<script src="js/paintPipeline.js"></script>
+<script src="js/roomMovie.js"></script>
+<script type="module">
+// A sample palette for the prototype (the full app has ~1500 paints, with measured
+// spectra; here each colour's spectrum is estimated from its hex value).
+const PAINTS = ["#3d3e40", "#e8decd", "#dee0de", "#cfdbde", "#d0ba94", "#a4aca6", "#96aab0",
+                "#8d9e97", "#7f6743", "#607d84", "#586168", "#2f3d4c"];
+const params = new URLSearchParams(location.search);
+const initial = { paint: PAINTS[0], time: "morning", lamp: 0 };
+document.getElementById("chips").innerHTML = PAINTS.map((hex, i) =>
+  `<label><input type="radio" name="paint" value="${hex}"${i === 0 ? " checked" : ""} aria-label="${hex.toUpperCase()}"><span style="background:${hex}"></span></label>`).join("");
+const readout = document.getElementById("readout");
+const showPaint = hex => { readout.textContent = `${hex.toUpperCase()} · LRV ${PaintPipeline.lrv(hex)}`; };
+showPaint(initial.paint);
+const notice = document.getElementById("notice");
+try {
+  const movie = await RoomMovie.create(document.getElementById("movie"), initial);
+  notice.textContent = "";
+  window.roomMovie = movie;
+  document.addEventListener("change", e => {
+    const t = e.target;
+    if (t.name === "time") movie.setTime(t.value);
+    else if (t.name === "lamp") movie.setLamp(+t.value);
+    else if (t.name === "paint") { movie.setPaint(t.value); showPaint(t.value); }
+  });
+  if (params.has("debug")) {
+    const el = document.getElementById("debug"); el.hidden = false;
+    setInterval(() => { const d = movie.debug; if (d) el.textContent = Object.entries(d).map(([k, v]) => `${k.padEnd(9)} ${typeof v === "number" ? v.toPrecision(4) : v}`).join("\n"); }, 250);
+  }
+} catch (err) {
+  console.error(err);
+  notice.textContent = "The room couldn't start: " + err.message;
+}
+</script>
+</body>
+</html>

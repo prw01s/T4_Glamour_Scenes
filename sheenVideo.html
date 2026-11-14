@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T4 Paint Sheen Visualization - Morning to Night</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  /* Shared tokens, base, tinting controls and chips: css/visualizer.css. This page's layout: */
+
+  /* ---- booth: the film and its timeline on the left, the panel on the right -
+     The film is as large as the window allows - the width left beside the
+     panel, and a height that keeps the timeline on screen - but never wider
+     than the video's own 1920 px. */
+  .booth {
+    --panel: 380px;
+    --timeline-h: 104px;
+    --film-w: min(1920px,
+                  100vw - var(--panel) - 3 * var(--pad),
+                  (100vh - var(--timeline-h) - 2 * var(--pad)) * 16 / 9);
+    display: grid;
+    grid-template-columns: var(--film-w) var(--panel);
+    justify-content: center;
+    align-items: start;
+    gap: var(--pad);
+    min-height: 100vh;
+    min-height: 100svh;
+    padding: var(--pad);
+    background: var(--booth);
+  }
+  @supports (height: 100svh) {
+    .booth { --film-w: min(1920px, 100vw - var(--panel) - 3 * var(--pad), (100svh - var(--timeline-h) - 2 * var(--pad)) * 16 / 9); }
+  }
+  .booth > * { min-width: 0; }
+  .stage { display: flex; flex-direction: column; gap: 16px; }
+  .notice {
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 14px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+  }
+  .notice:empty { display: none; }
+  .notice b { font-weight: 600; }
+  .notice a { color: inherit; }
+
+  /* ---- film: two copies of the video (forward, backward), as day-to-night.html */
+  .film {
+    position: relative;
+    isolation: isolate;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 3px;
+    overflow: hidden;
+    background: #DADADA;
+  }
+  /* One track per copy. js/dayNightSequence.js puts the active track on top
+     (z-index 2) and fades it in when it changes. */
+  .film__track { position: absolute; inset: 0; }
+  .film__source, .film__paint, .film__copy {
+    position: absolute; inset: 0;
+    display: block; width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  /* Inside a track: the painted frames cover the source video, and on top a
+     masked copy of the same frame keeps everything that isn't wall. Without
+     .is-painted (a failure, or ?nogl) only the plain source video shows. */
+  .film__paint { opacity: 0; transition: opacity 360ms cubic-bezier(.2, 0, 0, 1); }
+  .is-painted .film__paint { opacity: 1; }
+  .film__copy { display: none; }
+  .is-painted .film__copy {
+    display: block;
+    mask-image: var(--mask);
+    mask-repeat: no-repeat;
+    mask-position: center;
+    mask-size: 100% 100%;
+    mask-mode: luminance;
+  }
+  @media (prefers-reduced-motion: reduce) { .film__paint { transition: none; } }
+
+  /* ---- timeline (as day-to-night.html) -------------------------------------- */
+  .timeline { min-width: 0; }
+  .timeline__label { display: block; margin-bottom: 10px; font-size: 14px; color: var(--slate); font-weight: 700; }
+  .timeline__row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 20px; }
+  /* The track: click a point or anywhere on it, or drag along it. --p is the
+     film's position (0 = morning .. 1 = night); the fill and the playhead
+     follow it with transforms only (no layout on every frame). */
+  .timeline__track {
+    --p: 0;
+    position: relative;
+    flex: 1 1 280px;
+    min-width: 260px;         /* Morning and Afternoon are 20 % apart: their labels stay clear */
+    height: 56px;
+    margin-inline: 34px;      /* room for the end labels, which centre on their stops */
+    container-type: inline-size;   /* 100cqi = the track's width, for the playhead */
+    cursor: pointer;
+    touch-action: pan-y;      /* horizontal drags scrub; vertical ones still scroll the page */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .timeline.is-scrubbing .timeline__track { cursor: grabbing; }
+  .timeline__rail, .timeline__fill {
+    position: absolute; left: 0; right: 0; top: 14px; height: 4px; border-radius: 2px;
+  }
+  .timeline__rail { background: var(--rule); }
+  .timeline__fill { background: var(--graphite); transform-origin: left center; transform: scaleX(var(--p)); }
+  .timeline__playhead {
+    position: absolute; top: 8px; left: -8px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--graphite);
+    box-shadow: 0 0 0 3px var(--booth);
+    transform: translateX(calc(var(--p) * 100cqi));
+    z-index: 1;
+    pointer-events: none;     /* the track handles the pointer; the playhead is the keyboard slider */
+  }
+  .timeline__playhead:focus-visible { outline: 2px solid var(--graphite); outline-offset: 3px; }
+  .timeline__stop {
+    position: absolute; top: 0;
+    transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center;
+    min-width: 56px;
+    cursor: pointer;
+  }
+  .timeline__dot { width: 32px; height: 32px; display: grid; place-items: center; }
+  .timeline__dot::before {
+    content: "";
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--booth);
+    box-shadow: inset 0 0 0 2px var(--graphite);
+    transition: transform .15s;
+  }
+  .timeline__stop:hover .timeline__dot::before { transform: scale(1.2); }
+  .timeline__stop input:checked + .timeline__dot::before { background: var(--graphite); transform: scale(1.35); }
+  .timeline__stop input:focus-visible + .timeline__dot { outline: 2px solid var(--graphite); outline-offset: -2px; border-radius: 50%; }
+  .timeline__name { font-size: 14px; line-height: 18px; }
+  .timeline__stop input:checked ~ .timeline__name { font-weight: 600; }
+  /* Autoplay: a play / pause toggle. Pressed (dark, pause icon) while the
+     loop plays; unpressed (play icon) when stopped. */
+  .timeline__autoplay {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-top: 2px;
+    padding: 6px 14px 6px 10px;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: none; font: inherit; font-size: 14px; font-weight: 700; color: var(--graphite);
+    cursor: pointer;
+  }
+  .timeline__autoplay:hover { border-color: var(--graphite); }
+  .timeline__autoplay[aria-pressed="true"] { background: var(--graphite); border-color: var(--graphite); color: var(--booth); }
+  .timeline__autoplay:focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .timeline__icon { width: 12px; height: 12px; fill: currentColor; }
+  .timeline__autoplay .icon-pause, .timeline__autoplay[aria-pressed="true"] .icon-play { display: none; }
+  .timeline__autoplay[aria-pressed="true"] .icon-pause { display: inline; }
+
+  /* ---- panel ------------------------------------------------------------------ */
+  .panel {
+    display: flex; flex-direction: column; gap: 26px;
+    position: sticky; top: var(--pad);
+    max-height: calc(100vh - 2 * var(--pad));
+    max-height: calc(100svh - 2 * var(--pad));
+    overflow-y: auto;
+    padding-right: 4px;       /* keeps focus rings clear of the scrollbar */
+  }
+  .panel__label { display: block; padding: 0; margin-bottom: 10px; font-size: 14px; color: var(--slate); }
+
+  /* Sheen Selector: one card per sheen level, each with its own degree slider. */
+  .sheens__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .sheen {
+    padding: 10px 14px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: rgb(255 255 255 / .35);
+    transition: border-color .15s, background-color .15s;
+  }
+  .sheen:hover { border-color: var(--slate); }
+  .sheen:has(.sheen__radio:checked) { border-color: var(--graphite); background: #fff; box-shadow: inset 0 0 0 1px var(--graphite); }
+  .sheen__pick { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .sheen__dot {
+    flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
+    box-shadow: inset 0 0 0 2px var(--graphite);
+  }
+  .sheen__radio:checked + .sheen__dot { background: radial-gradient(circle, var(--graphite) 0 4px, transparent 4.5px); }
+  .sheen__radio:focus-visible + .sheen__dot { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .sheen__name { flex: 1 1 auto; font-weight: 600; }
+  .sheen__degree { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--slate); }
+  .sheen__slider { display: block; width: 100%; margin: 8px 0 0; accent-color: var(--graphite); cursor: pointer; }
+  .sheen__ends { display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--slate); }
+
+  /* Paint colors: three columns of swatch + hex */
+  .swatches { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; }
+  .swatches .chip-option { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 2px 0; }
+  .swatches .chip { flex: 0 0 auto; width: 34px; height: 34px; }
+  .swatch__text { display: flex; flex-direction: column; line-height: 1.2; }
+  .swatch__hex { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .swatch__lrv { font-size: 11.5px; color: var(--slate); }
+  .chip-option:hover .chip, .chip-option input:checked + .chip { transform: none; }
+
+  /* Contrast / Saturation (js/tuningControls.js) */
+  .controls { display: flex; flex-direction: column; gap: 22px; }
+
+  /* ---- narrow windows: the panel under the film -------------------------------- */
+  @media (max-width: 999.98px) {
+    .booth { grid-template-columns: minmax(0, 1fr); }
+    .panel { position: static; max-height: none; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<main class="booth" id="app">
+  <h1 class="vh">Paint sheen and color visualizer, morning to night</h1>
+
+  <section class="stage" aria-label="Room">
+    <div class="film" id="film"></div>
+    <p class="notice" id="notice" role="status"></p>
+
+    <fieldset class="timeline" id="timeline">
+      <legend class="vh">Select a time of day for the scene, or view in Autoplay mode.</legend>
+      <span class="timeline__label" aria-hidden="true">Select a time of day for the scene, or view in Autoplay mode.</span>
+      <div class="timeline__row">
+        <div class="timeline__track" id="timelineTrack">
+          <div class="timeline__rail"></div>
+          <div class="timeline__fill"></div>
+          <!-- The playhead doubles as a keyboard slider (arrow keys, Home, End) -->
+          <div class="timeline__playhead" id="playhead" role="slider" tabindex="0" aria-label="Time of day"
+            aria-valuemin="0" aria-valuemax="5" aria-valuenow="0" aria-valuetext="Morning"></div>
+        </div>
+        <button class="timeline__autoplay" type="button" id="autoplay" aria-pressed="false">
+          <svg class="timeline__icon" viewBox="0 0 12 12" aria-hidden="true">
+            <path class="icon-play" d="M2 1 L11 6 L2 11 Z"/>
+            <path class="icon-pause" d="M2 1 H5 V11 H2 Z M7 1 H10 V11 H7 Z"/>
+          </svg>
+          <span>Autoplay</span>
+        </button>
+      </div>
+      <!-- Spoken updates: where the film is, and autoplay on / paused -->
+      <p class="vh" id="timeStatus" aria-live="polite"></p>
+    </fieldset>
+  </section>
+
+  <aside class="panel" aria-label="Paint options">
+    <fieldset class="sheens" id="sheens">
+      <legend class="panel__label">Sheen</legend>
+      <ul class="sheens__list" id="sheenList"></ul>
+      <datalist id="degreeCentre"><option value="0"></option></datalist>
+    </fieldset>
+
+    <fieldset class="palette">
+      <legend class="panel__label">Paint color</legend>
+      <ul class="swatches" id="chips"></ul>
+    </fieldset>
+
+    <!-- Contrast, Saturation: built by js/tuningControls.js (no tinting algo selector: v2 only) -->
+    <fieldset class="controls" id="controls"></fieldset>
+  </aside>
+</main>
+
+<script src="js/paintPipeline.js"></script>
+<script src="js/videoShaderRender.js"></script>
+<script src="js/tuningControls.js"></script>
+<script src="js/dayNightSequence.js"></script>
+<script src="js/sheenModel.js"></script>
+<script type="module">
+/* ==========================================================================
+ * Page setup for sheenVideo.html.
+ *
+ * One room from morning to night (images/videos/primary_hero_morning-to-
+ * night.mp4), its walls repainted in a chosen colour and sheen.
+ *
+ *   the film      js/dayNightSequence.js, as day-to-night.html: the timeline,
+ *                 autoplay, eased moves, scrubbing. The video runs morning ->
+ *                 night -> morning in one file (frame k mirrors frame 238 - k),
+ *                 so the two tracks are two copies of it: the forward copy
+ *                 plays its first half, the backward copy its second half
+ *                 (backwardEnd = 2 x span), and a move to an earlier time
+ *                 looks like the film playing in reverse.
+ *   the paint     js/videoShaderRender.js, one renderer per copy sharing one
+ *                 GPU pipeline and one set of whole-video statistics, with
+ *                 the Perceptual (v2) tinting model only.
+ *   the sheen     js/sheenModel.js + glsl/sheen.glsl, as sheenSceneRenderer.html
+ *                 (reflections traced through the room, the lamp's highlight,
+ *                 deeper colour away from them), here on top of v2 and on
+ *                 every video frame. The room's camera and walls come from
+ *                 the Blender reconstruction of this room (images/room_movie/
+ *                 scene.json, made by tools/roomMovie/build_scene.py).
+ *   the mask      images/masks/primary_hero_mask.png (tools/primaryHeroMask.html)
+ * ======================================================================== */
+
+if (!window.PaintPipeline || !window.VideoShaderRender || !window.TuningControls || !window.DayNightSequence || !window.SheenModel) {
+  document.getElementById("notice").textContent =
+    "Paint previews couldn't start because a file in the js folder didn't load. Check the js folder, then reload the page.";
+  throw new Error("sheenVideo: a script in js/ is missing");
+}
+const { createVideoRenderer } = window.VideoShaderRender;
+const { lrv, decodeSrgb } = window.PaintPipeline;
+const { SHEENS, SHEEN_ORDER, roomFromCamera, sheenJob } = window.SheenModel;
+
+// ---------------------------------------------------------------- config
+
+/** Paint swatches (those of sheenSceneRenderer.html), light to dark. */
+const PAINT_COLORS = ["#e8decd", "#dee0de", "#cfdbde", "#d0ba94", "#a4aca6", "#96aab0",
+                      "#8d9e97", "#7f6743", "#607d84", "#586168", "#2f3d4c"];
+const DEFAULT_PAINT = "#607d84";
+const DEFAULT_SHEEN = "eggshell";
+/** Each sheen's degree slider: -50 % .. +50 % (SheenModel.sheenAtDegree), snapping to 0 within SNAP. */
+const DEGREE = { min: -50, max: 50, snap: 3 };
+
+/**
+ * The scene. The video is 239 frames at 24 fps: morning (frame 0) to night
+ * (frame 119) and back to morning (frame 238), an exact mirror. `span` is
+ * the morning-to-night half; the backward copy shows morning at video time
+ * backwardEnd.
+ */
+const FPS = 24;
+const SCENE = {
+  src:  "images/videos/primary_hero_morning-to-night.mp4",
+  mask: "images/masks/primary_hero_mask.png",
+  room: "images/room_movie/scene.json",
+  label: "A room with a lamp and a window, from morning light to night",
+  width: 1920, height: 1080,
+  span: 119 / FPS, backwardEnd: 238 / FPS, fps: FPS,
+  autoplayRate: 1      // the video's own speed (eased down near morning and night, as day-to-night.html)
+};
+
+/** The time points, in seconds of the video. Night is the video's midpoint (the end of the morning-to-night half). */
+const TIME_POINTS = [
+  { key: "morning",   label: "Morning",   time: 0 },
+  { key: "afternoon", label: "Afternoon", time: 1 },
+  { key: "sunset",    label: "Sunset",    time: 3 },
+  { key: "night",     label: "Night",     time: SCENE.span }
+];
+
+/**
+ * What the walls' sheen reflects, by importance in this room:
+ *  1. the direct light on the walls - the sun (by night the moon) through
+ *     the window, the patches between the leaves' shadows. The frame shows
+ *     where it falls and how strong it is; its surface reflection is added
+ *     from that (directLight below; glsl/sheen.glsl directSpecular). The
+ *     camera sees the main wall 9-17 deg from the sun's mirror direction
+ *     near the corner, 20-30 deg further left: a glossy wall shines there.
+ *  2. the lamp, as a 3-D light (lampGeom below): its highlight on the walls.
+ *  3. the room as the frame shows it (the reflection environment), unboosted.
+ * The window's image is NOT boosted or extended beyond the frame: its
+ * reflected shapes, placed through the approximate reconstruction, didn't
+ * match the window and aren't what this room's walls show.
+ * The lamp's shade (an emitter with gain 1) stays in the environment as it is.
+ */
+const px = (x0, y0, x1, y1) => [x0 / SCENE.width, y0 / SCENE.height, x1 / SCENE.width, y1 / SCENE.height];
+const SHADE_RECT = [1005, 616, 1229, 696];               // the lamp's shade, video pixels
+
+// ---------------------------------------------------------------- the room
+
+/**
+ * The room's camera and planes, from the Blender reconstruction of this
+ * room (metres, Z up; main wall Y = 0, window wall X = 0; the camera solved
+ * from points measured on the frame, 6.6 px RMS at 1442 px wide). The two
+ * walls the camera sees, the floor, the ceiling, and the two walls behind
+ * the camera (so reflected rays find a plane in every direction).
+ */
+const sceneJson = await fetch(SCENE.room).then(r => r.json()).catch(() => null);
+if (!sceneJson) {
+  document.getElementById("notice").textContent = `Couldn't load ${SCENE.room}; open the page through the local server.`;
+  throw new Error("sheenVideo: no room geometry");
+}
+const R = sceneJson.room;
+const ROOM = roomFromCamera(
+  { pos: sceneJson.camera.pos, yaw: sceneJson.camera.yaw, fPx: sceneJson.camera.f_px,
+    horizonPx: sceneJson.image.horizon_y, width: sceneJson.image.width },
+  SCENE.height / SCENE.width,
+  [{ id: "main",   kind: "wall",    n: [0, 1, 0],  d: 0 },
+   { id: "window", kind: "wall",    n: [1, 0, 0],  d: 0 },
+   { id: "back",   kind: "wall",    n: [-1, 0, 0], d: -R.x },
+   { id: "side",   kind: "wall",    n: [0, -1, 0], d: -R.y },
+   { id: "floor",  kind: "floor",   n: [0, 0, 1],  d: 0 },
+   { id: "ceiling", kind: "ceiling", n: [0, 0, -1], d: -R.ceiling }]);
+
+/**
+ * The lamp as a 3-D light (calibrateLamps' "core" mode, measured per video
+ * frame): on the camera ray through the middle of its shade, at the
+ * reconstruction's lamp position; its intensity the shade's lit pixels
+ * (linear luminance >= LAMP.threshold) x one pixel's area at its depth x
+ * LAMP.gain (x5, as the sheen page's lit fabric shades: a lit shade is
+ * several times brighter than the frame shows). Glowing all around (an
+ * opal dome).
+ * Its RADIUS is that of a disc with the dome's lit area (measured in the same
+ * frame, ~65 px), not half the shade's width (112 px): the dome is a flat
+ * half-ellipse, 224 x 76 px, a third of that circle. A sphere light's
+ * reflection is its surface brightness I / (pi r^2) x Fresnel, so the
+ * oversized sphere spread the same light over 3x the area and its mirror
+ * image on the wall came out 3x too dim (the light it casts, I / d^2, is the
+ * same either way).
+ */
+const LAMP = { threshold: 0.5, gain: 5 };
+const lampGeom = (() => {
+  const u = (SHADE_RECT[0] + SHADE_RECT[2]) / 2 / SCENE.width, v = (SHADE_RECT[1] + SHADE_RECT[3]) / 2 / SCENE.width;
+  const q = [(u - ROOM.c[0]) / ROOM.f, -(v - ROOM.c[1]) / ROOM.f, 1];
+  const n = Math.hypot(...q), d = q.map(x => x / n);
+  const L = ROOM.toCamera([sceneJson.lamp.x, sceneJson.lamp.y, sceneJson.lamp.shade_z]);
+  const t = d[0] * L[0] + d[1] * L[1] + d[2] * L[2];           // the ray's point nearest the reconstruction's lamp
+  const pos = d.map(x => x * t);
+  const pxArea = (pos[2] / ROOM.f / SCENE.width) ** 2;          // one video pixel's area at that depth
+  const pxSize = pos[2] / ROOM.f / SCENE.width;                 // one video pixel's width at that depth
+  return { pos, pxArea, pxSize };
+})();
+
+/**
+ * The cabinet top, a surface the walls reflect where they meet it (the
+ * sharpest reflections a glossy wall shows are of what touches it: the lamp's
+ * base, the bowl, the counter's edge). Without it, rays from the wall just
+ * above the counter went on to the floor plane and read the cabinet doors.
+ * Fitted to the frame: its back edge, measured on the mask (x 1150-1700), meets
+ * the window wall at 0.813 m at every point (the reconstruction assumed
+ * 0.83); 0.5 m deep (its front edge reads 0.46-0.60 m: the reconstruction's
+ * wall angle is slightly off there, which matters only for rays grazing the
+ * lip). It runs from the room corner along the window wall to beyond the
+ * frame, and is its own source: a ray that reaches it reads the frame where
+ * that point of the counter is seen.
+ */
+const CABINET_TOP = (() => {
+  const z = 0.813, depth = 0.5, length = 1.95;
+  const O = ROOM.toCamera([0, 0, z]), A = ROOM.toCamera([0, length, z]), B = ROOM.toCamera([depth, 0, z]);
+  const r = { O, U: A.map((v, i) => v - O[i]), V: B.map((v, i) => v - O[i]) };
+  return { ...r, source: r, L: [1, 1, 1] };
+})();
+
+/**
+ * The direct light (sun, moon) per scene frame (0..119): its direction, from
+ * the reconstruction's sun keys (images/room_movie/scene.json: the morning
+ * sun solved from the frame's sun patch, a midday and a sunset position,
+ * the moon), followed through the film - morning at frame 0, mid at 36
+ * (1.5 s), sunset at 72 (3 s), the moon from 100 (4.2 s); directions
+ * interpolated between keys - and the wall's ambient level in that frame:
+ * the 15th percentile of the main wall's light (max channel, linear) over
+ * x 40-760, y 40-760, away from the lamp. Below it the wall is in the
+ * leaves' shade; above it, lit.
+ */
+/**
+ * The most the sun's sheen may add to a sunlit patch, as a share of the
+ * paint's own sunlit radiance (glsl/sheen.glsl directSpecular). Physically
+ * the glare near the corner reaches 2-4x the paint's diffuse light, which on
+ * this display-referred frame clips the patches toward white and reads as
+ * more sunlight. Only the SMOOTH sheen is capped; the texture's glints on
+ * top keep their full contrast (glossSheen x textureGain in glsl/sheen.glsl),
+ * as the photo page's glints. Matched to the photo page (Semi-gloss vs Flat,
+ * wall pixels: its day p90 +83 %, p99 +466 %): here 2.0 gives day p90 +123 %,
+ * p99 +254 %. The lamp's sheen is capped the same way.
+ */
+const SUN_SHEEN_HEADROOM = 2.0;
+/**
+ * The sheen of the lamp-lit wall: where the lamp's light falls (its modelled
+ * light on the wall, which matches the frame: §5C energy check), the finish
+ * shines in proportion to that light and to its gloss - each sheen's 60 deg
+ * reading on the virtual gloss meter (tests/sheen_check.py: flat 0.2,
+ * eggshell 10.9, satin 23.7, semi-gloss 48.4 GU), x the degree slider - x
+ * LIT_SHEEN_GAIN. Seen from this camera the lamp's true mirror highlight lands
+ * at x ~720, away from the light it casts around itself, so a highlight alone
+ * can't show the lit wall's gloss. The gain: semi-gloss adds ~0.48 of the
+ * lamp's light on a white wall, about twice the teal's own lamp-lit light,
+ * with the texture's glints toward the lamp.
+ */
+const GLOSS_60 = { flat: 0.2, eggshell: 10.9, satin: 23.7, semigloss: 48.4 };
+const LIT_SHEEN_GAIN = 1.0;
+const SUN_KEYS = [[0, "morning"], [36, "mid"], [72, "sunset"], [100, "moon"]];
+function sunDirAt(k) {
+  const keys = SUN_KEYS.map(([f, name]) => [f, sceneJson.sun_keys[name].dir.map(v => -v)]);   // toward the light
+  let i = 0;
+  while (i < keys.length - 2 && k > keys[i + 1][0]) i++;
+  const [f0, a] = keys[i], [f1, b] = keys[i + 1], t = Math.min(1, Math.max(0, (k - f0) / (f1 - f0)));
+  const w = a.map((v, j) => v + (b[j] - v) * t), n = Math.hypot(...w);
+  const P = sceneJson.camera.pos, c = ROOM.toCamera(w.map((v, j) => P[j] + v / n)); // a direction: from the camera's position
+  return c;
+}
+const ambientCache = new Map();
+const ambProbe = Object.assign(document.createElement("canvas"), { width: 72, height: 72 }).getContext("2d", { willReadFrequently: true });
+function ambientAt(video, k) {
+  let a = ambientCache.get(k);
+  if (a !== undefined) return a;
+  ambProbe.drawImage(video, 40, 40, 720, 720, 0, 0, 72, 72);
+  const d = ambProbe.getImageData(0, 0, 72, 72).data, v = [];
+  for (let i = 0; i < d.length; i += 4) v.push(Math.max(LINEAR[d[i]], LINEAR[d[i + 1]], LINEAR[d[i + 2]]));
+  v.sort((x, y) => x - y);
+  a = v[Math.floor(0.15 * v.length)];
+  ambientCache.set(k, a);
+  return a;
+}
+
+/**
+ * The walls' surface relief (WallRelief in js/sheenModel.js), in metres:
+ *   wave 0.3 deg RMS over 30 / 15 / 7.5 cm   board and skim-coat waviness
+ *   stipple 1.0 deg RMS at 1.5 / 0.75 mm      the roller's stipple: the tilts
+ *       sheenSceneRenderer.html measures in its walls' own texture (0.6-1.4
+ *       deg, docs/sheen-science.md §5.2), at pixel scale. They make the glints
+ *       in the sheen of the sunlit patches and the lamp-lit wall, as the photo
+ *       page's walls show. (With the window reflected, 0.35 deg already looked
+ *       like hammered glass; now only light on the wall is reflected.)
+ * It shows only through the surface reflection.
+ */
+const RELIEF = { wave: 0.3 * Math.PI / 180, waveLength: 0.3, stipple: 1.0 * Math.PI / 180, stippleLength: 0.0015 };
+
+/** The lamp's intensity per scene frame (0..119), measured once each (both copies show the same frames). */
+const lampCache = new Map();
+const probe = Object.assign(document.createElement("canvas"), { width: 112, height: 40 }).getContext("2d", { willReadFrequently: true });
+const LINEAR = Float32Array.from({ length: 256 }, (_, i) => decodeSrgb(i / 255));
+/** The lamp per scene frame: { I, radius } (see lampGeom). */
+function lampIntensity(video, k) {
+  let lamp = lampCache.get(k);
+  if (lamp) return lamp;
+  const [x0, y0, x1, y1] = SHADE_RECT, { width: pw, height: ph } = probe.canvas;
+  probe.drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, pw, ph);
+  const d = probe.getImageData(0, 0, pw, ph).data, sum = [0, 0, 0];
+  let lit = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const c = [LINEAR[d[i]], LINEAR[d[i + 1]], LINEAR[d[i + 2]]];
+    if (0.2126729 * c[0] + 0.7151522 * c[1] + 0.0721750 * c[2] < LAMP.threshold) continue;
+    for (let j = 0; j < 3; j++) sum[j] += c[j];
+    lit++;
+  }
+  const perProbePx = ((x1 - x0) / pw) * ((y1 - y0) / ph);       // video pixels per probe pixel
+  const radius = Math.sqrt(Math.max(lit * perProbePx, 400) / Math.PI) * lampGeom.pxSize;
+  lamp = { I: sum.map(c => c * perProbePx * lampGeom.pxArea * LAMP.gain), radius };
+  lampCache.set(k, lamp);
+  return lamp;
+}
+
+// ---------------------------------------------------------------- state
+
+const params = new URLSearchParams(location.search);
+let sheen = SHEEN_ORDER.includes(params.get("sheen")) ? params.get("sheen") : DEFAULT_SHEEN;
+/** Each sheen's degree, -50..50 (%). */
+const degrees = Object.fromEntries(SHEEN_ORDER.map(k => [k, 0]));
+const initialPaint = PAINT_COLORS.includes("#" + params.get("paint")) ? "#" + params.get("paint") : DEFAULT_PAINT;
+
+// ---------------------------------------------------------------- markup
+
+const film = document.getElementById("film");
+// One track per copy of the video: the source video (no autoplay or loop:
+// the sequence drives them), its painted frames, and the masked copy of the
+// same frames. Both muted.
+film.innerHTML = ["forward", "backward"].map(dir => `
+  <div class="film__track" id="${dir}Track">
+    <video class="film__source" src="${SCENE.src}" muted playsinline preload="auto" disablepictureinpicture
+      tabindex="-1" aria-hidden="true"></video>
+    <canvas class="film__paint" aria-hidden="true"></canvas>
+    <canvas class="film__copy" role="img" aria-label="${SCENE.label}" style="--mask: url('${SCENE.mask}')"></canvas>
+  </div>`).join("");
+
+const timelineTrack = document.getElementById("timelineTrack");
+timelineTrack.insertAdjacentHTML("beforeend", TIME_POINTS.map(p =>
+  `<label class="timeline__stop" style="left: ${100 * p.time / SCENE.span}%">` +
+    `<input class="vh" type="radio" name="timePoint" value="${p.time}">` +
+    `<span class="timeline__dot"></span>` +
+    `<span class="timeline__name">${p.label}</span>` +
+  `</label>`).join(""));
+document.getElementById("playhead").setAttribute("aria-valuemax", SCENE.span.toFixed(2));
+
+/** "+20%", "−15%", "0%". */
+const degreeText = v => (v > 0 ? `+${v}%` : v < 0 ? `−${-v}%` : "0%");
+document.getElementById("sheenList").innerHTML = SHEEN_ORDER.map(k => `
+  <li class="sheen" data-sheen="${k}">
+    <label class="sheen__pick">
+      <input class="sheen__radio vh" type="radio" name="sheen" value="${k}"${k === sheen ? " checked" : ""}>
+      <span class="sheen__dot" aria-hidden="true"></span>
+      <span class="sheen__name">${SHEENS[k].label}</span>
+      <output class="sheen__degree" id="${k}DegreeValue" for="${k}Degree">0%</output>
+    </label>
+    <input class="sheen__slider" type="range" id="${k}Degree" name="sheenDegree" data-sheen="${k}"
+      min="${DEGREE.min}" max="${DEGREE.max}" step="1" value="0" list="degreeCentre"
+      aria-label="${SHEENS[k].label}: degree of sheen" aria-valuetext="0%">
+    <div class="sheen__ends" aria-hidden="true"><span>Less sheen</span><span>More sheen</span></div>
+  </li>`).join("");
+
+document.getElementById("chips").innerHTML = PAINT_COLORS.map(hex =>
+  `<li><label class="chip-option">` +
+    `<input class="vh" type="radio" name="paint" value="${hex}">` +
+    `<span class="chip" style="background:${hex}"></span>` +
+    `<span class="swatch__text"><span class="swatch__hex">${hex.toUpperCase()}</span>` +
+    `<span class="swatch__lrv">LRV ${lrv(hex)}</span></span>` +
+  `</label></li>`).join("");
+
+// ---------------------------------------------------------------- renderers
+
+const controlsEl = document.getElementById("controls");
+const controls = TuningControls.mount(controlsEl, { subject: "video", model: "v2", models: false, measure: false });
+
+const tracks = ["forward", "backward"].map(dir => {
+  const layer = document.getElementById(`${dir}Track`);
+  return { layer, video: layer.querySelector("video") };
+});
+const forwardVideo = tracks[0].video;
+
+/** The scene frame (0 = morning .. 119 = night) a copy of the video shows. */
+function sceneFrame(video) {
+  const k = Math.floor(video.currentTime * FPS + 1e-3);
+  return Math.min(119, Math.max(0, video === forwardVideo ? k : 238 - k));
+}
+
+/** Testing switches (window.sheenVideo.debug): noDirect, noLamp. */
+const debug = { noDirect: false, noLamp: false };
+
+/** The sheen job for a copy's current frame: the chosen sheen and degree, the room, this frame's lights. */
+function jobFor(video) {
+  const k = sceneFrame(video);
+  return sheenJob(sheen, ROOM, {
+    emitters: [{ rect: px(...SHADE_RECT), threshold: LAMP.threshold, gain: 1, note: "lamp shade (a lamp below)" }],
+    keyLight: [0, 0, 1],
+    lamps: debug.noLamp ? [] : [{ pos: lampGeom.pos, ...lampIntensity(video, k), axis: [0, -1, 0], cone: -1 }],
+    windows: [CABINET_TOP],
+    relief: RELIEF,
+    direct: debug.noDirect ? null : { dir: sunDirAt(k), ambient: ambientAt(video, k), headroom: debug.headroom ?? SUN_SHEEN_HEADROOM,
+                                           litSheen: LIT_SHEEN_GAIN * GLOSS_60[sheen] / 100 * (1 + degrees[sheen] / 100) },
+    textureDetail: false
+  }, { degree: 1 + degrees[sheen] / 100, lobeSamples: 8 });
+}
+
+/** Both renderers measure into one VideoStats, and render with one GPU pipeline at the film's size on screen. */
+const shareStats = {}, sharePipeline = {};
+const renderers = tracks.map(({ layer, video }) => createVideoRenderer({
+  mask: SCENE.mask,
+  initialPaint,
+  initialModel: "v2",
+  glslUrl: "glsl/shaderSceneRender.glsl",
+  sheen: { glslUrl: "glsl/sheen.glsl", jobFor },
+  page: "sheenVideo.html",
+  shareStats, sharePipeline, fitDisplay: true,
+  v2Detail: true,           // fine detail (leaf shadows, the panel seam) from the full-resolution frame
+  analysisScale: 0.5,       // light map and reflections at half size: both are smooth; saves GPU time
+  elements: {
+    app: layer,                    // gets .is-painted
+    ui: document,                  // the paint radios it keeps checked
+    source: video,
+    canvas: layer.querySelector(".film__paint"),
+    copy: layer.querySelector(".film__copy"),
+    controls: controlsEl,
+    notice: document.getElementById("notice")
+  }
+}));
+controls.bind(renderers);
+const redraw = () => { for (const r of renderers) r.redraw(); };
+
+// ---------------------------------------------------------------- panel
+
+document.getElementById("chips").addEventListener("change", e => {
+  for (const r of renderers) r.setPaint(e.target.value);
+});
+
+const sheensEl = document.getElementById("sheens");
+function setSheen(key) {
+  if (!SHEEN_ORDER.includes(key)) throw new RangeError(`Unknown sheen "${key}"`);
+  sheen = key;
+  for (const input of sheensEl.querySelectorAll('input[name="sheen"]')) input.checked = input.value === key;
+  redraw();
+}
+/** Sets a sheen's degree (-50..50 %) and shows that sheen. */
+function setSheenDegree(key, value) {
+  if (!SHEEN_ORDER.includes(key)) throw new RangeError(`Unknown sheen "${key}"`);
+  let v = Math.round(Math.min(DEGREE.max, Math.max(DEGREE.min, +value || 0)));
+  if (Math.abs(v) <= DEGREE.snap) v = 0;
+  degrees[key] = v;
+  const input = document.getElementById(`${key}Degree`);
+  input.value = v;
+  input.setAttribute("aria-valuetext", degreeText(v));
+  document.getElementById(`${key}DegreeValue`).textContent = degreeText(v);
+  if (sheen !== key) setSheen(key); else redraw();
+}
+sheensEl.addEventListener("change", e => { if (e.target.name === "sheen") setSheen(e.target.value); });
+// "input" fires while dragging, so the walls follow the thumb.
+sheensEl.addEventListener("input", e => { if (e.target.name === "sheenDegree") setSheenDegree(e.target.dataset.sheen, e.target.value); });
+
+// ---------------------------------------------------------------- sequence (as day-to-night.html)
+
+const timeline = document.getElementById("timeline");
+const playhead = document.getElementById("playhead");
+const autoplayButton = document.getElementById("autoplay");
+const status = document.getElementById("timeStatus");
+const timeRadios = [...document.querySelectorAll('input[name="timePoint"]')];
+/** The time point at scene time s (within half a frame), if any. */
+const pointAt = s => TIME_POINTS.find(p => Math.abs(p.time - s) < 0.5 / SCENE.fps);
+/** Words for scene time s: a time point's name, or where between two it is. */
+function describe(s) {
+  const at = pointAt(s);
+  if (at) return at.label;
+  const after = TIME_POINTS.filter(p => p.time < s).pop(), before = TIME_POINTS.find(p => p.time > s);
+  return `Between ${after.label.toLowerCase()} and ${before.label.toLowerCase()}`;
+}
+const checkPoint = s => { for (const r of timeRadios) r.checked = Math.abs(+r.value - s) < 0.5 / SCENE.fps; };
+
+let shown = { pressed: null, value: null, text: null };
+const sequence = DayNightSequence.create({
+  forward: tracks[0], backward: tracks[1], span: SCENE.span, fps: SCENE.fps,
+  backwardEnd: SCENE.backwardEnd, autoplayRate: SCENE.autoplayRate,
+  // While anything moves (and once when it stops): move the playhead, keep
+  // the slider's value and the Autoplay button's state current.
+  onUpdate({ position, mode, playing }) {
+    timelineTrack.style.setProperty("--p", (position / SCENE.span).toFixed(4));
+    const pressed = mode === "autoplay" && playing;
+    if (pressed !== shown.pressed) {
+      shown.pressed = pressed;
+      autoplayButton.setAttribute("aria-pressed", String(pressed));
+    }
+    // ARIA: the value in 0.1 s steps, the words whenever they change.
+    const value = Math.round(position * 10) / 10, text = describe(position);
+    if (value !== shown.value) { shown.value = value; playhead.setAttribute("aria-valuenow", value); }
+    if (text !== shown.text) { shown.text = text; playhead.setAttribute("aria-valuetext", text); }
+  },
+  // A move reached its target: select its time point (if it is one) and say so.
+  onArrive(s) {
+    checkPoint(s);
+    status.textContent = `Showing ${describe(s).toLowerCase()}.`;
+  }
+});
+
+// Time points: move to the picked time (forward or backward) and stop there.
+timeline.addEventListener("change", e => {
+  if (e.target.name === "timePoint") sequence.goTo(+e.target.value);
+});
+
+// Autoplay: a play / pause toggle for the endless morning -> night -> morning loop.
+autoplayButton.addEventListener("click", () => {
+  if (autoplayButton.getAttribute("aria-pressed") === "true") {
+    sequence.pause();
+    status.textContent = "Autoplay paused.";
+  } else {
+    checkPoint(-1);
+    sequence.autoplay();
+    status.textContent = "Autoplay on.";
+  }
+});
+
+// The track: click anywhere to move there; drag to scrub through the day.
+// A press that moves less than DRAG_PX is a click (on a time point, its
+// label's own click selects it).
+const DRAG_PX = 4;
+let press = null, suppressClick = false;
+const sceneAtX = x => {
+  const r = timelineTrack.getBoundingClientRect();
+  return SCENE.span * Math.min(1, Math.max(0, (x - r.left) / r.width));
+};
+timelineTrack.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  press = { id: e.pointerId, x: e.clientX, dragging: false, onStop: !!e.target.closest(".timeline__stop") };
+});
+timelineTrack.addEventListener("pointermove", e => {
+  if (!press || e.pointerId !== press.id) return;
+  if (!press.dragging) {
+    if (Math.abs(e.clientX - press.x) < DRAG_PX) return;
+    press.dragging = true;
+    try { timelineTrack.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+    timeline.classList.add("is-scrubbing");
+    checkPoint(-1);
+  }
+  sequence.scrubTo(sceneAtX(e.clientX));
+});
+const release = e => {
+  if (!press || e.pointerId !== press.id) return;
+  const { dragging, onStop } = press;
+  press = null;
+  timeline.classList.remove("is-scrubbing");
+  if (dragging) {
+    sequence.endScrub();
+    // Let go near a time point: glide onto it; otherwise stay where dropped.
+    const near = TIME_POINTS.find(p => Math.abs(p.time - sceneAtX(e.clientX)) < 0.12);
+    if (near) sequence.goTo(near.time);
+    else status.textContent = `Showing ${describe(sequence.position).toLowerCase()}.`;
+    suppressClick = true;              // the click that follows a drag isn't a pick
+  } else if (!onStop && e.type === "pointerup") {
+    checkPoint(-1);
+    sequence.goTo(sceneAtX(e.clientX));
+  }
+};
+timelineTrack.addEventListener("pointerup", release);
+timelineTrack.addEventListener("pointercancel", release);
+timelineTrack.addEventListener("click", e => {
+  if (suppressClick) { suppressClick = false; e.preventDefault(); }
+}, true);
+
+// Keyboard: the playhead is a slider. Arrows move 1/4 s of film, Page keys
+// a whole second, Home / End go to morning / night.
+playhead.addEventListener("keydown", e => {
+  const s = sequence.position;
+  const to = { ArrowRight: s + 0.25, ArrowUp: s + 0.25, ArrowLeft: s - 0.25, ArrowDown: s - 0.25,
+               PageUp: s + 1, PageDown: s - 1, Home: 0, End: SCENE.span }[e.key];
+  if (to === undefined) return;
+  e.preventDefault();
+  checkPoint(-1);
+  sequence.goTo(Math.min(SCENE.span, Math.max(0, to)));
+});
+
+// Scripting and testing handles.
+window.sheenVideo = { sequence, renderers, setSheen, setSheenDegree, room: ROOM, lamp: lampGeom, lampCache, ambientCache, sunDirAt, cabinet: CABINET_TOP, relief: RELIEF, debug,
+                      get sheen() { return sheen; }, get degrees() { return { ...degrees }; } };
+
+// Boot: paint both copies and start the loop, unless the visitor asked for
+// reduced motion (then the film waits at morning until they choose). If the
+// browser blocks autoplay, the first click or key press starts it.
+for (const r of renderers) r.start();
+if (!matchMedia("(prefers-reduced-motion: reduce)").matches) sequence.autoplay();
+const kick = () => { if (sequence.mode === "autoplay" && !sequence.playing) sequence.autoplay(); };
+document.addEventListener("pointerdown", kick, { once: true });
+document.addEventListener("keydown", kick, { once: true });
+</script>
+</body>
+</html>

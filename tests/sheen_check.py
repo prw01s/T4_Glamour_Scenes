@@ -27,11 +27,17 @@ import math, sys
 
 # ---- the model (keep in sync with SHEENS in js/sheenModel.js) ---------------
 F0, FLOOR = 0.04, 0.35
-SHEENS = {            # alpha (GGX), v (diffused share), k (grazing, 4 pi sigma / lambda)
-    "flat":      dict(alpha=0.30,  v=0.95, k=21.0),
-    "eggshell":  dict(alpha=0.075, v=0.45, k=16.0),
-    "satin":     dict(alpha=0.045, v=0.30, k=12.0),
-    "semigloss": dict(alpha=0.025, v=0.10, k=6.5),
+# The gloss lobe is a sharp CORE plus a wider HALO (hazy gloss: Barla,
+# Pacanowski & Vangorp 2018; Vangorp, Barla & Fleming 2017): two GGX lobes,
+# alpha (the core) and alpha x (1 + haze) (the halo), the halo taking a share
+# beta of the lobe. beta is not chosen by hand: section D solves it so that
+# each sheen keeps the 60 deg reading of its earlier single-lobe calibration
+# (alpha_1, still inside its MPI band), and checks the value below.
+SHEENS = {            # alpha (core GGX), haze (halo extent, in core widths), beta (halo share), v (diffused share), k (grazing)
+    "flat":      dict(alpha=0.30,  haze=0.0, beta=0.0,   v=0.95, k=21.0, alpha_1=0.30),
+    "eggshell":  dict(alpha=0.035, haze=3.0, beta=0.662, v=0.45, k=16.0, alpha_1=0.075),
+    "satin":     dict(alpha=0.018, haze=4.0, beta=0.632, v=0.30, k=12.0, alpha_1=0.045),
+    "semigloss": dict(alpha=0.010, haze=6.0, beta=0.432, v=0.10, k=6.5,  alpha_1=0.025),
 }
 # MPI Architectural Painting Manual, gloss levels (60 deg, 85 deg) in GU.
 MPI = {
@@ -66,18 +72,22 @@ def smith_G(cos_i, cos_o, a):
 def norm(v): l = math.sqrt(sum(x * x for x in v)); return [x / l for x in v]
 
 def surface_brdf_cos(sheen, wi, wo):
+    return surface_brdf_cos_p(SHEENS[sheen] if isinstance(sheen, str) else sheen, wi, wo)
+
+def surface_brdf_cos_p(p, wi, wo):
     """
     Surface (interface) reflection BRDF x cos(theta_o), excluding the coherent
     part. The coherent share S (Rayleigh: the surface looks smoother at
     grazing) applies to the WHOLE surface, including the diffused share, whose
     scattering is caused by the same roughness.
     """
-    p = SHEENS[sheen]
     ci, co = wi[2], wo[2]
     if ci <= 0 or co <= 0: return 0.0
     h = norm([wi[0] + wo[0], wi[1] + wo[1], wi[2] + wo[2]])
     F = fresnel(sum(a * b for a, b in zip(wi, h)), N_BINDER)
-    spec = ggx_D(h[2], p["alpha"]) * smith_G(ci, co, p["alpha"]) * F / (4 * ci * co)
+    lobe = lambda a: ggx_D(h[2], a) * smith_G(ci, co, a) * F / (4 * ci * co)
+    aw = p["alpha"] * (1 + p["haze"])
+    spec = (1 - p["beta"]) * lobe(p["alpha"]) + p["beta"] * lobe(aw)
     S = math.exp(-(p["k"] * ci) ** 2)                        # coherent (mirror) fraction
     diffused = F0 / math.pi                                  # the veil: surface reflection spread evenly
     return (1 - S) * ((1 - p["v"]) * spec + p["v"] * diffused) * co
@@ -89,7 +99,7 @@ def gloss_units(sheen, theta_deg, recep, body=0.0, n=24):
     The source is collimated (its 0.75 x 2.5 deg aperture is small next to the
     receptor's). body = diffuse body reflectance that leaks into the reading.
     """
-    p = SHEENS[sheen]
+    p = SHEENS[sheen] if isinstance(sheen, str) else sheen
     th = math.radians(theta_deg)
     wi = [-math.sin(th), 0.0, math.cos(th)]                  # toward the source
     da, db = math.radians(recep[0]), math.radians(recep[1])
@@ -150,7 +160,7 @@ def lab(rgb):
 def shade(rgb, sheen, env, nov=math.cos(math.radians(40))):
     """applySheen with W = white light (1,1,1); env = Llobe = Lmirror (RGB)."""
     p = SHEENS[sheen]
-    A = albedo(p["alpha"], nov)
+    A = (1 - p["beta"]) * albedo(p["alpha"], nov) + p["beta"] * albedo(p["alpha"] * (1 + p["haze"]), nov)
     S = math.exp(-(p["k"] * nov) ** 2)
     Fm = fresnel(nov, N_BINDER)
     # Net change: the lobe's reflection in, the swatch's own veil (the same
@@ -176,14 +186,14 @@ def check(ok, what):
     return "ok" if ok else "FAIL"
 
 print("== A. Virtual gloss meter (ASTM D523 apertures, black-glass n = 1.567 = 100 GU)")
-print("   sheen       alpha   v     k     20deg   60deg   85deg   60deg (white body)   MPI 60 / 85")
+print("   sheen       core    halo    beta   v     k     20deg   60deg   85deg   60deg (white body)   MPI 60 / 85")
 for name, p in SHEENS.items():
     g = {t: gloss_units(name, t, APERTURES[t]) for t in (20, 60, 85)}
     gw = gloss_units(name, 60, APERTURES[60], body=0.9)
     m = MPI[name]
     ok60 = m["g60"][0] <= g[60] <= m["g60"][1] and gw <= m["g60"][1] + 2
     ok85 = m["g85"] is None or m["g85"][0] <= g[85] <= m["g85"][1]
-    print(f"   {name:<11} {p['alpha']:<7} {p['v']:<5} {p['k']:<5} {g[20]:6.1f}  {g[60]:6.1f}  {g[85]:6.1f}   {gw:6.1f}"
+    print(f"   {name:<11} {p['alpha']:<7} {p['alpha'] * (1 + p['haze']):<7.3f} {p['beta']:<6} {p['v']:<5} {p['k']:<5} {g[20]:6.1f}  {g[60]:6.1f}  {g[85]:6.1f}   {gw:6.1f}"
           f"              {m['level']} {m['g60']} / {m['g85'] or '-'}  {check(ok60, name + ' 60deg')} {check(ok85, name + ' 85deg')}")
 
 print("== B. Off-highlight colour vs the swatch (= Flat), NoV = cos 40 deg")
@@ -225,6 +235,60 @@ check(abs(a - 0.04) < 0.002, f"albedo at normal incidence {a:.4f}")
 check(abs(b / fresnel(0.5, N_BINDER) - 1) < 0.03, f"semi-gloss albedo at 60 deg {b:.4f} vs Fresnel {fresnel(0.5, N_BINDER):.4f}")
 print("   table rows for js tests (alpha 0.025 / 0.075 at NoV 1, 0.6, 0.4):",
       [round(albedo(a_, n_), 5) for a_ in (0.025, 0.075) for n_ in (1.0, 0.6, 0.4)])
+
+print("== D. Core + halo calibration: beta keeps each sheen's earlier single-lobe 60 deg reading")
+print("   The core sets the sharpest reflections, which observers judge gloss by (Vangorp et al. 2017); the 20 deg")
+print("   reading (1.8 deg aperture) is the one that sees it: it rises, 60 and 85 deg stay as calibrated.")
+for name, p in SHEENS.items():
+    if p["beta"] == 0: continue
+    single = dict(p, alpha=p["alpha_1"], haze=0.0, beta=0.0)
+    target = gloss_units(single, 60, APERTURES[60])
+    lo, hi = 0.0, 1.0
+    for _ in range(18):
+        b = (lo + hi) / 2
+        if gloss_units(dict(p, beta=b), 60, APERTURES[60]) > target: lo = b
+        else: hi = b
+    b = (lo + hi) / 2
+    g20s, g20 = gloss_units(single, 20, APERTURES[20]), gloss_units(p, 20, APERTURES[20])
+    print(f"   {name:<10} single alpha {p['alpha_1']}: 60deg {target:5.1f} GU, 20deg {g20s:5.1f}  ->  core {p['alpha']} + halo "
+          f"{p['alpha'] * (1 + p['haze']):.3f}: beta {b:.3f} (model {p['beta']}), 20deg {g20:5.1f}  {check(abs(b - p['beta']) < 0.01, name + ' beta')}")
+
+print("== E. Wall relief: the shader's gradient noise (glsl/sheen.glsl noiseGrad), ported, and its RMS gradient")
+M32 = 0xFFFFFFFF
+def hash_u(x, y):
+    x = (x * 1664525 + 1013904223) & M32; y = (y * 1664525 + 1013904223) & M32
+    x = (x + y * 1664525) & M32; y = (y + x * 1664525) & M32
+    x ^= x >> 16; y ^= y >> 16
+    x = (x + y * 1664525) & M32; y = (y + x * 1664525) & M32
+    x ^= x >> 16; y ^= y >> 16
+    return x ^ y
+def grad2(i, j):
+    a = (hash_u((i + 32768) & M32, (j + 32768) & M32) & 1023) * (2 * math.pi / 1024)
+    return math.cos(a), math.sin(a)
+def noise_grad(px, py):
+    ix, iy = math.floor(px), math.floor(py); fx, fy = px - ix, py - iy
+    q = lambda f: f * f * f * (f * (f * 6 - 15) + 10); dq = lambda f: 30 * f * f * (f * (f - 2) + 1)
+    ux, uy, dux, duy = q(fx), q(fy), dq(fx), dq(fy)
+    ga, gb, gc, gd = grad2(ix, iy), grad2(ix + 1, iy), grad2(ix, iy + 1), grad2(ix + 1, iy + 1)
+    va = ga[0] * fx + ga[1] * fy; vb = gb[0] * (fx - 1) + gb[1] * fy
+    vc = gc[0] * fx + gc[1] * (fy - 1); vd = gd[0] * (fx - 1) + gd[1] * (fy - 1)
+    k = va - vb - vc + vd
+    gx = ga[0] + ux * (gb[0] - ga[0]) + uy * (gc[0] - ga[0]) + ux * uy * (ga[0] - gb[0] - gc[0] + gd[0]) + dux * (uy * k + vb - va)
+    gy = ga[1] + ux * (gb[1] - ga[1]) + uy * (gc[1] - ga[1]) + ux * uy * (ga[1] - gb[1] - gc[1] + gd[1]) + duy * (ux * k + vc - va)
+    return gx, gy
+import random
+rnd = random.Random(1); sx = sy = 0.0; N = 200000
+for _ in range(N):
+    gx, gy = noise_grad(rnd.uniform(-300, 300), rnd.uniform(-300, 300)); sx += gx * gx; sy += gy * gy
+rms = math.sqrt((sx + sy) / (2 * N))
+import re
+glsl = open("glsl/sheen.glsl").read()
+const = float(re.search(r"NOISE_GRAD_RMS = ([0-9.]+)", glsl).group(1))
+print(f"   RMS gradient per component {math.sqrt(sx / N):.3f} / {math.sqrt(sy / N):.3f}, mean {rms:.3f}; shader constant {const}"
+      f"  {check(abs(rms - const) < 0.01, 'NOISE_GRAD_RMS')}")
+print("   Slope -> reflections: a tilt d turns the reflected ray by 2 d. Long-wave waviness of 0.2 deg RMS moves a")
+print("   reflection 2 m away by ~1.4 cm (edges wander); stipple of 0.35 deg RMS jitters it ~2.4 cm per few mm of")
+print("   wall (grain). Orange peel bands reach ~1.7 deg RMS (30 um/mm, Konieczny & Meyer 2011, Fig. 5).")
 
 print("== RESULT:", "all checks pass" if not fails else "FAILED: " + "; ".join(fails))
 sys.exit(1 if fails else 0)

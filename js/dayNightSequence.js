@@ -7,10 +7,18 @@
  *
  * SCENE TIME: one clock for both videos, s = 0 (morning) .. span (night).
  * The forward video at time t shows scene time t; the backward video at time
- * t shows span - t. (Measured on these files: forward frame k matches backward
- * frame 119 - k within about 6 levels; they are separate renders, not an exact
- * reverse, so every switch between them is covered by a short crossfade.)
- * Browsers can't play video backwards, hence the second video.
+ * t shows backwardEnd - t (backwardEnd = span by default). (Measured on these
+ * files: forward frame k matches backward frame 119 - k within about 6
+ * levels; they are separate renders, not an exact reverse, so every switch
+ * between them is covered by a short crossfade.) Browsers can't play video
+ * backwards, hence the second video.
+ *
+ * ONE PALINDROME FILE (sheenVideo.html): both tracks may be copies of a
+ * single video that runs morning -> night -> morning (frame k mirrors frame
+ * 2N - k, night = frame N at span = N / fps). The forward copy plays its
+ * first half, the backward copy its second half: backwardEnd = 2 span. The
+ * forward copy's range then ends at night, mid-file, where autoplay stops it
+ * and hands over to the backward copy, which shows the same frame.
  *
  * LAYERS: each video sits in its own layer element (with its painted copy,
  * see js/videoShaderRender.js). The active layer is on top (z-index 2); a
@@ -95,11 +103,15 @@
    * @param {number} [o.span=5]  Scene length in seconds.
    * @param {number} [o.fps=24]  Frame rate, for frame-exact stops.
    * @param {number} [o.autoplayRate=1]  Autoplay speed (between the eased ends).
+   * @param {number} [o.backwardEnd=span]  The backward video's time at which it
+   *   shows morning (scene time 0); it shows night at backwardEnd - span.
+   *   2 x span when both tracks are copies of one palindrome file.
    * @param {(state: SequenceState) => void} [o.onUpdate]  Every animation frame while
    *   anything moves, and once when it stops.
    * @param {(s: number) => void} [o.onArrive]  A seek reached its target.
    */
-  function create({ forward, backward, span = 5, fps = 24, autoplayRate = 1, onUpdate = () => {}, onArrive = () => {} }) {
+  function create({ forward, backward, span = 5, fps = 24, autoplayRate = 1, backwardEnd = span,
+                    onUpdate = () => {}, onArrive = () => {} }) {
     const frame = 1 / fps;
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
     /** @type {Track} The track on top. */
@@ -122,10 +134,22 @@
     let resumeOnShow = false;
 
     const other = track => (track === forward ? backward : forward);
-    /** Scene time shown by `track` at its video time t. */
-    const sceneTime = (track, t = track.video.currentTime) => clamp(track === forward ? t : span - t, 0, span);
+    /** The part of each video the film uses: video times [tStart, tEnd] (morning..night, night..morning). */
+    const tStart = track => (track === forward ? 0 : backwardEnd - span);
+    const tEnd = track => Math.min(track === forward ? span : backwardEnd, track.video.duration || Infinity);
+    /**
+     * Scene time shown by `track` at its video time t. (A palindrome's forward
+     * copy that ran past night, before it was stopped, shows the mirrored
+     * half: backwardEnd - t.)
+     */
+    const sceneTime = (track, t = track.video.currentTime) =>
+      clamp(track === forward ? (t > span && backwardEnd > span ? backwardEnd - t : t) : backwardEnd - t, 0, span);
     /** The video time at which `track` shows scene time s. */
-    const videoTime = (track, s) => clamp(track === forward ? s : span - s, 0, track.video.duration || span);
+    const videoTime = (track, s) => clamp(track === forward ? s : backwardEnd - s, tStart(track), tEnd(track));
+    /** True when `track`'s range ends before its file does (the forward copy of a palindrome). */
+    const endsEarly = track => tEnd(track) < (track.video.duration || 0) - frame / 2;
+    /** True when `track` has reached the end of its range. */
+    const atEnd = track => track.video.ended || track.video.currentTime >= tEnd(track) - frame / 2;
     const quality = v => (v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : { droppedVideoFrames: 0, totalVideoFrames: 0 });
 
     /** Starts a video; a blocked play() (autoplay policy) leaves it paused and the state says so. */
@@ -168,8 +192,8 @@
 
     /** Parks the inactive video at its start, ready for the next autoplay hand-over. */
     function park() {
-      const v = other(active).video;
-      if (v.currentTime !== 0 && !v.seeking) v.currentTime = 0;
+      const track = other(active), v = track.video;
+      if (v.currentTime !== tStart(track) && !v.seeking) v.currentTime = tStart(track);
     }
 
     // ------------------------------------------------------------ speed control
@@ -201,6 +225,9 @@
     }
     function tick(now) {
       const v = active.video;
+      // A range that ends mid-file (a palindrome's forward copy): stop at
+      // its end in autoplay, as "ended" would at a file's end.
+      if (!v.paused && mode === "autoplay" && endsEarly(active) && atEnd(active)) { v.pause(); trackEnded(active); }
       if (!v.paused) {
         const rate = mode === "seek" ? seekRate(now) : mode === "autoplay" ? autoplaySpeed() : null;
         if (rate && Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
@@ -213,14 +240,28 @@
 
     // ------------------------------------------------------------ autoplay
 
-    // When the active video ends: in autoplay the other one takes over from
-    // its start (matching the ended video's last frame); in a seek, the end
-    // is the target (morning or night) and the arrival is handled there.
+    // When the active video reaches the end of its range ("ended", or the
+    // check in tick() for a range that ends mid-file): in autoplay the other
+    // one takes over from its start (matching the ended video's last frame);
+    // in a seek, the end is the target (morning or night) and the arrival is
+    // handled there.
+    let handing = false;
+    async function trackEnded(track) {
+      if (track !== active || mode !== "autoplay" || handing) return;
+      const my = token;
+      handing = true;
+      try { if (await handOver(other(track), sceneTime(track), autoplayRate * ENDS.END_FLOOR, my)) park(); }
+      finally { handing = false; wake(); }
+    }
     for (const track of [forward, backward]) {
-      track.video.addEventListener("ended", async () => {
-        if (track !== active || mode !== "autoplay") return;
-        const my = token;
-        if (await handOver(other(track), sceneTime(track), autoplayRate * ENDS.END_FLOOR, my)) park();
+      track.video.addEventListener("ended", () => trackEnded(track));
+      // The same check as in tick(), from timeupdate (about 4 x a second),
+      // which keeps firing when animation frames don't (a hidden view).
+      track.video.addEventListener("timeupdate", () => {
+        if (track === active && mode === "autoplay" && !track.video.paused && endsEarly(track) && atEnd(track)) {
+          track.video.pause();
+          trackEnded(track);
+        }
       });
     }
 
@@ -230,7 +271,7 @@
       mode = "autoplay";
       target = null;
       const v = active.video;
-      if (v.ended || v.currentTime >= (v.duration || span) - frame / 2) v.dispatchEvent(new Event("ended"));
+      if (atEnd(active)) trackEnded(active);
       else { play(v, autoplaySpeed()); park(); }
       wake();
     }

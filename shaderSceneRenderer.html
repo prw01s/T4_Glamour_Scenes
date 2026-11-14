@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>T4 Scene Visualization</title>
 <link rel="stylesheet" href="css/visualizer.css">
+<style id="roomRules">/* written by the page script */</style>
 <style>
   /* Shared tokens, base, controls and chips: css/visualizer.css. This page's layout: */
   :root {
@@ -55,6 +56,24 @@
   .room:hover span { text-decoration-color: rgb(47 61 76 / .35); }
   .room input:checked + span { text-decoration-color: currentColor; }
   .room input:focus-visible + span { outline: 2px solid var(--graphite); outline-offset: 4px; border-radius: 2px; }
+
+  /* ---- upload scene (under the room list) ----------------------------------- */
+  .upload { margin-top: 14px; max-width: 22em; padding: 2px; border-radius: 3px; }
+  .upload.is-over { outline: 2px dashed var(--graphite); outline-offset: 4px; }
+  .upload__pick {
+    display: inline-block; padding: 6px 12px;
+    font-size: 14px; font-weight: 600; color: #2F3D4C;
+    border: 1px solid currentColor; border-radius: 3px;
+    cursor: pointer; transition: background-color .15s;
+  }
+  .upload__pick:hover { background: rgb(47 61 76 / .07); }
+  .upload__pick:focus-within { outline: 2px solid var(--graphite); outline-offset: 2px; }
+  .upload__hint, .upload__status { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--slate); }
+  .upload__hint code { font-size: 12.5px; color: var(--graphite); }
+  .upload__status:empty { display: none; }
+  .upload__status.is-error { color: #a12622; }
+  .upload__remove { padding: 0; border: 0; background: none; font: inherit; color: var(--graphite);
+                    text-decoration: underline; text-underline-offset: .14em; cursor: pointer; }
 
   /* ---- about: three paragraphs, side by side ------------------------------- */
   /* Up to three columns; fewer when there isn't room */
@@ -113,8 +132,8 @@
   }
   .scene__canvas--incoming { opacity: 0; }
   .scene__photo { object-fit: cover; visibility: hidden; }
-  .renderer[data-room="livingRoom"] .scene__photo[data-room="livingRoom"],
-  .renderer[data-room="study"] .scene__photo[data-room="study"] { visibility: visible; }
+  /* The shown room's photos: one rule per room, written by the page script
+     (#roomRules), so uploaded rooms get one too. */
   /* Masks are opt-in: until .is-painted, visitors see the plain photos.
      Black in the mask is wall, so luminance mode hides exactly the walls. */
   .is-painted .scene__photo {
@@ -269,6 +288,15 @@
       <span class="rooms__label" aria-hidden="true">Room Type:</span>
       <div class="rooms__list" id="rooms"></div>
     </div>
+    <div class="upload" id="upload">
+      <label class="upload__pick">Upload Scene
+        <input class="vh" type="file" id="uploadFiles" multiple accept=".jpg,.png,image/jpeg,image/png"
+               aria-describedby="uploadHint"></label>
+      <p class="upload__hint" id="uploadHint">Choose 4 files of one room, all from the same spot:
+        <code>mask.png</code> (black = wall), <code>morning.jpg</code>, <code>noon.jpg</code> and <code>night.jpg</code>.</p>
+      <p class="upload__status" id="uploadStatus" role="status" aria-live="polite"></p>
+      <p class="upload__hint" id="uploadActions" hidden><button type="button" class="upload__remove" id="removeUpload">Remove this scene</button></p>
+    </div>
   </fieldset>
 
   <div class="about">
@@ -307,6 +335,7 @@
 <script src="js/paintPipeline.js"></script>
 <script src="js/shaderSceneRender.js"></script>
 <script src="js/tuningControls.js"></script>
+<script src="js/sheenCustomRoom.js"></script>
 <script type="module">
 /* ==========================================================================
  * Page setup for shaderSceneRenderer.html.
@@ -379,6 +408,40 @@ const TIMES = [
 /** Room shown first (ROOMS key). */
 const INITIAL_ROOM = "livingRoom";
 
+// ---------------------------------------------------------------- uploaded scene
+// A visitor can upload a scene of their own (the "Upload Scene" control under
+// the room list): mask.png, morning.jpg, noon.jpg and night.jpg. It becomes a
+// room named UPLOAD_LABEL, is shown at once and is kept in IndexedDB
+// (js/sheenCustomRoom.js), so it is still in the list after a reload. A new
+// upload replaces it. Each upload gets a fresh ROOMS key ("upload1",
+// "upload2", ...), so the old one can stay on screen while the new one loads.
+
+/** The four files of an upload, by (lower-case) file name -> tile key or "mask". */
+const UPLOAD_FILES = { "mask.png": "mask", "morning.jpg": "morning", "noon.jpg": "noon", "night.jpg": "night" };
+/** The uploaded room's name in the room list. */
+const UPLOAD_LABEL = "Your Scene";
+/** IndexedDB key of the stored upload ({ blobs: { mask, morning, noon, night } }). */
+const UPLOAD_STORE_KEY = "sceneUpload";
+/** Largest side kept: the renderer never draws photos larger than 2048². */
+const UPLOAD_MAX_SIDE = 2048;
+let uploadCount = 0;
+
+/** A ROOMS entry for uploaded images (object URLs of the Blobs). */
+function uploadedRoom(blobs) {
+  return {
+    label: UPLOAD_LABEL, uploaded: true,
+    mask: URL.createObjectURL(blobs.mask),
+    photos: Object.fromEntries(TIMES.map(t => [t.key, URL.createObjectURL(blobs[t.key])]))
+  };
+}
+/** Frees an uploaded room's object URLs. */
+function revokeRoom(room) { for (const url of [room.mask, ...Object.values(room.photos)]) URL.revokeObjectURL(url); }
+
+// An earlier upload joins the room list (it is not shown first).
+const storedUpload = window.SheenCustomRoom
+  ? await window.SheenCustomRoom.load(UPLOAD_STORE_KEY).catch(() => null) : null;
+if (storedUpload && storedUpload.blobs) ROOMS[`upload${++uploadCount}`] = uploadedRoom(storedUpload.blobs);
+
 // ---------------------------------------------------------------- markup
 // The static HTML holds only empty containers. Rooms, chips and tiles are built
 // here from ROOMS / PAINT_COLORS / TIMES, so the config is the single source of
@@ -387,9 +450,17 @@ const renderer = document.getElementById("renderer");
 
 // Room switch: one native radio per room (arrow keys work natively). The
 // visible text is the large room name.
-document.getElementById("rooms").innerHTML = Object.entries(ROOMS).map(([key, room]) =>
-  `<label class="room"><input class="vh" type="radio" name="room" value="${key}"${key === INITIAL_ROOM ? " checked" : ""}><span>${room.label}</span></label>`
-).join("");
+const roomRadio = (key, room) =>
+  `<label class="room" data-room="${key}"><input class="vh" type="radio" name="room" value="${key}"${key === INITIAL_ROOM ? " checked" : ""}><span>${room.label}</span></label>`;
+document.getElementById("rooms").innerHTML = Object.entries(ROOMS).map(([key, room]) => roomRadio(key, room)).join("");
+
+// The shown room's photos are visible: one CSS rule per room, rewritten when
+// a scene is uploaded or removed.
+function writeRoomRules() {
+  document.getElementById("roomRules").textContent = Object.keys(ROOMS).map(key =>
+    `.renderer[data-room="${key}"] .scene__photo[data-room="${key}"] { visibility: visible; }`).join("\n");
+}
+writeRoomRules();
 
 // Palette: one radio per paint. The label's accessible name is
 // "#RRGGBB, LRV nn". The hex text is visible only on desktop; elsewhere it is
@@ -461,9 +532,166 @@ document.addEventListener("change", e => {
 });
 controls.bind(sceneRenderer);
 
-// Scripting and testing handle: setPaint / setRoom / setModel / setContrast /
-// setSaturation / setSatMeasure, sliders, roomInfo(), ready, sample().
+// Scripting and testing handle: setPaint / setRoom / addRoom / removeRoom /
+// setModel / setContrast / setSaturation / setSatMeasure, sliders,
+// roomInfo(), ready, sample().
 window.sceneRenderer = sceneRenderer;
+
+// ---------------------------------------------------------------- upload scene
+const uploadBox = document.getElementById("upload");
+const uploadInput = document.getElementById("uploadFiles");
+const uploadStatus = document.getElementById("uploadStatus");
+const uploadActions = document.getElementById("uploadActions");
+
+function showUploadStatus(text, isError = false) {
+  uploadStatus.textContent = text;
+  uploadStatus.classList.toggle("is-error", isError);
+}
+/** The uploaded room's ROOMS key, or undefined. */
+const uploadedKey = () => Object.keys(ROOMS).find(key => ROOMS[key].uploaded);
+
+/**
+ * The image as a square: its centre square, at most UPLOAD_MAX_SIDE. A file
+ * that already is a small enough square is kept as it is (no re-encoding).
+ * @param {File} file
+ * @param {string} type  Output type when the image has to be redrawn.
+ * @throws {Error} When the file isn't an image the browser can decode.
+ */
+async function squareImage(file, type) {
+  let bmp;
+  try { bmp = await createImageBitmap(file); }
+  catch { throw new Error(`${file.name} isn't an image this browser can open.`); }
+  const { width, height } = bmp, side = Math.min(width, height), out = Math.min(side, UPLOAD_MAX_SIDE);
+  let blob = file;
+  if (width !== height || side > UPLOAD_MAX_SIDE) {
+    const cv = Object.assign(document.createElement("canvas"), { width: out, height: out });
+    const ctx = cv.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bmp, (width - side) / 2, (height - side) / 2, side, side, 0, 0, out, out);
+    blob = await new Promise((resolve, reject) =>
+      cv.toBlob(b => b ? resolve(b) : reject(new Error(`Couldn't prepare ${file.name}.`)), type, 0.95));
+  }
+  bmp.close();
+  return { blob, width, height, size: out, cropped: width !== height };
+}
+
+/** The share of a mask's pixels that are wall (brightness x alpha < 0.5, as the renderer reads it). */
+async function wallShare(blob) {
+  const bmp = await createImageBitmap(blob), n = 128;
+  const ctx = Object.assign(document.createElement("canvas"), { width: n, height: n }).getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0, n, n);
+  bmp.close();
+  const d = ctx.getImageData(0, 0, n, n).data;
+  let wall = 0;
+  for (let i = 0; i < d.length; i += 4)
+    if ((0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) * d[i + 3] / 255 < 128) wall++;
+  return wall / (n * n);
+}
+
+/** Adds a room's radio to the room list (after the built-in rooms). */
+function addRoomRadio(key, room) {
+  document.getElementById("rooms").insertAdjacentHTML("beforeend", roomRadio(key, room));
+}
+
+/**
+ * Removes the uploaded room `key`: the renderer's copy, its radio, CSS rule
+ * and object URLs. Shows another room first if it is the one requested.
+ */
+async function dropUploadedRoom(key) {
+  if (sceneRenderer.activeRoom === key) await sceneRenderer.setRoom(INITIAL_ROOM);
+  if (sceneRenderer.activeRoom === key) return;      // the visitor picked it again meanwhile
+  const room = ROOMS[key];
+  await sceneRenderer.removeRoom(key);                // also deletes ROOMS[key]
+  document.querySelector(`.room[data-room="${key}"]`)?.remove();
+  writeRoomRules();
+  revokeRoom(room);
+}
+
+/**
+ * Checks the visitor's files, makes them square, adds them as UPLOAD_LABEL
+ * (replacing an earlier upload), shows them and stores them.
+ * @param {File[]} files
+ */
+async function useUploadedFiles(files) {
+  const byKind = {}, unused = [];
+  for (const f of files) {
+    const kind = UPLOAD_FILES[f.name.toLowerCase()];
+    if (kind && !byKind[kind]) byKind[kind] = f; else unused.push(f.name);
+  }
+  const missing = Object.keys(UPLOAD_FILES).filter(name => !byKind[UPLOAD_FILES[name]]);
+  if (missing.length || unused.length) {
+    showUploadStatus("Choose exactly four files, named mask.png, morning.jpg, noon.jpg and night.jpg." +
+      (missing.length ? ` Missing: ${missing.join(", ")}.` : "") +
+      (unused.length ? ` Not used: ${unused.join(", ")}.` : ""), true);
+    return;
+  }
+  uploadInput.disabled = true;
+  try {
+    showUploadStatus("Preparing your scene…");
+    const sq = {};
+    for (const [name, kind] of Object.entries(UPLOAD_FILES))
+      sq[kind] = await squareImage(byKind[kind], kind === "mask" ? "image/png" : "image/jpeg");
+    // The four images must line up pixel for pixel, so they need one shape.
+    const aspect = kind => sq[kind].width / sq[kind].height;
+    const odd = Object.keys(sq).filter(kind => Math.abs(aspect(kind) - aspect("mask")) > 0.01);
+    if (odd.length) throw new Error("The four images must have the same shape, so that they line up: " +
+      Object.entries(UPLOAD_FILES).map(([name, kind]) => `${name} is ${sq[kind].width} × ${sq[kind].height}`).join(", ") + ".");
+    const walls = await wallShare(sq.mask.blob);
+    if (walls < 0.005) throw new Error("mask.png has no walls: paint goes where the mask is black, and it is almost all white.");
+    if (walls > 0.995) throw new Error("mask.png is all black, so it would paint the whole picture. Black marks the walls only.");
+
+    const blobs = Object.fromEntries(Object.entries(sq).map(([kind, v]) => [kind, v.blob]));
+    const previous = uploadedKey();
+    const key = `upload${++uploadCount}`;
+    const room = uploadedRoom(blobs);
+    sceneRenderer.addRoom(key, room);                  // adds ROOMS[key] (ROOMS is the renderer's rooms object)
+    document.querySelector(`.room[data-room="${previous}"]`)?.remove();   // replaced: one entry in the list
+    addRoomRadio(key, room);
+    writeRoomRules();
+    showUploadStatus("Loading your scene…");
+    await sceneRenderer.setRoom(key);
+    if (previous) await dropUploadedRoom(previous);
+
+    const notes = [];
+    const cropped = Object.entries(UPLOAD_FILES).filter(([, kind]) => sq[kind].cropped).map(([name]) => name);
+    if (cropped.length) notes.push(`Cropped to the centre square: ${cropped.join(", ")}.`);
+    const small = Math.min(...Object.values(sq).map(v => v.size));
+    if (small < 1024) notes.push(`The images are small (${small} px), so the scene looks soft.`);
+    try { await window.SheenCustomRoom.save(UPLOAD_STORE_KEY, { blobs }); }
+    catch { notes.push("This browser couldn't store it, so it will be gone after a reload."); }
+    showUploadStatus(`${UPLOAD_LABEL} is in the room list. ${notes.join(" ")}`.trim());
+    uploadActions.hidden = false;
+  } catch (err) {
+    console.warn("shaderSceneRenderer: upload failed", err);
+    showUploadStatus(`Couldn't use these files: ${err.message}`, true);
+  } finally {
+    uploadInput.disabled = false;
+  }
+}
+
+uploadInput.addEventListener("change", () => {
+  if (uploadInput.files.length) useUploadedFiles([...uploadInput.files]);
+  uploadInput.value = "";                              // choosing the same files again fires "change"
+});
+// The control also takes the files dropped on it.
+uploadBox.addEventListener("dragover", e => { e.preventDefault(); uploadBox.classList.add("is-over"); });
+uploadBox.addEventListener("dragleave", () => uploadBox.classList.remove("is-over"));
+uploadBox.addEventListener("drop", e => {
+  e.preventDefault();
+  uploadBox.classList.remove("is-over");
+  if (!uploadInput.disabled) useUploadedFiles([...e.dataTransfer.files]);
+});
+document.getElementById("removeUpload").addEventListener("click", async () => {
+  const key = uploadedKey();
+  uploadActions.hidden = true;
+  if (key) await dropUploadedRoom(key);
+  await window.SheenCustomRoom?.remove(UPLOAD_STORE_KEY).catch(() => {});
+  showUploadStatus("");
+});
+if (uploadedKey()) {
+  uploadActions.hidden = false;
+  showUploadStatus(`${UPLOAD_LABEL} (uploaded earlier) is in the room list.`);
+}
 
 // Boot: load the shaders and photos, then fade the paint in (or fall back to
 // the plain photos with a notice). sceneRenderer.ready settles when done.

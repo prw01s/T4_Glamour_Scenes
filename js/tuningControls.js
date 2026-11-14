@@ -64,22 +64,24 @@
   /**
    * Writes the controls into `fieldset` (its old content is replaced).
    * @param {HTMLFieldSetElement} fieldset  The page's fieldset.controls.
-   * @param {{ subject: "photos" | "video", model?: string, measure?: boolean }} o
+   * @param {{ subject: "photos" | "video", model?: string, measure?: boolean, models?: boolean }} o
    *   measure: include the "Difference from white" toggle (default true).
+   *   models: include the "Tinting algo" selector (default true); without
+   *   it the page renders `model` only.
    * @returns {{ model: string, bind: (renderer: object, opts?: { onChange?: () => void }) => void }}
    *   bind() takes one renderer, or an array of them (every setter goes to each).
    */
-  function mount(fieldset, { subject, model = DEFAULT_MODEL, measure = true }) {
+  function mount(fieldset, { subject, model = DEFAULT_MODEL, measure = true, models = true }) {
     const S = SUBJECTS[subject];
     fieldset.innerHTML = `
       <legend class="vh">Tinting controls</legend>
-      <fieldset class="model">
+      ${models ? `<fieldset class="model">
         <legend class="vh">Shader model</legend>
         <div class="model__row">
           <span class="model__label" aria-hidden="true">Tinting algo</span>
           ${segmented("model", MODELS, model)}
         </div>
-      </fieldset>
+      </fieldset>` : ""}
       <fieldset class="sliders">
         <legend class="vh">${S.title}: adjustments applied before the paint color</legend>
         <div class="sliders__head">

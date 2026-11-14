@@ -21,11 +21,13 @@ Then open:
 
 | Page | What it shows |
 | --- | --- |
-| http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side) |
+| http://localhost:8000/shaderSceneRenderer.html | Two rooms, each in morning, noon and night light (three photos side by side), plus a scene you upload (see "Uploading a scene" below) |
 | http://localhost:8000/videoShaderRenderer.html | One room in a video whose light changes; every frame is repainted |
 | http://localhost:8000/day-to-night.html | One room from morning to night and back (two videos played as one): autoplay loop, time points, drag through the day |
 | http://localhost:8000/sheenSceneRenderer.html | Four rooms (chosen from a Scene list), each by day and by night in Flat, Eggshell, Satin or Semi-gloss: reflections, sheen bands and the colour shift of each finish (see "Paint sheen" below; `?calib` draws the solved room geometry) |
 | http://localhost:8000/sheenCalibrate.html | Calibrates a new room for the sheen page from a day photo, a night photo and a wall mask (see "Calibrating a new room" below); `sheenSceneRenderer.html?custom` then shows it |
+| http://localhost:8000/sheenVideo.html | One room in a video from morning to night: paint colour and sheen (Flat / Eggshell / Satin / Semi-gloss, each with a ±50 % degree slider) on every frame, with the day-to-night timeline (see "sheenVideo.html" below) |
+| http://localhost:8000/roomMovie.html | Prototype of the room movie: one room rebuilt live from Blender light layers, with time of day, lamp and paint controls that animate the light itself (see "Room movie prototype" below; `?debug` shows the light levels) |
 | http://localhost:8000/tests/ | Automated tests of the colour science and the shaders |
 
 Add `?nogl` to a page's address to see its fallback (plain photos / video).
@@ -43,6 +45,7 @@ shaderSceneRenderer.html ─ js/shaderSceneRender.js ─┐   tiles, rooms, fade
 videoShaderRenderer.html ─ js/videoShaderRender.js ─┤   video frames, frame-locked layers, paint fades
 day-to-night.html ──────── js/videoShaderRender.js ─┤   (one renderer per video, shared statistics)
 sheenSceneRenderer.html ── js/shaderSceneRender.js ─┤   (sheen mode) + js/sheenModel.js: sheens, rooms, lamps
+sheenVideo.html ────────── js/videoShaderRender.js ─┤   (sheen option, v2) + the timeline of day-to-night
                            glsl/sheen.glsl          │   ENV + ENVDOWN passes, sheen code in RENDER
                            js/dayNightSequence.js   │   eased loop and moves, crossfades, scrubbing
                            js/tuningControls.js ────┤   Tinting algo, sliders (markup + wiring)
@@ -151,6 +154,65 @@ or dragged, and the playhead is a keyboard slider. Both videos are painted by
 one shared GPU pipeline at the film's size on screen. Smooth seeking depends
 on the video encoding: see "Exporting the videos" below.
 
+## sheenVideo.html (paint colour and sheen on a video)
+
+One room (`images/videos/primary_hero_morning-to-night.mp4`) from morning to
+night, its walls repainted in a chosen colour and sheen on every frame.
+
+* **The film** works as day-to-night.html (`js/dayNightSequence.js`: timeline
+  with Morning 0 s, Afternoon 1 s, Sunset 3 s, Night; autoplay; eased moves;
+  scrubbing). The file runs morning -> night -> morning (239 frames; frame k
+  mirrors frame 238 - k, night = frame 119), so the two tracks are two copies
+  of it: the forward copy plays the first half, the backward copy the second
+  (`backwardEnd: 2 × span`). A move to an earlier time crossfades to the
+  backward copy, which looks like the film playing in reverse.
+* **Tinting**: Perceptual (v2) only, with the Contrast and Saturation sliders
+  (`TuningControls.mount(…, { models: false })`), plus v2's optional detail
+  layer (`v2Detail`): v2 lights the paint from the blurred light map, which
+  smooths away leaf-shadow edges and the panel seam; as v3 does, the fine
+  brightness detail is restored from the full-resolution frame (its
+  luminance / the blurred luminance, light map .w). Off on every other page.
+* **Sheen**: the sheen model of sheenSceneRenderer.html (glsl/sheen.glsl),
+  now also on top of v2 (`v2Lit` / `v2Finish` in the RENDER shader; the sheen
+  code works in v2's units, refY = 1) and on 16:9 frames (`camAspect`). The
+  room comes from the Blender reconstruction of this room
+  (`images/room_movie/scene.json`, `SheenModel.roomFromCamera`): two walls,
+  floor, ceiling and the walls behind the camera. Where the sheen shows
+  (docs/sheen-science.md §5D-5E): in the light already on the walls. In the
+  sunlit patches between the leaves' shadows (the frame's light above the
+  local shade, reflected toward the sun's direction: the camera sees the main
+  wall 9-17° from its mirror direction near the corner), and in the light
+  the table lamp casts (its modelled light on the wall x each finish's 60°
+  gloss reading) plus its mirror highlight. The smooth sheen is rolled off
+  at 2x the paint's own lit light so it reads as shine, not more light; the
+  wall texture's glints on top are not (as on the photo page; §5F). The room's reflections only deepen the colour; the window is not
+  reflected. The frames carry no
+  wall-texture map; the procedural relief below stands in for it.
+* **Sharp and hazy reflections** (docs/sheen-science.md §5C). Every sheen
+  but Flat reflects through a sharp core plus a wider haze halo (two GGX
+  lobes, after Barla et al. 2018). The halo's share is solved with the
+  virtual gloss meter so the 60° and 85° readings stay in their MPI bands
+  (`python3 -I tests/sheen_check.py`, §D). The core is one exact mirror
+  lookup, crisp near contact and soft far away; the reflection environment
+  is at the render size. The cabinet top is a surface the wall reflects
+  where it meets it. The walls carry a procedural relief
+  (waviness 0.15°, roller stipple 0.15° at 1.5 mm) that bends reflected
+  edges and adds a fine grain.
+* **Degree of sheen** (±50 % per sheen, `SheenModel.sheenAtDegree`): the
+  film's roughness scaled by 1 / degree (GGX α and the grazing coefficient k)
+  and the gloss lobe's share by degree. Moving a sheen's slider selects it.
+* **Speed**: autoplay runs at the video's own speed (1×), eased into
+  morning and night. Per frame (M2 Pro, 1920 × 1080): ~16 ms of GPU for the
+  paint and sheen - the light map and reflection environment at half size
+  (`analysisScale: 0.5`; the reflection environment stays full size),
+  8 halo samples per pixel (`lobeSamples`) plus one core lookup,
+  and no sheen work on pixels the mask shows as not wall.
+* **Mask**: `images/masks/primary_hero_mask.png`, built from shapes measured
+  on the frames by `tools/primaryHeroMask.html` (preview over any frame,
+  download). It can be retouched by hand.
+* Scripting: `window.sheenVideo` (`setSheen`, `setSheenDegree`, `sequence`,
+  `renderers`); `?sheen=satin&paint=2f3d4c` set the start.
+
 ## Paint sheen (sheenSceneRenderer.html)
 
 Sheen is roughness, not reflectivity: every paint reflects ~4 % of light at
@@ -165,11 +227,13 @@ research, with sources and measurements, is in `docs/sheen-science.md`.
   colours are measured specular-included, which is the matte look, so v3's
   result is Flat; each other sheen swaps the swatch's surface veil for what
   a GGX gloss lobe actually reflects: `c' = c + (1 − v) Fs (Ls − W)`.
-* **Sheens** (`SHEENS` in `js/sheenModel.js`): GGX α 0.30 / 0.075 / 0.045 /
-  0.025, diffused share v 0.95 / 0.45 / 0.30 / 0.10, grazing coefficient for
-  85° sheen. A virtual ASTM D523 gloss meter puts them inside the MPI levels:
-  60° GU 0.2 / 10.9 / 23.7 / 48.5, 85° 3.5 / 22.1 / 47.8 / 84.9 (G1, G3, G4,
-  G5). The lobe's albedo uses exact Fresnel (n = 1.5) and Smith masking.
+* **Sheens** (`SHEENS` in `js/sheenModel.js`): a sharp core plus a haze
+  halo (docs/sheen-science.md §5C): core GGX α 0.30 / 0.035 / 0.018 / 0.010,
+  halo α – / 0.14 / 0.09 / 0.07 with share 0 / 0.66 / 0.63 / 0.43; diffused
+  share v 0.95 / 0.45 / 0.30 / 0.10, grazing coefficient for 85° sheen. A
+  virtual ASTM D523 gloss meter puts them inside the MPI levels: 60° GU
+  0.2 / 10.9 / 23.7 / 48.4, 85° 3.5 / 22.6 / 47.4 / 81.2 (G1, G3, G4, G5).
+  The lobes' albedos use exact Fresnel (n = 1.5) and Smith masking.
 * **Four scenes** (Scene list; `ROOMS` in the page): living room, living
   room 2, deck and study, each with a day and a night photo. Every room's
   geometry is measured lines in its photo (`?calib` overlays the result).
@@ -270,6 +334,99 @@ detection alone is often wrong (the rooms' second direction has few lines -
 furniture outvotes it), so step 2 needs a look every time. With the lines
 checked and snapped, living room 2 came out at f = 4346 px against 4532 px by
 hand, inside the tool's own ±3.5 % uncertainty.
+
+## Uploading a scene (shaderSceneRenderer.html)
+
+**Upload Scene**, under the room list, takes four files of one room, by
+name (any letter case): `mask.png`, `morning.jpg`, `noon.jpg` and
+`night.jpg`. Choose them together, or drop them on the control. The photos
+must be taken from the same spot and line up with the mask, whose black
+(or transparent) pixels are the walls, as in the built-in masks.
+
+* Each image is cropped to its centre square (the tiles are square) and
+  scaled down to 2048² if larger; square images up to 2048² are used
+  unchanged. All four must have the same shape.
+* The mask must mark some wall but not the whole picture; files that aren't
+  images, have other names or are missing are refused with a message, and
+  the scene on screen stays.
+* The scene joins the room list as **Your Scene** and is shown at once, with
+  every paint, tinting algo and slider. Nothing about it is tuned by hand:
+  this page's models read all their light from the photos, so an upload of a
+  built-in room's photos renders the same pixels as the built-in room.
+* It is kept in the browser (IndexedDB, through `js/sheenCustomRoom.js`) and
+  is still in the list after a reload. A new upload replaces it; **Remove
+  this scene** deletes it.
+
+For scripting, the renderer's `addRoom(key, room)` and `removeRoom(key)`
+add and remove rooms at run time (`js/shaderSceneRender.js`).
+
+## Room movie prototype (roomMovie.html)
+
+Phase 2 of `docs/room-movie-plan.md`: the room in `images/room_movie/reference.webp`,
+rebuilt in Blender and relit live in the browser. Nothing in it is a finished
+frame; the shader adds up light layers for the current settings:
+
+* **Time of day** (morning, afternoon sunset, night) moves the sun along its
+  path, always forward in time: the patch sweeps across the wall and warms,
+  the sun sets, the sky dims, dawn breaks. Sun light from a clear-sky
+  atmosphere model; sky light by sun height, twilight included.
+* **Lamp** off or 1800 / 2700 / 4000 / 6000 K (blackbody, 800 lm).
+* **Paint**: a sample palette. Each colour's spectrum is estimated from its
+  hex value for now (the plan calls for measured spectra); the paint changes
+  the bounced light through a per-pixel fit of three renders.
+* Leaf shadows come from looping videos of a CG tree, projected through the
+  window and blurred over the sun's disc; window, lamp and cabinet cast shadows.
+* A new paint sweeps across the walls from the far left to the window.
+
+Rebuilding the assets (Blender 5.2, headless; renders take ~15 min on an M2 Pro):
+
+```
+B=/Applications/Blender.app/Contents/MacOS/Blender
+$B -b --factory-startup -P tools/roomMovie/build_scene.py
+$B -b tools/roomMovie/build/room.blend -P tools/roomMovie/render_layers.py -- all   # includes maskhi (the 1920 x 1080 geometry)
+$B -b --factory-startup -P tools/roomMovie/fit_layers.py
+```
+
+`build_scene.py` solves the camera from points measured on the reference and
+the window and morning sun from its sun patch; `render_layers.py` renders
+every light at unit strength with the walls at three albedos (clamps off,
+24 diffuse bounces, lighting passes denoised one by one);
+`fit_layers.py` writes the page's assets to `images/room_movie/`. The
+intermediate files (`tools/roomMovie/build/`, ~350 MB) can be deleted.
+
+Scripting: `window.roomMovie` has `setTime("morning" | "sunset" | "night")`,
+`setLamp(0 | kelvin)`, `setPaint(hex)`, `settle()` (jump to the targets),
+`renderOnce()` (browsers pause animation in hidden tabs) and `debugView = 1`
+(the sun's leaf transmission). Tests: `tests/` checks the sun's colour by
+elevation against published values, the twilight sky and the adaptation table.
+
+Resolution: the frame is drawn at 1920 x 1080 from geometry rendered at that
+size (normals, distance, albedo, surface class), so the sun patch, the
+dapples, the shadows and every outline are computed per full-size pixel. The
+light layers stay at 960 x 540 and are upsampled edge-aware (only from texels
+of the same surface), so light never bleeds across an outline. About 5 ms per
+frame on an M2 Pro.
+
+The window view moves with the wind: it is stored as what is behind the tree
+and the foliage's colour (per time of day), mixed by the tree's coverage, a
+small greyscale video (`window_cov.mp4`) from the same wind loop as the leaf
+shadows. The page keeps all the loops on one clock.
+
+At night the window turns into a dark mirror: the lamp-lit room reflected in
+the glass is a ninth layer (`lampref`, rendered with a glass pane only the
+camera sees, at the three wall albedos), so it changes with the paint and the
+lamp's colour; by day it disappears against the bright view, as it does in reality.
+
+Assets: ~21 MB in total, about 13 MB of light layers and geometry plus 8 MB
+of video. The float16 layers are packed for compression (`fit_layers.py`
+`pack_half`: mantissa rounded to 8 bits, under 0.4 %, for the light and kept
+whole for the geometry; row-wise differences; high and low bytes in separate
+planes) and gzipped; the page decompresses them with the browser's own
+`DecompressionStream` (6.4x smaller than raw; the rendered frames match the
+uncompressed ones to within 1 level in 99 % of pixels). A server that adds
+`Content-Encoding: gzip` for `.gz` files on its own would break this: serve
+them as plain files. KTX2 (Basis UASTC HDR) would also cut GPU memory, but
+needs the Basis encoder and transcoder, which this project does not include.
 
 ## Controls
 

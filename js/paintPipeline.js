@@ -1002,7 +1002,7 @@
    * @property {Target} mean  1 x 1: the image's mean wall light (MEAN), for RENDER.
    * @property {string | null} analysedFor  Analysis cache key, null = stale.
    * @property {EnvPyramid | null} env  Sheen only: the reflection environment,
-   *   created on first use.
+   *   created on first use (envSize, by default the analysis size).
    *
    * @typedef {Object} EnvPyramid
    * @property {WebGLTexture} tex  RGBA16F at the analysis size with every mip level.
@@ -1031,8 +1031,10 @@
    * @property {PaintSpec} paint
    * @property {SceneSpec} scene
    * @property {number} detailGamma  v3: detail strength x the contrast exponent.
+   * @property {number} [v2Detail=0]  v2: the same for v2's optional detail
+   *   layer (0 = off, v2 as before; sheenVideo.html turns it on).
    * @property {SheenJob} [sheen]  Required by a pipeline with the `sheen` option
-   *   (v3 only): the paint's sheen and the room geometry.
+   *   (v3 or v2): the paint's sheen and the room geometry.
    *
    * @typedef {Object} SheenJob
    * @property {SourceHandle} mask  The room's wall mask (for the environment).
@@ -1082,6 +1084,9 @@
      *   after compositing (true when they are copied out with drawImage later).
      * @param {boolean} [o.sheen=false]  Paint sheen (glsl/sheen.glsl): needs
      *   sources loaded with a sheenUrl; every render() then needs a `sheen` job.
+     * @param {[number, number]} [o.envSize]  Sheen: the reflection
+     *   environment's size (default: the analysis size). The render size
+     *   keeps sharp reflections sharp when the analysis is smaller.
      * @throws {PaintError} "webgl" when WebGL2, float targets or the sizes aren't supported.
      */
     constructor(canvas, o) {
@@ -1093,6 +1098,7 @@
       this.#hooks = o.hooks;
       this.#wideGamut = !!o.wideGamut;
       this.sheen = !!o.sheen;
+      [this.ew, this.eh] = o.envSize || o.analysis;
       if (this.sheen && !o.sources.renderSheen) throw new Error("LightPipeline: sheen needs shaders loaded with a sheenUrl");
       canvas.addEventListener("webglcontextlost", e => e.preventDefault());
       canvas.addEventListener("webglcontextrestored", () => this.#restore());
@@ -1329,7 +1335,7 @@
       let soft = light, raw = T.lin;                            // blurred: adjusted / unadjusted
       if (blurs) {
         this.#blur(light, T.blurred); soft = T.blurred;
-        if (model === "v3") { if (adjust) { this.#blur(T.lin, T.raw); raw = T.raw; } else raw = T.blurred; }
+        if (model !== "v1") { if (adjust) { this.#blur(T.lin, T.raw); raw = T.raw; } else raw = T.blurred; }
       }
       this.#draw(P.analyse, lightMap.target, { lightLin: soft.tex, sharpLin: light.tex, rawLin: raw.tex },
                  { model: MODELS[model], refY });
@@ -1342,7 +1348,7 @@
      * images share this pipeline).
      * @param {RenderJob} job
      */
-    render({ lightMap, src, model, paint, scene, detailGamma, sheen = null }) {
+    render({ lightMap, src, model, paint, scene, detailGamma, v2Detail = 0, sheen = null }) {
       const S = SHADER_DEFAULTS;
       const uniforms = {
         size: [this.rw, this.rh], model: MODELS[model], dither: S.dither ? 1 : 0, srcLinear: src.srgb ? 1 : 0,
@@ -1355,19 +1361,23 @@
         // v3
         cmf: CMF, paintW: paint.paintW, whiteNorm: WHITE_NORM, paintFix: paint.paintFix,
         adaptMat: scene.adaptMat, refY: scene.refY, v3Ambient: S.v3.ambient, v3BounceShare: S.v3.bounceShare,
-        bounceRGB: paint.bounceRGB, detailGamma
+        bounceRGB: paint.bounceRGB, detailGamma,
+        v2Detail: model === "v2" ? v2Detail : 0
       };
       const textures = { lightMap: lightMap.target.tex, src: src.tex, frameMean: lightMap.mean.tex };
       if (!this.sheen) { this.#draw(this.progs.render, null, textures, uniforms); return; }
-      if (!sheen || model !== "v3") throw new Error("LightPipeline: a sheen pipeline renders v3 with a sheen job");
+      if (!sheen || (model !== "v3" && model !== "v2")) throw new Error("LightPipeline: a sheen pipeline renders v3 or v2 with a sheen job");
       const env = this.#envFor(lightMap);
       Object.assign(uniforms, sheen.uniforms, {
         envMaxLod: env.sizes.length - 1, envSize: env.sizes[0][0]
       });
+      // v2's light is in the photo's own linear units (white = 1): the sheen
+      // code's reference white is then 1 (glsl/sheen.glsl, SHEEN).
+      if (model === "v2") uniforms.refY = 1;
       textures.wallMask = sheen.mask.tex;
-      // ENV: the environment depends on the photo's analysis, the paint and
-      // the geometry, not on the sheen, so a sheen change skips it.
-      const key = [lightMap.analysedFor, paint.hex, ...paint.albedo, scene.refY, sheen.envKey, sheen.mask.version].join("|");
+      // ENV: the environment depends on the photo's analysis, the model, the
+      // paint and the geometry, not on the sheen, so a sheen change skips it.
+      const key = [lightMap.analysedFor, model, paint.hex, ...paint.albedo, uniforms.refY, sheen.envKey, sheen.mask.version].join("|");
       if (env.key !== key) {
         this.#draw(this.progs.render, { fbo: env.fbos[0], w: env.sizes[0][0], h: env.sizes[0][1] },
                    { ...textures, envTex: lightMap.mean.tex },        // never the env itself (feedback loop)
@@ -1388,13 +1398,13 @@
     #envFor(lightMap) {
       if (lightMap.env) return lightMap.env;
       const gl = this.gl, sizes = [];
-      for (let w = this.aw, h = this.ah; ; w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) {
+      for (let w = this.ew, h = this.eh; ; w = Math.max(1, w >> 1), h = Math.max(1, h >> 1)) {
         sizes.push([w, h]);
         if (w === 1 && h === 1) break;
       }
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texStorage2D(gl.TEXTURE_2D, sizes.length, gl.RGBA16F, this.aw, this.ah);
+      gl.texStorage2D(gl.TEXTURE_2D, sizes.length, gl.RGBA16F, this.ew, this.eh);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);

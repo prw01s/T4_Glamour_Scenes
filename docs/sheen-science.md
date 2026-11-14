@@ -393,6 +393,155 @@ The living room's daylight comes from windows that the photo barely shows. Its t
 
 ---
 
+## 5C. Sharp and hazy reflections, wall relief (fourth pass, sheenVideo.html)
+
+**The problem.** On the video page the smoother sheens showed reflections that were all equally soft: no crisp areas. Five causes, each checked on the frames:
+
+1. **One lobe per sheen.** To match a gloss reading, a single GGX lobe has to sit between a glossy coating's sharp core and its haze, so nothing is ever crisp.
+2. **Environment resolution.** The reflection environment followed the half-size light map.
+3. **Sampling.** Eight filtered samples each read a blurrier pyramid level than the lobe alone justifies.
+4. **Flat out-of-frame panes.** The window's panes outside the frame were flat rectangles of one radiance, with no structure to be sharp about.
+5. **No relief.** The walls had no surface relief.
+
+**What glossy coatings do** [S]:
+
+- **Core and halo.** Glossy coatings reflect through a sharp core flanked by a halo.
+  - Observers judge gloss mostly by the sharpest reflections, and see the halo as a separate attribute, haze (Vangorp, Barla & Fleming 2017, *The perception of hazy gloss*, JoV: https://jov.arvojournals.org/article.aspx?articleid=2630339).
+  - Barla, Pacanowski & Vangorp (2018) model this as two lobes, the wide one α_w = α_n(1 + λ_h). Their example is α_n = 0.01, λ_h = 7: https://hal.science/hal-01818666
+  - ASTM E430 haze is light 2–5° from the specular direction.
+  - Löw et al. 2012 find measured glossy BRDFs have narrow peaks with wide tails that single microfacet lobes fit poorly: https://www.itn.liu.se/~jonun48/web/papers/2012-TOG/main.pdf
+- **Orange peel.**
+  - Konieczny & Meyer (2011, *Computer rendering and visual detection of orange peel*, JCTR) render orange peel as a sum of random height fields, one per wave-scan band (0.1–30 mm), drawn as normal maps: https://www-users.cse.umn.edu/~gmeyer/papers/konieczny-meyer-jctr-2011.pdf
+  - Their conversion gives slope SDs of about 0.25–0.35° per band for good finishes, up to ~1.7° for poor ones.
+  - Long waves distort reflections, short waves blur them; orange peel is more visible on dark colours.
+  - A roller-applied semi-gloss shows 40–55 µm peaks (PCI 2015: https://www.pcimag.com/articles/101065-novel-enabling-techniques-to-quantify-wet-and-dry-coating-properties).
+- **Gloss data.** Data sheets give 60° gloss only:
+  - Proline 8020 semi-gloss: 60° 50–60, 85° 65–85.
+  - Sherwin-Williams SuperPaint semi-gloss: 25–35 at 60°.
+  - No 20° data were found, so **the core widths are estimates** [E].
+
+**The model now** (`SHEENS` in js/sheenModel.js; tests/sheen_check.py §D, §E):
+
+- **Core + halo.**
+
+  | | core α | halo α | halo share β | 20° GU (single lobe → now) | 60° / 85° |
+  |---|---|---|---|---|---|
+  | Eggshell | 0.035 | 0.140 | 0.662 | 1.3 → 2.0 | unchanged |
+  | Satin | 0.018 | 0.090 | 0.632 | 4.3 → 7.4 | unchanged |
+  | Semi-gloss | 0.010 | 0.070 | 0.432 | 14.7 → 24.9 | unchanged |
+
+  - β is solved, not set: each sheen keeps its single-lobe 60° reading, so 60° and 85° stay in their MPI bands.
+  - Off-highlight colour shifts are unchanged (§B), because albedo is preserved.
+  - Flat stays one lobe.
+- **Rendering.**
+  - The **core** is one lookup along the mirror direction of the (textured) normal, read at the pyramid level of the lobe's own solid angle (filtered importance sampling with one sample, ω = 4πα²·NoV). It is crisp where the reflected object is near the wall and soft where it is far.
+  - The **halo** is sampled as before.
+  - The lamp highlight is the two lobes weighted by their shares.
+  - The environment is at the render size.
+- **Windows with a source.** A window outside the frame can show what the photo shows through another rectangle (`source`), mapped exactly in 3-D and read at the level its footprint needs. The out-of-frame panes show the view through the visible pane: trees, mullions and the window's gain.
+  - A rectangle that is **its own source** is a bounded surface seen in the photo. The video's cabinet top is one, fitted to the frame: back edge on the window wall at 0.813 m at every measured point, 0.5 m deep.
+  - It gives the contact reflections (counter, lamp base, bowl) that were landing on the floor plane.
+- **Wall relief** (`WallRelief`; glsl/sheen.glsl `wallSlope`). Gradient noise with analytic gradients, in metres on the wall:
+  - long-wave waviness: three octaves from 30 cm, 0.15° RMS;
+  - roller stipple: two octaves from 1.5 mm, 0.15° RMS, stretched 1.6× vertically.
+  - The noise's RMS gradient was measured on a Python port (0.624, §E).
+  - Compared on the frame, 0.35° stipple at 3 mm read as hammered glass and scrambled the window reflection. At 1.5 mm the grain stays near pixel scale and edges stay crisp.
+  - Relief shows only through the surface reflection, as on real walls.
+
+**Checks.** tests/ verify:
+- the reflected edge of a window is 4 px wide in semi-gloss against 9 px in satin;
+- a sourced window reflects the photo's pattern;
+- relief bends a reflected edge (SD 0.6 → 6.1 px) and zero relief changes nothing.
+
+**Night.** The lamp's mirror highlight lands where geometry predicts (x ≈ 722 px), at +30 % of the wall there. An energy balance on the frame shows the video's lamp brightens the wall above it by only ~0.04 (linear), so a larger gain would contradict the video's own lighting. A lamp 0.3 m from a wall, 0.25 m wide, gives a highlight of about F·(d/r)² ≈ 40 % of the light it casts there. So the night sheen of this room is a modest glow.
+
+## 5D. What a glossy wall in this room shows: its own light (fifth pass)
+
+**Feedback.** The reflected window shapes of §5C didn't match the window and aren't what this room's walls show. They were placed through the approximate reconstruction, and the out-of-frame panes repeated one pane's view. The sheen should appear where the light falls on the walls (the patches between the leaves' shadows) and from the table lamp.
+
+**The physics that was missing.** The sun's own reflection. A glossy wall reflects a distant light in its gloss lobe toward the viewer. The environment can't hold the sun: it is at infinity, not where the window is seen, so a mirror ray from a sunlit patch reads the trees in the window, not the sun.
+
+Geometry from the reconstruction's sun keys:
+
+| main wall, image x | angle from the sun's mirror direction | half-angle θh |
+|---|---|---|
+| 650–850 (near the corner) | 9–17° | 5–10° |
+| 150–400 (further left) | 20–30° | 10–16° |
+
+Semi-gloss's halo (α 0.07) reflects about twice the paint's diffuse brightness at θh 5°. So the sunlit patches near the corner must shine, fading to the left [E].
+
+**Direct-light specular** (glsl/sheen.glsl `directSpecular`):
+- The frame shows where the direct light falls and how strong it is. The original walls are white, so the frame's own pixel above the shade's ambient level, less the lamp model's share, is that light on a white wall (its irradiance / π), in its colour, at full resolution.
+- Its reflection is that irradiance × the two-lobe gloss BRDF for the sun's direction, widened by the sun's disc (0.27°), on the textured normal. The leaf edges stay as sharp as the shadows; the stipple adds grain.
+- Measured from the pixel, not from the model's light: v2's light has a fill floor, so its shade isn't the frame's shade. The first version used it, and the shadows shone too; a GPU test now checks that shade is unchanged.
+- **Direction:** the reconstruction's keys (morning frame 0, midday 36, sunset 72, moon from 100), interpolated.
+- **Ambient:** per frame, the 15th percentile of the main wall's max-channel light (x 40–760, y 40–760).
+
+**The window** is no longer boosted or extended beyond the frame. The walls reflect the room as the frame shows it.
+
+**The lamp.**
+- The highlight was in the right place (the dome's mirror image in the main wall, x ≈ 720–740, y ≈ 660) but 3× too dim. The sphere light's radius was half the shade's width (112 px), while the opal dome is a flat half-ellipse (224 × 76 px), a third of that circle's area.
+- A sphere light's reflection has the brightness I / (πr²) × Fresnel, so the oversized sphere diluted it. Its radius is now that of a disc with the dome's lit area, measured per frame (≈ 0.073 m).
+- The light it casts (I / d²) is unchanged, so the energy check of §5C still holds.
+- At night Semi-gloss now shows a compact glow there, up to 3.8× the Flat wall (+280 %). The rest of the wall reads 10–17 % deeper, the off-highlight deepening of §3.
+
+## 5E. Sheen only in the light already on the wall (sixth pass)
+
+**Feedback.** §5D's direct-light reflection looked like additional sunlight. The sheen should show in the cast sunlight already on the wall (the light with the leaves' shadows in it) and in the light the table lamp casts.
+
+**Measured on the frame** (afternoon, Semi-gloss vs Flat, by component):
+- Room reflections only darkened the wall (−5 to −20 %).
+- The lamp added nothing by day.
+- The direct-light term added +100 to +362 % near the corner. Two causes:
+  1. **The baseline.** It was the wall's global shade level, so the bounce light and the lamp's glow near the corner counted as sunlight.
+  2. **No headroom.** The physical glare there (2–4× the paint's diffuse light) on a display-referred frame whose patches are already bright clips toward white. It reads as more sunlight, not shine.
+
+**Now:**
+- **Sunlight = the excess over the local shade.** That is the darkest wall light on two rings 64 and 128 px around the pixel. The patches are bounded by the leaves' shadows within that distance; slowly varying light (bounce, the lamp's glow) is the same on the rings and doesn't count. The sheen follows the patches exactly.
+- **Headroom.** The sheen of a sunlit patch is rolled off against the paint's own sunlit radiance (albedo × the patch's sunlight): r → R(1 − e^(−r/R)), R = 1.2.
+  - Compared on the frame at 0.6 / 1.0 / 1.4: 0.6 is too faint to read as sheen, 1.4 starts to whiten the patches.
+  - This is a display decision, not physics, made because the frame is display-referred.
+- **The lamp: sheen in the light it casts.** Seen from this camera, the lamp's mirror highlight lands at x ≈ 720, away from the light it casts around itself (the wall beside and behind it). So a highlight alone can't show the lamp-lit wall's gloss.
+  - The lamp-lit wall now shines in proportion to the lamp's light on it (its modelled light, which matches the frame per §5C), in the lamp's colour, times the finish's gloss.
+  - The gloss is each sheen's 60° reading on the virtual gloss meter: 0.2 / 10.9 / 23.7 / 48.4 GU, times the degree slider, times a gain of 0.4.
+  - The mirror highlight is capped like the sun's, against the paint's lamp-lit radiance.
+  - Result at night: Semi-gloss +48–78 % next to the shade, +10–30 % further out, and nothing where the lamp's light doesn't reach.
+- **Not reflected:** the window (no gain, no out-of-frame panes). Room reflections only deepen the colour, as before.
+
+## 5F. As much gloss as the photo page (seventh pass)
+
+**Feedback.** There was still much less surface reflectivity on the walls than there should be. The task: review the photo sheen page's approach.
+
+**Measured, Semi-gloss vs Flat over wall pixels:**
+
+| | top 10 % | top 1 % | peak (top 0.1 %) |
+|---|---|---|---|
+| photo page (living room 2), day | +83 % | +466 % | +883 % |
+| video page before, day | +25 % | +48 % | +118 % |
+| video page before, night | +22 % | +62 % | +174 % |
+
+**Why.** The photo page's peaks are **glints**: micro-normals from the walls' own texture, tilts of 0.6–1.4° (§5.2), which its narrow lobes turn into sparkle. They are never capped. The video page had:
+- texture of 0.15°, so no glints;
+- a cap on the whole highlight, which flattened what glints there were.
+
+**Now:**
+- **Texture.** Roller stipple 1.0° RMS at 1.5 mm, within the photo page's measured range, at pixel scale; waviness 0.3°. Reflections of the window looked like hammered glass at 0.35° in §5C, but no picture is reflected now, only light on the wall.
+- **The cap applies to the smooth sheen only:** the gloss of the wall without its texture, rolled off at 2.0 × the paint's own sunlit or lamp-lit light. The texture's variation is multiplied on top uncapped (`textureGain`, at most 8×): broad glare read as more sunlight, sparse glints read as gloss.
+- **The lamp's lit-wall sheen.** Its gain is 1.0 (Semi-gloss: 0.48 of the lamp's light on a white wall), with glints toward the lamp.
+
+**Result:**
+
+| | top 10 % | top 1 % | pixels > +20 % |
+|---|---|---|---|
+| Eggshell, day | +17 % | +40 % | 8 % |
+| Satin, day | +45 % | +99 % | 20 % |
+| Semi-gloss, day | +123 % | +254 % | 37 % |
+| Semi-gloss, night | +74 % | +157 % | 45 % |
+
+- The sunlit leaf patches sparkle with glints near the corner. The lamp-lit wall shines around the lamp.
+- Nothing is added outside light already on the wall.
+- 16 ms per frame on an M2 Pro.
+
 ## 6. Limits and what would improve it
 
 - **Estimated values:**

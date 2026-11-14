@@ -184,7 +184,9 @@ void main() {
 
 //@@SHEEN
 // Appended to RENDER (see the file header): uses its uniforms (lightMap, src,
-// srcLinear, refY, size, ...), v3Lit() and hash().
+// srcLinear, refY, size, model, albedo, ...), v3Lit(), v2Lit() and hash().
+// With v2 (sheenVideo.html), JS sets refY = 1: v2's light is in the photo's
+// own linear units (a white pixel is 1), so every term below is too.
 //
 // envTex      the reflection environment: RGBA16F, mipmapped by ENVDOWN.
 //             Linear light in reference-white units (v3's: photo / refY).
@@ -199,6 +201,9 @@ void main() {
 // sheenFloor  darkening floor (see 7. in the header)
 // camC, camF, camRot   the camera: principal point (image units, v down),
 //             focal length (image widths), cos/sin of the roll
+// camAspect   the image's height / width (image units <-> texture 0..1)
+// sheenDetail 1 when the source's alpha carries the wall-texture map (photos);
+//             0 for video frames (opaque alpha): no micro-normals
 // roomPlanes  the room's planes, walls first, then the floor (and a
 //             ceiling): xyz = normal (into the room), w = h; points X on the
 //             plane satisfy dot(n, X) = h. Camera space: x right, y up,
@@ -211,9 +216,27 @@ uniform sampler2D wallMask;
 uniform float envMaxLod, envSize;
 uniform vec3  sheenP;
 uniform vec4  sheenAlb[8];
+// The halo (hazy gloss, js/sheenModel.js SHEENS): sheenH = (its GGX alpha,
+// its share beta of the lobe); sheenAlbH its albedo table. beta = 0: one lobe.
+uniform vec2  sheenH;
+uniform vec4  sheenAlbH[8];
+// Wall relief (js/sheenModel.js WallRelief; 0 = smooth walls): RMS slopes of
+// the long-wave waviness and of the roller stipple (radians), and their
+// wavelengths (metres; rooms in metres only).
+uniform vec2  wallRelief, reliefScale;
+// Direct light read from the frame (sheenVideo.html; sunAmb < 0: off): the
+// direction TOWARD the sun or moon (camera space), and the ambient level of
+// the wall's light (max channel, the photo's units) below which the wall is
+// in shade. The wall's light above it, less the lamps', is that light.
+uniform vec3  sunDir;
+uniform float sunAmb, sunHeadroom;
+// The lamp's lit-area sheen (sheenVideo.html; 0 = off): the share of the
+// light the lamp casts on the wall that the finish sends back as sheen.
+uniform float litSheen;
 uniform float sheenIor, sheenFloor;
 uniform vec2  camC, camRot;
-uniform float camF;
+uniform float camF, camAspect;
+uniform int   sheenDetail;      // 1: the source's alpha holds the wall-texture map (photoWithDetail)
 #define MAX_PLANES 8
 #define MAX_EMITTERS 6
 uniform vec4  roomPlanes[MAX_PLANES];
@@ -233,28 +256,40 @@ uniform int   lampCount;
 // Windows outside the photo (js/sheenModel.js placeWindows): rectangles
 // winO + s winU + q winV (s, q in 0..1, camera space), radiance winL (the
 // photo's linear units; divided by refY here).
-#define MAX_WINDOWS 3
+#define MAX_WINDOWS 5
 uniform vec3  winO[MAX_WINDOWS];
 uniform vec3  winU[MAX_WINDOWS];
 uniform vec3  winV[MAX_WINDOWS];
 uniform vec3  winL[MAX_WINDOWS];
 uniform int   winCount;
+// A window may show what the photo shows through another rectangle (a
+// visible pane of the same window): winSO + s winSU + q winSV, camera space;
+// winSU = 0: the flat radiance winL instead. With a source, winL tints it.
+// A rectangle that is its own source is a bounded surface seen in the photo
+// (a cabinet top): rays that reach it read the photo where it is.
+uniform vec3  winSO[MAX_WINDOWS];
+uniform vec3  winSU[MAX_WINDOWS];
+uniform vec3  winSV[MAX_WINDOWS];
 
 const float PI = 3.14159265;
 
 // ---- camera (mirrors cameraRay / project in js/sheenModel.js) --------------
+// The camera works in image units (image widths, v down); the textures in
+// 0..1 per axis. camAspect = height / width converts between them (1 for the
+// square photos; 9/16 for a 16:9 video).
 // Image offset from the principal point, rotated by -roll, so that the
 // horizon is horizontal and room verticals are image verticals.
 vec2 unroll(vec2 uv) {
-  vec2 q = uv - camC;
+  vec2 q = vec2(uv.x, uv.y * camAspect) - camC;
   return vec2(camRot.x * q.x + camRot.y * q.y, -camRot.y * q.x + camRot.x * q.y);
 }
-// Camera-space direction through image point uv (image v points down, camera y up).
+// Camera-space direction through texture point uv (image v points down, camera y up).
 vec3 camRay(vec2 uv) { vec2 q = unroll(uv); return normalize(vec3(q.x / camF, -q.y / camF, 1.0)); }
-// Image point of camera-space point X (z > 0).
+// Texture point of camera-space point X (z > 0).
 vec2 project(vec3 X) {
   vec2 q = vec2(X.x, -X.y) * (camF / X.z);
-  return camC + vec2(camRot.x * q.x - camRot.y * q.y, camRot.y * q.x + camRot.x * q.y);
+  vec2 p = camC + vec2(camRot.x * q.x - camRot.y * q.y, camRot.y * q.x + camRot.x * q.y);
+  return vec2(p.x, p.y / camAspect);
 }
 
 // ---- ENV pass -----------------------------------------------------------------
@@ -288,8 +323,9 @@ float sheenEmitter(vec2 uv, vec3 lin) {
 }
 // One texel of the environment, at the analysis size (row 0 = top): the
 // photo in reference-white units with its light sources restored, and the
-// walls as they look in the NEW paint (Flat, i.e. v3; one bounce of gloss
-// between the walls is left out). Coverage from the mask blends the two.
+// walls as they look in the NEW paint (Flat, in the model being rendered:
+// v3, or v2 before its colour constancy; one bounce of gloss between the
+// walls is left out). Coverage from the mask blends the two.
 // The emitter gain is applied to 4 full-resolution samples BEFORE they are
 // averaged: thresholding the averaged texel would drop the soft edges of a
 // bulb's core below the threshold and lose part of its light.
@@ -307,20 +343,27 @@ vec3 sheenEnvTexel(vec2 uv, float sceneY) {
   vec4 m = texture(wallMask, uv);
   float wall = 1.0 - m.r * m.a;
   vec3 c, W;
-  v3Lit(texture(lightMap, uv), lin, sceneY, c, W);
+  if (model == MODEL_V2) {
+    vec4 L = texture(lightMap, uv);
+    v2Lit(L.xyz, albedo, c, W);
+    float r = v2DetailRatio(L.w, lin);
+    c *= r; W *= r;
+  }
+  else v3Lit(texture(lightMap, uv), lin, sceneY, c, W);
   return mix(photo, c, wall);
 }
 
 // ---- specular -----------------------------------------------------------------
 // The lobe's directional albedo at cos(theta) = NoV, from the table
 // (linear interpolation; entries at (i + 0.5) / 32).
-float albedoAt(float NoV) {
+float albedoTab(vec4 tab[8], float NoV) {
   float f = clamp(NoV * 32.0 - 0.5, 0.0, 31.0);
   int i = int(floor(f));
   int j = min(i + 1, 31);
-  float a = sheenAlb[i / 4][i - 4 * (i / 4)], b = sheenAlb[j / 4][j - 4 * (j / 4)];
+  float a = tab[i / 4][i - 4 * (i / 4)], b = tab[j / 4][j - 4 * (j / 4)];
   return mix(a, b, f - float(i));
 }
+float albedoAt(float NoV) { return albedoTab(sheenAlb, NoV); }
 // Exact unpolarised Fresnel reflectance of a smooth dielectric (index n).
 float fresnelExact(float c, float n) {
   float s2 = (1.0 - c * c) / (n * n);
@@ -386,7 +429,8 @@ vec3 unseenRoom(vec3 R, vec3 c, vec3 ceilingRad) {
 // rectangle factors into two 1-D overlaps: a box filter, matching the
 // environment's filtered reads, so a window's reflection has the blur of the
 // lobe sample and no aliased edges.
-float windowCover(int i, vec3 X, vec3 L, float omegaS, float tRoom) {
+float windowCover(int i, vec3 X, vec3 L, float omegaS, float tRoom, out vec3 hit) {
+  hit = vec3(0.0);
   vec3 nw = normalize(cross(winU[i], winV[i]));
   float dn = dot(L, nw);
   if (abs(dn) < 1e-5) return 0.0;
@@ -400,31 +444,56 @@ float windowCover(int i, vec3 X, vec3 L, float omegaS, float tRoom) {
   float h = max(tw * sqrt(omegaS / PI) * 0.886 / max(abs(dn), 0.05), 1e-4);
   float cx = clamp(min(x + h, lu) - max(x - h, 0.0), 0.0, 2.0 * h) / (2.0 * h);
   float cy = clamp(min(y + h, lv) - max(y - h, 0.0), 0.0, 2.0 * h) / (2.0 * h);
+  hit = vec3(clamp(x / lu, 0.0, 1.0), clamp(y / lv, 0.0, 1.0), h / lu);   // where (0..1), footprint (in widths)
   return cx * cy;
+}
+
+// What a window with a source shows at hit (windowCover's): the photo's view
+// through the source rectangle at the same place, read from the environment
+// (which already holds the window's emitter gain) at the level matching the
+// footprint, so the reflection of a window outside the frame has its
+// mullions, its trees and their blur instead of a flat glow.
+// .a: how much of it is in the photo (0 outside, faded over its last 2 %).
+vec4 windowSource(int i, vec3 hit) {
+  vec3 Ps = winSO[i] + hit.x * winSU[i] + hit.y * winSV[i];
+  if (Ps.z < 1e-3) return vec4(0.0);
+  vec3 nS = normalize(cross(winSU[i], winSV[i]));
+  float texel = Ps.z / (camF * envSize) / max(abs(dot(nS, normalize(Ps))), 0.1);
+  float foot = 2.0 * hit.z * length(winSU[i]);                  // the footprint's width on the source, scene units
+  float lod = clamp(log2(max(foot / texel, 1.0)), 0.0, envMaxLod);
+  vec2 uv = project(Ps);
+  float inside = smoothstep(0.0, 0.02, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+  return vec4(textureLod(envTex, uv, lod).rgb * winL[i], inside);
 }
 
 // Radiance arriving at X from direction L, blurred over solid angle omegaS
 // (the share of the lobe one sample stands for): the room (photo or unseen
 // room, radianceEnv) with any window outside the photo over it.
-vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad);
+vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad, float t, vec3 nY);
 vec3 radianceFrom(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad) {
-  vec3 r = radianceEnv(X, L, self, omegaS, c, ceilingRad);
-  if (winCount == 0) return r;
+  // One trace serves both the room and the windows.
   vec3 nY;
   float t = traceRoom(X, L, self, nY);
+  vec3 r = radianceEnv(X, L, self, omegaS, c, ceilingRad, t, nY);
+  if (winCount == 0) return r;
   for (int i = 0; i < MAX_WINDOWS; i++) {
     if (i >= winCount) break;
-    r = mix(r, winL[i] / max(refY, 1e-4), windowCover(i, X, L, omegaS, t));
+    vec3 hit;
+    float cover = windowCover(i, X, L, omegaS, t, hit);
+    if (cover <= 0.0) continue;
+    if (dot(winSU[i], winSU[i]) > 0.0) {
+      vec4 Ls = windowSource(i, hit);
+      r = mix(r, Ls.rgb, cover * Ls.a);
+    } else r = mix(r, winL[i] / max(refY, 1e-4), cover);
   }
   return r;
 }
 
 // Radiance from the room alone. `room` is what a ray that leaves the photo
 // sees (behind the camera, the ceiling): the unseen room.
-vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad) {
+// t, nY: the ray's first plane (traceRoom).
+vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad, float t, vec3 nY) {
   vec3 room = unseenRoom(L, c, ceilingRad);
-  vec3 nY;
-  float t = traceRoom(X, L, self, nY);
   if (t < 0.0) return room;
   vec3 Y = X + t * L;
   if (Y.z < 1e-3) return room;                       // behind the camera
@@ -457,14 +526,19 @@ vec3 radianceEnv(vec3 X, vec3 L, int self, float omegaS, vec3 c, vec3 ceilingRad
 // per pixel); each reflected direction is traced to the room and read with
 // filtered importance sampling, weighted by NoL (Karis 2013 prefiltering).
 #define LOBE_SAMPLES 16
+// lobeSamples: how many of them to use (JS: 16 for photos, 8 for every
+// frame of a video; filtered importance sampling keeps 8 smooth).
+uniform int lobeSamples;
 vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, int self, vec3 c, vec3 ceilingRad, float rot) {
   vec3 up = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
   vec3 T = normalize(cross(up, n)), B = cross(n, T);
   float a2 = alpha * alpha;
   vec3 sum = vec3(0.0);
   float wsum = 0.0;
+  int ns = clamp(lobeSamples, 1, LOBE_SAMPLES);
   for (int i = 0; i < LOBE_SAMPLES; i++) {
-    float u = (float(i) + 0.5) / float(LOBE_SAMPLES);
+    if (i >= ns) break;
+    float u = (float(i) + 0.5) / float(ns);
     float phi = 2.0 * PI * fract(float(i) * 0.6180339887 + rot);
     float cosT = sqrt((1.0 - u) / (1.0 + (a2 - 1.0) * u));      // GGX: tan^2 = a^2 u / (1 - u)
     float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
@@ -476,7 +550,7 @@ vec3 lobeRadiance(vec3 X, vec3 n, vec3 V, float alpha, int self, vec3 c, vec3 ce
     if (NoL <= 0.0) continue;
     float dd = cosT * cosT * (a2 - 1.0) + 1.0;
     float pdf = a2 / (PI * dd * dd) * cosT / (4.0 * VoH);       // of L
-    sum += NoL * radianceFrom(X, L, self, 1.0 / (float(LOBE_SAMPLES) * pdf), c, ceilingRad);
+    sum += NoL * radianceFrom(X, L, self, 1.0 / (float(ns) * pdf), c, ceilingRad);
     wsum += NoL;
   }
   return wsum > 0.0 ? sum / wsum : unseenRoom(reflect(-V, n), c, ceilingRad);
@@ -520,10 +594,171 @@ vec3 lampSpecular(vec3 X, vec3 n, vec3 V, float alpha) {
   return sum;
 }
 
-// The sheen of one wall pixel. c and W from v3Lit (before adaptation), L the
-// light-map texel, uv the image point (row 0 = top). Returns linear sRGB,
-// before adaptation and gamut mapping (RENDER does both).
+// ---- wall relief -------------------------------------------------------------
+// A random height field on the wall, as two bands (Konieczny & Meyer 2011
+// render orange peel this way, from wave-scan bands): long-wave waviness
+// (board and skim coat, wavelengths waveLength, /2, /4) and the roller's
+// stipple (stippleLength, /2; stretched 1.6x along the roller's travel,
+// vertical). Gradient noise with its analytic gradient (Quilez), hashed on
+// the integer lattice, in metres on the wall, so it is fixed to the wall (the
+// camera doesn't move). Each band is scaled to its RMS slope. Returns the
+// slope along (the wall's horizontal, up), radians.
+uint hashU(uvec2 q) {
+  q = q * 1664525u + 1013904223u;
+  q.x += q.y * 1664525u; q.y += q.x * 1664525u;
+  q ^= q >> 16u;
+  q.x += q.y * 1664525u; q.y += q.x * 1664525u;
+  q ^= q >> 16u;
+  return q.x ^ q.y;
+}
+vec2 grad2(ivec2 i) {
+  float a = float(hashU(uvec2(i + 32768)) & 1023u) * (2.0 * PI / 1024.0);
+  return vec2(cos(a), sin(a));
+}
+// Gradient noise: the gradient of the height (value unused), for unit frequency.
+vec2 noiseGrad(vec2 p) {
+  ivec2 i = ivec2(floor(p));
+  vec2 f = fract(p);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  vec2 ga = grad2(i), gb = grad2(i + ivec2(1, 0)), gc = grad2(i + ivec2(0, 1)), gd = grad2(i + ivec2(1, 1));
+  float va = dot(ga, f), vb = dot(gb, f - vec2(1.0, 0.0)), vc = dot(gc, f - vec2(0.0, 1.0)), vd = dot(gd, f - vec2(1.0, 1.0));
+  return ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x * u.y * (ga - gb - gc + gd)
+       + du * (vec2(u.y, u.x) * (va - vb - vc + vd) + vec2(vb, vc) - va);
+}
+// RMS of one component of noiseGrad (measured over 2 x 10^5 points: 0.624,
+// tests/sheen_check.py section E), so a band of n octaves sums to slope s.
+const float NOISE_GRAD_RMS = 0.624;
+vec2 wallSlope(vec2 w) {
+  vec2 s = vec2(0.0);
+  if (wallRelief.x > 0.0) {
+    // Three octaves of equal slope: heights falling as 1 / frequency.
+    vec2 g = vec2(0.0);
+    for (int o = 0; o < 3; o++) {
+      float f = exp2(float(o)) / reliefScale.x;
+      g += noiseGrad(w * f + vec2(17.0 * float(o), 31.0 * float(o)));
+    }
+    s += g * (wallRelief.x / (NOISE_GRAD_RMS * sqrt(3.0)));
+  }
+  if (wallRelief.y > 0.0) {
+    vec2 g = vec2(0.0), q = w * vec2(1.0, 0.625);           // stretched along the roller's travel
+    for (int o = 0; o < 2; o++) g += noiseGrad(q * (exp2(float(o)) / reliefScale.y) + vec2(5.3, 9.1) * float(o + 1));
+    s += g * vec2(1.0, 0.625) * (wallRelief.y / (NOISE_GRAD_RMS * sqrt(2.0) * 0.83));
+  }
+  return s;
+}
+
+// The gloss lobes' BRDF toward a distant light l (no cosine): (1 - beta)
+// core + beta halo, each GGX x height-correlated Smith visibility x exact
+// Fresnel, widened by the light's angular radius (Karis 2013: alpha + r/2d).
+vec3 glossBRDF(vec3 n, vec3 V, vec3 l, float widen) {
+  float NoL = dot(n, l), NoV = max(dot(n, V), 1e-3);
+  if (NoL <= 0.0) return vec3(0.0);
+  vec3 h = normalize(l + V);
+  float NoH = max(dot(n, h), 0.0), VoH = max(dot(V, h), 0.0), F = fresnelExact(VoH, sheenIor);
+  float f = 0.0;
+  for (int k = 0; k < 2; k++) {
+    float share = sheenH.y <= 0.0 ? (k == 0 ? 1.0 : 0.0) : (k == 0 ? 1.0 - sheenH.y : sheenH.y);
+    if (share <= 0.0) continue;
+    float a = clamp((k == 0 ? sheenP.x : sheenH.x) + widen, 1e-3, 1.0), a2 = a * a;
+    float dd = NoH * NoH * (a2 - 1.0) + 1.0;
+    float D = a2 / (PI * dd * dd);
+    float vis = 0.5 / (NoL * sqrt(NoV * NoV * (1.0 - a2) + a2) + NoV * sqrt(NoL * NoL * (1.0 - a2) + a2));
+    f += share * D * vis;
+  }
+  return vec3(f * F);
+}
+// The lamps' light on a white matte wall at X (the photo's units): what the
+// lamp model already accounts for of the wall's light.
+vec3 lampDiffuse(vec3 X, vec3 n) {
+  vec3 sum = vec3(0.0);
+  for (int i = 0; i < MAX_LAMPS; i++) {
+    if (i >= lampCount) break;
+    vec3 Lv = lampPos[i].xyz - X;
+    float d2 = dot(Lv, Lv);
+    vec3 l = Lv * inversesqrt(d2);
+    float cone = lampAxis[i].w < -0.99 ? 1.0 : smoothstep(lampAxis[i].w - 0.1, lampAxis[i].w + 0.1, dot(-l, lampAxis[i].xyz));
+    sum += lampI[i] * max(dot(n, l), 0.0) * cone / (PI * d2 * max(refY, 1e-4));
+  }
+  return sum;
+}
+// How much brighter the gloss is on the textured normal than on the smooth
+// wall, toward light l: the glints of the wall's relief (capped at 8x).
+float textureGain(vec3 n, vec3 n2, vec3 V, vec3 l, float widen) {
+  float a = glossBRDF(n, V, l, widen).x, b = glossBRDF(n2, V, l, widen).x;
+  return a > 1e-8 ? min(b / a, 8.0) : 1.0;
+}
+// The direct light's (sun or moon) surface reflection at this pixel. The
+// frame already shows where that light falls - the patches between the
+// leaves' shadows - and how strong it is: the original walls are white, so
+// the frame's own pixel above the ambient level, less the lamps' share, is
+// that light on a white wall (irradiance / pi), in its colour, at full
+// resolution. (Not the model's W: v2's light has a fill floor, so its shade
+// isn't the frame's shade.) The environment can't reflect it (the sun is at infinity, not where
+// the window is seen), so its reflection is added here: irradiance x the
+// gloss BRDF for the sun's direction. On a glossy wall seen near the sun's
+// mirror direction this is the sheen band over the sunlit patches, its
+// edges as sharp as the leaves' shadows, broken up by the wall's relief.
+// The shade level around a pixel: the darkest wall light (max channel) on
+// two rings, 64 and 128 px, 4 taps each (staggered). The sun's patches are bounded by
+// the leaves' shadows within that distance; light that varies slowly - the
+// bounce light, the lamp's glow, the corner's gradient - is the same on the
+// rings and at the pixel, so it doesn't count as sunlight.
+float localShade(vec2 uv) {
+  float m = 1e9;
+  for (int r = 1; r <= 2; r++) {
+    for (int i = 0; i < 4; i++) {
+      float a = (float(i) + 0.5 * float(r)) * (PI / 2.0);
+      vec2 o = vec2(cos(a), sin(a)) * (64.0 * float(r)) / size;
+      vec2 q = uv + o;
+      if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) continue;
+      vec4 wm = textureLod(wallMask, q, 2.0);
+      if (wm.r * wm.a > 0.5) continue;                   // not wall
+      vec3 t = textureLod(src, q, 2.0).rgb;
+      vec3 l = srcLinear == 1 ? t : toLinear(t);
+      m = min(m, max(l.r, max(l.g, l.b)));
+    }
+  }
+  return m < 1e8 ? m : 0.0;                              // no wall around: the global ambient decides
+}
+// The sheen's headroom: the frame is display-referred and its sun patches are
+// already bright, so glare far above the patch's own light reads as more
+// sunlight (it clips toward white), not as a glossy wall. The specular is
+// rolled off against the PAINT's own sunlit radiance (albedo x the patch's
+// sunlight): ratio r -> R (1 - exp(-r / R)), R = sunHeadroom (the page's;
+// 0.6-1.4 compared on the frame), so the patch keeps reading as sunlight on
+// this colour, shinier.
+vec3 directSpecular(vec3 X, vec3 n, vec3 n2, vec3 V, vec2 uv) {
+  if (sunAmb < 0.0 || dot(n, sunDir) <= 0.0) return vec3(0.0);
+  vec3 s = textureLod(src, uv, 0.0).rgb;
+  vec3 p = (srcLinear == 1 ? s : toLinear(s)) / max(refY, 1e-4);
+  float mp = max(p.r, max(p.g, p.b));
+  vec3 wl = lampDiffuse(X, n);
+  float lampW = max(wl.r, max(wl.g, wl.b));
+  if (mp <= max(sunAmb / max(refY, 1e-4), lampW)) return vec3(0.0);   // in shade: no need to look around
+  float shade = max(sunAmb, localShade(uv)) / max(refY, 1e-4);
+  float ex = max(mp - max(shade, lampW), 0.0);
+  if (ex <= 0.0) return vec3(0.0);
+  vec3 sun = p * (ex / max(mp, 1e-6));                    // the sunlight on a white wall here (radiance)
+  // The smooth sheen (the wall without its texture) is rolled off; the
+  // texture's glints on top keep their full contrast (as on the photo page,
+  // whose glints are never capped): broad glare would read as more sunlight,
+  // sparse glints read as gloss.
+  vec3 even = PI * sun * glossBRDF(n, V, sunDir, 0.0024);   // the sun's disc: 0.27 deg radius
+  float r = lum(even) / max(lum(albedo * sun), 1e-6);
+  float R = max(sunHeadroom, 1e-3);
+  if (r <= 1e-6) return vec3(0.0);
+  return even * (R * (1.0 - exp(-r / R)) / r) * textureGain(n, n2, V, sunDir, 0.0024);
+}
+
+// The sheen of one wall pixel. c and W from v3Lit or v2Lit (before
+// adaptation), L the light-map texel, uv the image point (row 0 = top).
+// Returns linear sRGB, before adaptation and gamut mapping (RENDER does both).
 vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv) {
+  // Pixels that aren't wall at all show the photo / frame on top (the page's
+  // masked layer): skip the work.
+  vec4 wm = texture(wallMask, uv);
+  if (wm.r * wm.a > 0.99) return c;
   vec3 d = camRay(uv);
   int self = visibleWall(d);
   vec4 P = roomPlanes[self];
@@ -534,8 +769,9 @@ vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv) {
   // (luminance / local mean - 1, already scaled to 0 where the photo shows
   // no texture above JPEG and 8-bit noise; js/sheenModel.js photoWithDetail)
   // is in the source's alpha channel: 128/255 + 512/255 x detail. Read at
-  // lod 0.5 (about 1.4 px) so single pixels don't sparkle.
-  float dev = (textureLod(src, uv, 0.5).a * 255.0 - 128.0) / 512.0;
+  // lod 0.5 (about 1.4 px) so single pixels don't sparkle. Video frames have
+  // no texture map (sheenDetail 0): the wall is taken as smooth.
+  float dev = sheenDetail == 1 ? (textureLod(src, uv, 0.5).a * 255.0 - 128.0) / 512.0 : 0.0;
   vec3 toL = keyLight - X;
   float nl = dot(n, toL);
   vec3 tg = toL - n * nl;                            // toward the light, along the wall
@@ -556,20 +792,66 @@ vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv) {
     delta = clamp(dev * t / (t * t + 0.25), -0.025, 0.025) * (1.0 - smoothstep(0.1, 0.25, abs(dev)));
   }
   vec3 n2 = normalize(n + delta * tg / max(tl, 1e-5));
+  // The wall's relief (rooms in metres; walls are vertical): tilt toward the
+  // wall's horizontal and up by the slopes at this point of the wall.
+  if (wallRelief.x + wallRelief.y > 0.0) {
+    vec3 ax = normalize(cross(vec3(0.0, 1.0, 0.0), n)), ay = vec3(0.0, 1.0, 0.0);
+    vec2 sl = wallSlope(vec2(dot(X, ax), X.y));
+    n2 = normalize(n2 + sl.x * ax + sl.y * ay);
+  }
 
   vec3 V = -d;
   float NoV = clamp(dot(n2, V), 1e-3, 1.0);
   // The room's mean wall light (MEAN), in reference-white units: a white
   // ceiling's luminance is CEILING_SHARE of it.
   vec3 ceilingRad = CEILING_SHARE * texelFetch(frameMean, ivec2(0), 0).rgb / max(refY, 1e-4);
-  vec3 Ll = lobeRadiance(X, n2, V, sheenP.x, self, c, ceilingRad, hash(gl_FragCoord.xy));
+  // The gloss lobe. One lobe (beta = 0: Flat, wide): sampled. Core + halo:
+  // the CORE, narrow, along the mirror direction of this point's (textured)
+  // normal, read at the level of the lobe's own solid angle at the distance
+  // it travels (filtered importance sampling with one sample: omega =
+  // 1 / pdf at the peak = 4 pi alpha^2 NoV) - crisp where the reflected
+  // object is near the wall, soft where it is far; the HALO sampled.
+  float beta = sheenH.y;
+  vec3 Ll;
+  float A;
+  vec3 lampS;
+  if (beta <= 0.0) {
+    Ll = lobeRadiance(X, n2, V, sheenP.x, self, c, ceilingRad, hash(gl_FragCoord.xy));
+    A = albedoAt(NoV);
+    lampS = lampSpecular(X, n2, V, sheenP.x);
+  } else {
+    float an = sheenP.x;
+    vec3 Lc = radianceFrom(X, reflect(d, n2), self, 4.0 * PI * an * an * NoV, c, ceilingRad);
+    vec3 Lh = lobeRadiance(X, n2, V, sheenH.x, self, c, ceilingRad, hash(gl_FragCoord.xy));
+    float Ac = (1.0 - beta) * albedoAt(NoV), Ah = beta * albedoTab(sheenAlbH, NoV);
+    A = Ac + Ah;
+    Ll = (Ac * Lc + Ah * Lh) / max(A, 1e-6);
+    lampS = (1.0 - beta) * lampSpecular(X, n2, V, an) + beta * lampSpecular(X, n2, V, sheenH.x);
+  }
   // Near grazing, a share S of the whole surface reflection is a mirror
   // reflection (Rayleigh); it reflects the mirror direction, with exact Fresnel.
   float kc = sheenP.z * NoV, S = exp(-kc * kc);
   vec3 Lm = S > 1e-4 ? radianceFrom(X, reflect(d, n2), self, 1e-7, c, ceilingRad) : W;
   // Each part reflects what it sees instead of the veil the swatch holds for
   // it (the same albedo spread evenly): zero under even surroundings.
-  vec3 dl = (1.0 - S) * (1.0 - sheenP.y) * (albedoAt(NoV) * (Ll - W) + lampSpecular(X, n2, V, sheenP.x))
+  // With a direct light read from the frame (sheenVideo.html), the lamp's
+  // sheen follows the same rule as the sun's: it shows within the light the
+  // lamp casts on the wall, at most sunHeadroom x the paint's lamp-lit
+  // radiance there (approached smoothly), so it reads as the lamp-lit wall
+  // shining, not as a new light.
+  if (sunAmb >= 0.0) {
+    vec3 lampLit = albedo * lampDiffuse(X, n);
+    float r = lum(lampS) / max(lum(lampLit), 1e-6), R = max(sunHeadroom, 1e-3);
+    lampS *= r > 1e-6 ? R * (1.0 - exp(-r / R)) / r : 0.0;
+    // Where the lamp's light falls on the wall, the finish shines in
+    // proportion to it and to its gloss (the lamp's light colour), with the
+    // texture's glints toward the lamp.
+    if (lampCount > 0) {
+      vec3 l = normalize(lampPos[0].xyz - X);
+      lampS += litSheen * lampDiffuse(X, n) * textureGain(n, n2, V, l, lampPos[0].w / (2.0 * length(lampPos[0].xyz - X)));
+    }
+  }
+  vec3 dl = (1.0 - S) * (1.0 - sheenP.y) * (A * (Ll - W) + lampS + directSpecular(X, n, n2, V, uv))
           + S * fresnelExact(NoV, sheenIor) * (Lm - W);
 
   // Darkening floor (see 7. in the header): x = the largest share of itself

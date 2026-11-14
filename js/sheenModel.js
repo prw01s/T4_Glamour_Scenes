@@ -73,7 +73,10 @@
    * @property {number} alpha    GGX roughness α (NOT "perceptual roughness" = √α)
    *   of the concentrated part of the surface reflection. Sets how sharp
    *   reflections are: the reflected image of a point spreads over a cone of
-   *   roughly ±2·atan(1.5α) (70 % of the GGX lobe's energy).
+   *   roughly ±2·atan(1.5α) (70 % of the GGX lobe's energy). Since the
+   *   third pass: the lobe's sharp CORE (see "core + halo" below).
+   * @property {number} haze     The halo's extent: its α is alpha × (1 + haze).
+   * @property {number} beta     The halo's share of the lobe, 0..1 (0: one lobe).
    * @property {number} v        Diffused share, 0..1: the part of the surface
    *   reflection scattered so widely it acts as a uniform veil (pigment
    *   particles protruding through the binder). The rest, (1 - v), forms
@@ -115,11 +118,32 @@
    *
    * @type {Record<"flat" | "eggshell" | "satin" | "semigloss", Sheen>}
    */
+  /*
+   * CORE + HALO (third pass). Measured glossy coatings don't reflect through
+   * one smooth lobe: a sharp CORE around the mirror direction is flanked by
+   * a wider HALO ("hazy gloss": Barla, Pacanowski & Vangorp, CGF 2018;
+   * Vangorp, Barla & Fleming, JoV 2017; ASTM E430 haze, light 2-5 deg from
+   * the specular direction). Observers judge gloss mostly by the sharpest
+   * reflections, and see the halo as a separate quality, haze. A single lobe
+   * fitted to a gloss reading has to sit between the two, so every
+   * reflection came out equally soft and none crisp. Now:
+   *   alpha        the core's GGX roughness
+   *   haze         the halo's extent in core widths: alpha_w = alpha (1 + haze)
+   *                (Barla's lambda_h; their example 0.01 / 7)
+   *   beta         the halo's share of the lobe, SOLVED (tests/sheen_check.py
+   *                section D) so that each sheen keeps the 60 deg reading of
+   *                its single-lobe calibration (alpha_1): 60 and 85 deg stay
+   *                as listed above; the 20 deg reading, whose 1.8 deg aperture
+   *                sees the core, rises (semi-gloss 14.7 -> 24.9 GU).
+   * The cores are estimates (gloss data sheets give 60 deg only): semi-gloss
+   * +-0.6 deg, crisp where what it reflects is near the wall and soft far
+   * from it; satin about twice that; eggshell about four times.
+   */
   const SHEENS = {
-    flat:      { label: "Flat",       mpi: "G1", gu60: [0, 5],   alpha: 0.30,  v: 0.95, k: 21.0 },
-    eggshell:  { label: "Eggshell",   mpi: "G3", gu60: [10, 25], alpha: 0.075, v: 0.45, k: 16.0 },
-    satin:     { label: "Satin",      mpi: "G4", gu60: [20, 35], alpha: 0.045, v: 0.30, k: 12.0 },
-    semigloss: { label: "Semi-gloss", mpi: "G5", gu60: [35, 70], alpha: 0.025, v: 0.10, k: 6.5 }
+    flat:      { label: "Flat",       mpi: "G1", gu60: [0, 5],   alpha: 0.30,  haze: 0, beta: 0,     v: 0.95, k: 21.0 },
+    eggshell:  { label: "Eggshell",   mpi: "G3", gu60: [10, 25], alpha: 0.035, haze: 3, beta: 0.662, v: 0.45, k: 16.0 },
+    satin:     { label: "Satin",      mpi: "G4", gu60: [20, 35], alpha: 0.018, haze: 4, beta: 0.632, v: 0.30, k: 12.0 },
+    semigloss: { label: "Semi-gloss", mpi: "G5", gu60: [35, 70], alpha: 0.010, haze: 6, beta: 0.432, v: 0.10, k: 6.5 }
   };
   /** Display order. */
   const SHEEN_ORDER = ["flat", "eggshell", "satin", "semigloss"];
@@ -217,6 +241,39 @@
   function toSheen(key) {
     if (!Object.hasOwn(SHEENS, key)) throw new RangeError(`Unknown sheen "${key}"`);
     return key;
+  }
+
+  /** The degree range a page may offer around each sheen (sheenVideo.html: -50 % .. +50 %). */
+  const DEGREE_RANGE = [0.5, 1.5];
+
+  /**
+   * A sheen made glossier or flatter by `degree` (1 = as SHEENS has it,
+   * 1.5 = 50 % more sheen, 0.5 = 50 % less). The physical reading: the
+   * paint film's surface roughness is scaled by 1 / degree, and the share of
+   * the surface reflection that forms the gloss lobe by degree. So:
+   *   alpha / degree   GGX roughness is proportional to the surface slopes
+   *   k / degree       the grazing coefficient 4 pi sigma / lambda is
+   *                    proportional to the RMS height sigma
+   *   (1 - v) x degree the lobe's share (the diffused share v is what the
+   *                    protruding pigment scatters), at most 1
+   * Both the core and the halo scale (the halo keeps its extent in core
+   * widths and its share).
+   * A degree above 1 gives sharper, stronger reflections and deeper colour
+   * away from them; below 1 the finish moves toward the flat look. Every
+   * value stays physical (alpha 0.0167-0.6, v 0..1), and degree 1 returns
+   * the sheen's own numbers exactly.
+   * @param {keyof SHEENS} key
+   * @param {number} [degree=1]  Clamped to DEGREE_RANGE.
+   * @returns {{ alpha: number, alphaW: number, beta: number, v: number, k: number }}
+   */
+  function sheenAtDegree(key, degree = 1) {
+    const s = SHEENS[toSheen(key)];
+    const m = Math.min(DEGREE_RANGE[1], Math.max(DEGREE_RANGE[0], Number.isFinite(degree) ? degree : 1));
+    const aw = a => Math.round(a * (1 + s.haze) * 1e4) / 1e4;
+    if (m === 1) return { alpha: s.alpha, alphaW: aw(s.alpha), beta: s.beta, v: s.v, k: s.k };
+    // Rounded so that the cached albedo tables (one per alpha) stay few.
+    const alpha = Math.round(Math.min(0.6, s.alpha / m) * 1e4) / 1e4;
+    return { alpha, alphaW: Math.min(0.6, aw(alpha)), beta: s.beta, v: Math.max(0, 1 - (1 - s.v) * m), k: s.k / m };
   }
 
   // ======================================================================
@@ -428,6 +485,37 @@
         bLineRmsErr: Math.sqrt(best.e), cameraHeight: -floorY,
         walls: planes.filter(p => p.kind === "wall").map(p => `${p.id}: distance ${(-p.p[3]).toFixed(3)}`)
       }
+    };
+  }
+
+  /**
+   * A Room from a camera and planes known in world coordinates, e.g. the
+   * Blender reconstruction of a rendered room (images/room_movie/scene.json),
+   * instead of solveRoom's lines. World: metres, Z up. The camera is level
+   * (no pitch, no roll, as solveRoom assumes) and turned by `yaw`: forward
+   * (-sin yaw, cos yaw, 0), right (cos yaw, sin yaw, 0).
+   * @param {Object} cam
+   * @param {number[]} cam.pos       Camera position [x, y, z].
+   * @param {number} cam.yaw         Radians.
+   * @param {number} cam.fPx         Focal length, in pixels of an image `cam.width` wide.
+   * @param {number} cam.horizonPx   The horizon's (principal point's) row, same pixels.
+   * @param {number} cam.width       Width of the image those pixels refer to.
+   * @param {number} aspect          Height / width of the image the room is rendered on.
+   * @param {{ id: string, kind: "wall" | "floor" | "ceiling", n: number[], d: number }[]} planes
+   *   World planes n·P = d, n pointing into the room; walls first.
+   * @returns {Room & { aspect: number, toCamera: (P: number[]) => number[] }}
+   *   toCamera: a world point in camera space (for placing lamps).
+   */
+  function roomFromCamera(cam, aspect, planes) {
+    const s = Math.sin(cam.yaw), co = Math.cos(cam.yaw);
+    const right = [co, s, 0], up = [0, 0, 1], fwd = [-s, co, 0];
+    const toCam = n => [v3.dot(n, right), v3.dot(n, up), v3.dot(n, fwd)];
+    const toCamera = P => toCam(v3.sub(P, cam.pos));
+    const f = cam.fPx / cam.width, c = [0.5, cam.horizonPx / cam.width];
+    return {
+      c, f, rot: [1, 0], aspect, toCamera,
+      planes: planes.map(p => ({ id: p.id, kind: p.kind, p: [...toCam(p.n), p.d - v3.dot(p.n, cam.pos)] })),
+      report: { hfovDeg: 2 * Math.atan(0.5 / f) * 180 / Math.PI, cameraHeight: cam.pos[2], source: "camera" }
     };
   }
 
@@ -745,7 +833,7 @@
   /** RENDER's lamp slots (glsl/sheen.glsl: lampPos / lampI / lampAxis). */
   const MAX_LAMPS = 4;
   /** RENDER's window slots (glsl/sheen.glsl: winO / winU / winV / winL). */
-  const MAX_WINDOWS = 3;
+  const MAX_WINDOWS = 5;
 
   // ======================================================================
   // Windows outside the photo
@@ -811,14 +899,45 @@
    * The sheen part of a RenderJob for one photo: uniforms (names as in
    * glsl/sheen.glsl) plus a key for the cached environment.
    * @param {keyof SHEENS} sheenKey
-   * @param {Room} room
-   * @param {{ emitters: Emitter[], keyLight: number[], lamps?: object[], windows?: object[] }} photo
+   * @param {Room & { aspect?: number }} room  aspect: the image's height / width
+   *   when it isn't square (a video frame), default 1.
+   * @param {{ emitters: Emitter[], keyLight: number[], lamps?: object[], windows?: object[], textureDetail?: boolean, relief?: WallRelief }} photo
+   *   windows: from placeWindows, or { O, U, V, L, source? } in camera space;
+   *   with `source` (a rectangle { O, U, V } seen in the photo, e.g. a
+   *   visible pane of the same window) the window shows what the photo shows
+   *   through that rectangle, x L, instead of the flat radiance L.
+   *   relief: the wall's surface relief (WallRelief, below), for rooms in
+   *   metres; none by default.
+   *   direct: { dir, ambient } - a distant light (sun, moon) whose light on
+   *   the walls the photo shows: dir toward it (camera space); ambient, the
+   *   wall's light level in shade (max channel, the photo's units); headroom,
+   *   the most its sheen may add, as a share of the paint's sunlit radiance
+   *   (approached smoothly; default 1); litSheen, the share of the lamps'
+   *   light on the wall the finish sends back as sheen (default 0). Its
+   *   surface reflection is added from the wall's own light above that level
+   *   (glsl/sheen.glsl directSpecular). None by default.
    *   keyLight: camera-space position of the light that rakes the walls
    *   (from pointOnWall), for the micro-normals. lamps: from calibrateLamps.
+   *   textureDetail: false when the source has no texture map in its alpha
+   *   (video frames): no micro-normals.
+   * @param {{ degree?: number, lobeSamples?: number }} [o]  degree: see sheenAtDegree
+   *   (default 1). lobeSamples: reflection samples per pixel, 1..16 (default
+   *   16; a video page uses 8 to keep up with the frame rate).
    * @returns {{ uniforms: Record<string, any>, envKey: string }}
    */
-  function sheenJob(sheenKey, room, photo) {
-    const s = SHEENS[toSheen(sheenKey)];
+  /**
+   * A wall's surface relief, as two bands of a random height field on the
+   * walls (glsl/sheen.glsl wallSlope; Konieczny & Meyer 2011 render orange
+   * peel the same way, from wave-scan bands):
+   *   wave, waveLength        long-wave waviness of the board and the
+   *                           skim coat: RMS slope (radians) and the longest
+   *                           wavelength (metres); it bends reflections
+   *   stipple, stippleLength  the roller's stipple / orange peel: RMS slope
+   *                           and wavelength; it breaks highlights into grain
+   * @typedef {{ wave: number, waveLength: number, stipple: number, stippleLength: number }} WallRelief
+   */
+  function sheenJob(sheenKey, room, photo, { degree = 1, lobeSamples = 16 } = {}) {
+    const s = sheenAtDegree(sheenKey, degree);
     if (photo.emitters.length > MAX_EMITTERS) throw new RangeError(`At most ${MAX_EMITTERS} emitters`);
     if (room.planes.length > MAX_PLANES) throw new RangeError(`At most ${MAX_PLANES} planes`);
     const rects = new Float32Array(4 * MAX_EMITTERS), gains = new Float32Array(2 * MAX_EMITTERS);
@@ -835,28 +954,40 @@
     const wins = photo.windows || [];
     if (wins.length > MAX_WINDOWS) throw new RangeError(`At most ${MAX_WINDOWS} windows`);
     const winO = new Float32Array(3 * MAX_WINDOWS), winU = new Float32Array(3 * MAX_WINDOWS),
-          winV = new Float32Array(3 * MAX_WINDOWS), winL = new Float32Array(3 * MAX_WINDOWS);
-    wins.forEach((w, i) => { winO.set(w.O, 3 * i); winU.set(w.U, 3 * i); winV.set(w.V, 3 * i); winL.set(w.L, 3 * i); });
+          winV = new Float32Array(3 * MAX_WINDOWS), winL = new Float32Array(3 * MAX_WINDOWS),
+          winSO = new Float32Array(3 * MAX_WINDOWS), winSU = new Float32Array(3 * MAX_WINDOWS), winSV = new Float32Array(3 * MAX_WINDOWS);
+    wins.forEach((w, i) => {
+      winO.set(w.O, 3 * i); winU.set(w.U, 3 * i); winV.set(w.V, 3 * i); winL.set(w.L, 3 * i);
+      if (w.source) { winSO.set(w.source.O, 3 * i); winSU.set(w.source.U, 3 * i); winSV.set(w.source.V, 3 * i); }
+    });
+    const relief = photo.relief || null;
     return {
       uniforms: {
         sheenP: [s.alpha, s.v, s.k], sheenAlb: albedoTable(s.alpha), sheenIor: BINDER_N, sheenFloor: DARKEN_FLOOR,
-        camC: room.c, camF: room.f, camRot: room.rot,
+        sheenH: [s.alphaW, s.beta], sheenAlbH: albedoTable(s.alphaW),
+        camC: room.c, camF: room.f, camRot: room.rot, camAspect: room.aspect || 1,
+        sheenDetail: photo.textureDetail === false ? 0 : 1, lobeSamples,
         roomPlanes: planes, roomWalls: room.planes.filter(p => p.kind === "wall").length, roomPlaneCount: room.planes.length,
         keyLight: photo.keyLight, emitRect: rects, emitGain: gains,
         lampPos, lampI, lampAxis, lampCount: lamps.length,
-        winO, winU, winV, winL, winCount: wins.length
+        winO, winU, winV, winL, winCount: wins.length, winSO, winSU, winSV,
+        wallRelief: relief ? [relief.wave, relief.stipple] : [0, 0],
+        sunDir: photo.direct ? photo.direct.dir : [0, 0, 1], sunAmb: photo.direct ? photo.direct.ambient : -1,
+        sunHeadroom: photo.direct ? photo.direct.headroom ?? 1 : 1,
+        litSheen: photo.direct ? photo.direct.litSheen ?? 0 : 0,
+        reliefScale: relief ? [relief.waveLength, relief.stippleLength] : [1, 1]
       },
       // The environment holds the photo and the painted walls, not the sheen,
       // so it only depends on the geometry and the emitters.
-      envKey: JSON.stringify([room.c, room.f, room.planes.map(p => p.p), photo.emitters])
+      envKey: JSON.stringify([room.c, room.f, room.aspect || 1, room.planes.map(p => p.p), photo.emitters])
     };
   }
 
   // ---------------------------------------------------------------- export
   window.SheenModel = {
     SURFACE_F0, BINDER_N, DARKEN_FLOOR, SHEENS, SHEEN_ORDER, SHEEN_COPY, MAX_EMITTERS, ALBEDO_N, toSheen,
-    fresnel, specularAlbedo, albedoTable,
-    MAX_PLANES, intersectLines, solveRoom, cameraRay, project, pointOnWall, pointOffWall, wallAt, sheenJob,
+    DEGREE_RANGE, sheenAtDegree, fresnel, specularAlbedo, albedoTable,
+    MAX_PLANES, intersectLines, solveRoom, roomFromCamera, cameraRay, project, pointOnWall, pointOffWall, wallAt, sheenJob,
     textureDetail, photoWithDetail, calibrateLamps, MAX_LAMPS, placeWindows, MAX_WINDOWS
   };
 })();

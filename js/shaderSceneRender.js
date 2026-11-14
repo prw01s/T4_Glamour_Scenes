@@ -65,6 +65,9 @@
  *                 walls follow the thumb while dragging.
  *   room switch   setRoom() -> prepareRoom() -> settle fades -> view
  *                 transition around swap(): data-room + instant repaint().
+ *   uploads       addRoom() puts a new room's photos into the tiles (the page
+ *                 then calls setRoom); removeRoom() takes them out and frees
+ *                 the room's textures.
  *   context loss  LightPipeline rebuilds itself and its textures, then
  *                 onRestored() repaints (or resumes an interrupted boot).
  *   failure       fail(): drop .is-painted (plain photos) and show a notice.
@@ -270,6 +273,8 @@
    * @property {string} outputSpace       "srgb" or "display-p3".
    * @property {(hex: string) => Promise<void>} setPaint
    * @property {(room: string) => Promise<void>} setRoom
+   * @property {(key: string, room: Room) => void} addRoom  Adds a room at run time (uploads).
+   * @property {(key: string) => Promise<void>} removeRoom  Removes a room that isn't on screen.
    * @property {(model: string) => Promise<void>} setModel
    * @property {string | null} activeSheen  Sheen mode: the current sheen (read-only).
    * @property {(sheen: string) => Promise<void>} setSheen  Sheen mode only.
@@ -579,6 +584,55 @@
       return scheduleRender(false);
     }
 
+    /**
+     * Adds a room at run time (a visitor's uploaded scene). Each tile gets the
+     * room's photo, hidden until renderer[data-room] is `key` (the page adds
+     * that CSS rule and the room's radio). Nothing loads on the GPU until the
+     * room is shown (setRoom) or prepared when idle.
+     * @param {string} key   New rooms key (also the photos' data-room value).
+     * @param {Room} room    Its photos must be square and line up with the mask.
+     * @throws {RangeError} When `key` is already a room.
+     */
+    function addRoom(key, room) {
+      if (key in rooms) throw new RangeError(`Room "${key}" already exists`);
+      rooms[key] = room;
+      for (const tile of tiles) {
+        const caption = tile.frame.parentElement.querySelector("figcaption");
+        const img = Object.assign(new Image(), {
+          className: "scene__photo", src: room.photos[tile.time], decoding: "async",
+          alt: `${room.label}, ${(caption ? caption.textContent : tile.time).toLowerCase()} light`
+        });
+        img.dataset.room = key;
+        img.style.setProperty("--mask", `url("${room.mask}")`);
+        tile.frame.querySelector(".scene__layer--top").append(img);
+        tile.imgs[key] = img;
+      }
+    }
+
+    /**
+     * Removes a room added with addRoom (or any room not on screen): its
+     * photos leave the tiles and its GPU textures are freed, also when its
+     * load is still running.
+     * @returns {Promise<void>} Resolves once nothing reads the room's images
+     *   any more (then their object URLs can be revoked).
+     * @throws {RangeError} For the requested or shown room (switch away first).
+     */
+    function removeRoom(key) {
+      if (!(key in rooms)) return Promise.resolve();
+      if (key === activeRoom || key === shownRoom) throw new RangeError(`Room "${key}" is on screen`);
+      const release = data => {
+        if (!data || !pipeline) return;
+        if (roomData[key] === data) delete roomData[key];
+        for (const e of data.entries) { pipeline.release(e.src); pipeline.release(e.lightMap); }
+        pipeline.release(data.mask);
+      };
+      const loading = roomLoading[key];
+      delete rooms[key]; delete roomLoading[key]; delete maskLoading[key];
+      release(roomData[key]);
+      for (const tile of tiles) { if (tile.imgs[key]) tile.imgs[key].remove(); delete tile.imgs[key]; }
+      return Promise.resolve(loading).then(release, () => {});
+    }
+
     /** Bumped on every setRoom call; only the latest call may swap rooms. */
     let roomToken = 0;
     /**
@@ -684,7 +738,7 @@
       get sliders() { return { ...sliders }; },
       get size() { return tiles[0].n; },
       get outputSpace() { return pipeline ? pipeline.outputSpace : colorSpace; },
-      setPaint, setRoom, setModel, setSheen, setContrast, setSaturation, setSatMeasure,
+      setPaint, setRoom, addRoom, removeRoom, setModel, setSheen, setContrast, setSaturation, setSatMeasure,
       start() { return (ready ??= startPainting().catch(fail)); },
       roomInfo(room) {
         const d = roomData[room];
