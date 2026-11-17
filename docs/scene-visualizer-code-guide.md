@@ -788,6 +788,19 @@ function onFrame() {
 }
 ```
 
+**Two stacked copies.** The living-room video is one palindrome file:
+morning → night in its first half, the same frames reversed in its second.
+Browsers can't play a video backwards, so the page loads the file **twice**
+(`makeVideoTile` gives each copy its own layer, painted canvas, masked copy
+and GPU texture slot, `v0` and `v1`). `js/dayNightSequence.js` then plays
+them as one film: the forward copy covers file times 0–5 s, and the backward
+copy shows scene time *s* at file time 10 − *s*. To move to an earlier time,
+the sequencer raises the backward copy, crossfades it in and plays it
+forward, which looks like the film running in reverse. A small `player`
+interface (`makePlayer` for a plain loop, `makeSequence` for the two
+copies) gives the timeline, time-of-day buttons and Play button one API for
+both kinds of video.
+
 `requestVideoFrameCallback` is better than `requestAnimationFrame` here: it
 fires exactly once per *presented video frame*, and both layers are updated
 together.

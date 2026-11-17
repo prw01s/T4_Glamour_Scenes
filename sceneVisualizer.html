@@ -24,7 +24,10 @@
   @media (max-width: 700px) { .tiles { flex-direction: column; align-items: center; } .tile { width: 100%; } }
   /* ---- a stage: the painted canvas under the original, masked to non-wall ---- */
   .stage { position: relative; width: 100%; background: #000; overflow: hidden; }
-  .stage > * { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .stage > *, .stage .layer > * { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* A video scene played as two stacked copies (js/dayNightSequence.js raises
+     and fades in the copy that is moving). */
+  .stage .layer { background: #000; }
   .stage .top { mask-image: var(--mask); mask-size: 100% 100%; mask-repeat: no-repeat; mask-mode: luminance;
                 -webkit-mask-image: var(--mask); -webkit-mask-size: 100% 100%; }
   .stage .tinted { visibility: hidden; }
@@ -71,6 +74,7 @@
   .timeline .track input { position: absolute; inset: 0; width: 100%; margin: 0; }
   .timeline .tick { position: absolute; top: 20px; width: 2px; height: 7px; background: var(--slate); transform: translateX(-1px); pointer-events: none; }
   .timeline .row { justify-content: space-between; }
+  #lightSection.is-nested { margin-top: 18px; }
   .timeline output { font-size: 13px; color: var(--slate); font-variant-numeric: tabular-nums; }
 
   dialog { border: 1px solid var(--rule); border-radius: 8px; max-width: 460px; }
@@ -106,7 +110,7 @@
       </div>
     </section>
 
-    <section>
+    <section id="sceneSection">
       <h2><label for="scene">Scene</label></h2>
       <select id="scene"></select>
       <div class="row">
@@ -147,7 +151,7 @@
       </div>
     </section>
 
-    <section aria-labelledby="lightTitle">
+    <section aria-labelledby="lightTitle" id="lightSection">
       <h2 id="lightTitle">Room light</h2>
       <div class="slider"><label for="contrast">Contrast</label><input type="range" id="contrast" min="-100" max="100" value="0"><output id="contrastOut">0</output></div>
       <div class="slider"><label for="saturation">Saturation</label><input type="range" id="saturation" min="-100" max="100" value="0"><output id="saturationOut">0</output></div>
@@ -175,6 +179,7 @@
 <script src="js/wallPaint.js"></script>
 <script src="js/sceneVisualizer.js"></script>
 <script src="js/sceneStore.js"></script>
+<script src="js/dayNightSequence.js"></script>
 <script type="module">
 /* ==========================================================================
  * sceneVisualizer.html: one scene at a time (a room's photos, a video or an
@@ -201,9 +206,17 @@ const SCENES = {
     video: "images/videos/study_day-to-night_v2.mp4",
     // seconds into the video, as on day-to-night.html
     times: [{ label: "Morning", time: 0 }, { label: "Noon", time: 2 }, { label: "Sunset", time: 3 }, { label: "Night", time: 5 }] },
-  warmVideo: { label: "Room in changing warm light (video)", mask: "images/masks/video_4K_mask_.png",
-    video: "images/videos/hero_mobile_4k_warm-light.mp4" }
+  heroVideo: { label: "Living room, morning to night (video)", mask: "images/masks/prim_hero_morn-to-night_back.jpg",
+    video: "images/videos/prim_hero_morn-to-night_back.mp4", displayWidth: 960,
+    // One palindrome file: morning -> night in its first half, the same frames
+    // reversed in its second (239 frames: frame k mirrors frame 238 - k, the
+    // turn at frame 119). Two stacked copies play it as one film that can run
+    // backwards from wherever it is (js/dayNightSequence.js, as day-to-night.html).
+    palindrome: { span: 119 / 24, backwardEnd: 238 / 24, fps: 24 },
+    times: [{ label: "Morning", time: 0 }, { label: "Afternoon", time: 2 }, { label: "Sunset", time: 3 }, { label: "Night", time: 4 }] }
 };
+/** The scene shown at load (unless ?scene= names another). */
+const DEFAULT_SCENE = "study";
 const TIME_LABELS = { morning: "Morning", noon: "Noon", night: "Night" };
 const MAX_SIDE = 2048;                    // largest drawing size (uploads are scaled down to it)
 const UPLOAD_KEY = "visualizerUpload";    // IndexedDB (js/sceneStore.js)
@@ -218,7 +231,9 @@ const state = {
   contrast: 0, saturation: 0, lightStats: null,
   seed: null, random: [], custom: []
 };
-let renderer = null, video = null, sceneToken = 0;
+let renderer = null, sceneToken = 0;
+/** The video scene's player (null for photos): see makePlayer() / makeSequence(). */
+let player = null;
 /** The tiles on screen: { key, stage, out (2-D context of the painted canvas), top, lightStats } */
 let tiles = [];
 let painted = false;
@@ -329,9 +344,9 @@ async function videoStats(url, mask) {
  * Builds one tile: a stage (the painted canvas under the original image or
  * video copy, masked to non-wall) at most half the source's native size.
  */
-function makeTile(key, label, nativeW, nativeH, maskUrl, topEl) {
+function makeTile(key, label, nativeW, nativeH, maskUrl, topEl, displayWidth = nativeW / 2) {
   const fig = document.createElement("figure"); fig.className = "tile";
-  fig.style.maxWidth = `${Math.round(nativeW / 2)}px`;
+  fig.style.maxWidth = `${Math.round(displayWidth)}px`;
   const stage = document.createElement("div"); stage.className = "stage";
   stage.style.aspectRatio = `${nativeW} / ${nativeH}`;
   stage.style.setProperty("--mask", `url("${maskUrl}")`);
@@ -345,12 +360,91 @@ function makeTile(key, label, nativeW, nativeH, maskUrl, topEl) {
   return { key, stage, canvas, out: null, top: topEl, lightStats: null };
 }
 
+/**
+ * A video tile with one layer per copy of the video: each layer holds the
+ * (hidden) video, its painted canvas and the masked copy of its frames, so
+ * each copy is repainted on its own frames and the layers can crossfade.
+ * @returns {object[]} One track per video, in order.
+ */
+function makeVideoTile(videos, maskUrl, displayWidth) {
+  const w = videos[0].videoWidth, h = videos[0].videoHeight;
+  const first = makeTile("v0", "", w, h, maskUrl, Object.assign(document.createElement("canvas"), { width: w, height: h }), displayWidth);
+  first.stage.replaceChildren();
+  return videos.map((v, i) => {
+    const layer = document.createElement("div"); layer.className = "layer"; layer.style.zIndex = i ? 1 : 2;
+    const canvas = Object.assign(document.createElement("canvas"), { className: "tinted" });
+    canvas.setAttribute("role", "img"); canvas.setAttribute("aria-label", "The room, walls painted");
+    const top = Object.assign(document.createElement("canvas"), { className: "top", width: w, height: h });
+    layer.append(v, canvas, top);
+    first.stage.append(layer);
+    return { key: `v${i}`, stage: first.stage, layer, canvas, out: null, top, copy: top.getContext("2d"), video: v, lightStats: null };
+  });
+}
+
+/** Loads a <video> (muted, inline, no autoplay). */
+async function loadVideo(src, extra = {}) {
+  const v = Object.assign(document.createElement("video"), { muted: true, playsInline: true, autoplay: false, preload: "auto", src, ...extra });
+  v.defaultPlaybackRate = v.playbackRate = VIDEO_RATE;
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(`Couldn't load ${src}`)); });
+  return v;
+}
+
+/**
+ * Players: one interface for the timeline, whatever plays the video.
+ *   duration, position   scene seconds
+ *   playing              moving (autoplay / loop)
+ *   play(), pause(), goTo(s), scrubTo(s), endScrub(), stop()
+ */
+function makePlayer(v) {                       // one looping video
+  return {
+    get duration() { return v.duration || 1; }, get position() { return v.currentTime; }, get playing() { return !v.paused; },
+    play() { v.play().then(syncPlay, syncPlay); }, pause() { v.pause(); syncPlay(); },
+    goTo(s) { this.pause(); v.currentTime = Math.min(s, v.duration - 0.5 / 24); },   // the last frame, not past the end
+    scrubTo(s) { this.goTo(s); }, endScrub() {},
+    stop() { v.pause(); }
+  };
+}
+function makeSequence(fwd, bwd, p) {           // two copies of one palindrome file
+  const seq = DayNightSequence.create({
+    forward: { video: fwd.video, layer: fwd.layer }, backward: { video: bwd.video, layer: bwd.layer },
+    span: p.span, fps: p.fps, backwardEnd: p.backwardEnd, autoplayRate: VIDEO_RATE,
+    onUpdate: () => { syncTime(); syncPlay(); }
+  });
+  return {
+    get duration() { return p.span; }, get position() { return seq.position; }, get playing() { return seq.mode === "autoplay"; },
+    play() { seq.autoplay(); syncPlay(); }, pause() { seq.pause(); syncPlay(); },
+    goTo(s) { seq.goTo(Math.min(Math.max(s, 0), p.span)); syncPlay(); },
+    scrubTo(s) { seq.scrubTo(Math.min(Math.max(s, 0), p.span)); syncPlay(); }, endScrub() { seq.endScrub(); },
+    stop() { seq.pause(); fwd.video.pause(); bwd.video.pause(); }
+  };
+}
+
+/** Repaints a video track on each of its new frames (frame-locked with its masked copy). */
+function watchFrames(t) {
+  const cb = () => {
+    if (!tiles.includes(t)) return;                 // the scene changed
+    paintTrack(t); frames++; syncTime();
+    t.video.requestVideoFrameCallback(cb);
+  };
+  t.video.requestVideoFrameCallback(cb);
+  t.video.addEventListener("seeked", () => { if (tiles.includes(t)) { paintTrack(t); syncTime(); } });   // paused seeks too
+}
+function paintTrack(t) {
+  if (!painted || !state.original.lin || !state.paint || t.video.readyState < 2) return;
+  renderer.upload(t.video, t.key);
+  drawTile(t);
+  t.copy.drawImage(t.video, 0, 0, t.top.width, t.top.height);
+}
+
 async function setScene(key) {
   const token = ++sceneToken, s = SCENES[key];
   state.scene = key; $("scene").value = key;
   painted = false;
-  if (video) { video.pause(); video.removeAttribute("src"); video.load(); video = null; }
-  for (const t of tiles) renderer.release(t.key);
+  if (player) { player.stop(); player = null; }
+  for (const t of tiles) {
+    renderer.release(t.key);
+    if (t.video) { t.video.removeAttribute("src"); t.video.load(); }
+  }
   tiles = []; $("tiles").replaceChildren();
   status("Loading…");
   try {
@@ -358,17 +452,13 @@ async function setScene(key) {
     if (token !== sceneToken) return;
     const c = (cache[key] ||= { stats: {}, estimate: null });
     if (s.video) {
-      const v = Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, autoplay: false, preload: "auto", src: s.video });
-      v.defaultPlaybackRate = v.playbackRate = VIDEO_RATE;
-      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(`Couldn't load ${s.video}`)); });
+      // A palindrome plays as two stacked copies of the same file; other videos loop.
+      const videos = s.palindrome
+        ? await Promise.all([loadVideo(s.video), loadVideo(s.video)])
+        : [await loadVideo(s.video, { loop: true })];
       if (token !== sceneToken) return;
-      const w = v.videoWidth, h = v.videoHeight;
-      const top = Object.assign(document.createElement("canvas"), { width: w, height: h });
-      const tile = makeTile("video", "", w, h, s.mask, top);
-      tile.stage.prepend(v); video = v; tile.copy = top.getContext("2d");
-      v.addEventListener("seeked", () => { redraw(); syncTime(); });     // paused seeks repaint too
-      v.addEventListener("play", syncPlay); v.addEventListener("pause", syncPlay);
-      tiles = [tile];
+      tiles = makeVideoTile(videos, s.mask, s.displayWidth);
+      player = s.palindrome ? makeSequence(tiles[0], tiles[1], s.palindrome) : makePlayer(videos[0]);
       if (!c.estimate) {
         status("Measuring the walls…");
         const list = await videoStats(s.video, mask);
@@ -410,7 +500,7 @@ async function setScene(key) {
     fitPanel();
     setOriginal(saved || c.estimate, saved ? "user" : "auto");        // also measures the light and draws
     status("");
-    if (video) { video.requestVideoFrameCallback(onFrame); video.play().then(syncPlay, syncPlay); }
+    if (player) { for (const t of tiles) watchFrames(t); player.play(); }
   } catch (err) {
     console.warn("sceneVisualizer:", err);
     status(err.message || String(err), true);
@@ -422,7 +512,7 @@ function updateLightStats() {
   const c = cache[state.scene];
   if (!c || !state.original.lin) return;
   for (const t of tiles) {
-    const sample = t.key === "video" ? c.sample : c.stats[t.key]?.sample;
+    const sample = t.video ? c.sample : c.stats[t.key]?.sample;
     t.lightStats = sample ? WP.lightStats(sample, state.original.lin) : null;
   }
 }
@@ -439,25 +529,7 @@ function drawTile(t) {
 }
 function redraw() {
   if (!renderer || !painted || !state.original.lin || !state.paint) return;
-  for (const t of tiles) {
-    if (t.key === "video") {
-      if (video.readyState < 2) continue;
-      renderer.upload(video, "video");
-      t.copy.drawImage(video, 0, 0, t.top.width, t.top.height);
-    }
-    drawTile(t);
-  }
-}
-/** Each new video frame: upload it, repaint, and copy the original into the masked top layer (frame-locked). */
-function onFrame() {
-  if (!video || !tiles[0] || tiles[0].key !== "video") return;
-  const t = tiles[0];
-  renderer.upload(video, "video");
-  drawTile(t);
-  t.copy.drawImage(video, 0, 0, t.top.width, t.top.height);
-  frames++;
-  syncTime();
-  video.requestVideoFrameCallback(onFrame);
+  for (const t of tiles) { if (t.video) paintTrack(t); else drawTile(t); }
 }
 let frames = 0;
 
@@ -480,15 +552,16 @@ new ResizeObserver(fitPanel).observe($("tiles"));
 function showTimeline(points) {
   const isVideo = points !== null;
   $("intro").hidden = isVideo; $("timeline").hidden = !isVideo;
+  // Videos: the Contrast and Saturation sliders sit directly under the Scene
+  // selector (same column); photos: in their own column at the end.
+  if (isVideo) $("sceneSection").append($("lightSection")); else $("app").querySelector(".panel").append($("lightSection"));
+  $("lightSection").classList.toggle("is-nested", isVideo);
   if (!isVideo) return;
   $("timelineTitle").textContent = points.length ? "Time of day" : "Timeline";
-  const dur = video.duration || 1;
+  const dur = player.duration;
   $("timePoints").replaceChildren(...points.map(p => {
     const b = document.createElement("button"); b.textContent = p.label; b.dataset.time = p.time;
-    b.addEventListener("click", () => {
-      video.pause(); syncPlay();
-      video.currentTime = Math.min(p.time, dur - 0.5 / 24);        // the last frame, not past the end
-    });
+    b.addEventListener("click", () => player.goTo(p.time));
     return b;
   }));
   $("timePoints").hidden = !points.length;
@@ -500,12 +573,12 @@ function showTimeline(points) {
   }
   syncTime();
 }
-function syncPlay() { if (video) $("play").textContent = video.paused ? "Play" : "Pause"; }
-/** The scrubber, clock and selected time point follow the video. */
+function syncPlay() { if (player) $("play").textContent = player.playing ? "Pause" : "Play"; }
+/** The scrubber, clock and selected time point follow the film. */
 function syncTime() {
-  if (!video) return;
-  const t = video.currentTime, dur = video.duration || 1;
-  if (document.activeElement !== $("scrub") || !video.paused) $("scrub").value = t / dur;
+  if (!player) return;
+  const t = player.position, dur = player.duration;
+  if (document.activeElement !== $("scrub") || player.playing) $("scrub").value = t / dur;
   $("clock").value = `${t.toFixed(1)} s / ${dur.toFixed(1)} s`;
   for (const b of $("timePoints").children)
     b.setAttribute("aria-pressed", String(Math.abs(Math.min(+b.dataset.time, dur) - t) < 0.06));
@@ -544,7 +617,7 @@ $("uploadRemove").addEventListener("click", async () => {
   delete SCENES.upload; delete cache.upload;
   const saved = readJSON(LS_ORIG, {}); delete saved.upload; localStorage.setItem(LS_ORIG, JSON.stringify(saved));
   sceneList();
-  if (state.scene === "upload") setScene("livingRoom");
+  if (state.scene === "upload") setScene(DEFAULT_SCENE);
 });
 
 // ---------------------------------------------------------------- wiring
@@ -569,14 +642,11 @@ for (const k of ["contrast", "saturation"]) {
   input.addEventListener("dblclick", () => { input.value = 0; apply(); });
 }
 $("play").addEventListener("click", () => {
-  if (!video) return;
-  if (video.paused) video.play().then(syncPlay, syncPlay); else { video.pause(); syncPlay(); }
+  if (!player) return;
+  if (player.playing) player.pause(); else player.play();
 });
-$("scrub").addEventListener("input", e => {
-  if (!video) return;
-  video.pause(); syncPlay();
-  video.currentTime = +e.target.value * video.duration;
-});
+$("scrub").addEventListener("input", e => { if (player) player.scrubTo(+e.target.value * player.duration); });
+$("scrub").addEventListener("change", () => { if (player) player.endScrub(); });
 
 
 // ---------------------------------------------------------------- boot
@@ -594,14 +664,14 @@ $("scrub").addEventListener("input", e => {
   state.paint = state.random[0];
   const stored = await store.load(UPLOAD_KEY).catch(() => null);
   if (stored && stored.image && stored.mask) { try { await useUpload(stored, false); } catch (e) { console.warn("sceneVisualizer: stored upload", e); } }
-  state.scene = q.get("scene") in SCENES ? q.get("scene") : "livingRoom";
+  state.scene = q.get("scene") in SCENES ? q.get("scene") : DEFAULT_SCENE;
   sceneList();
   setPaint(state.paint);
   await setScene(state.scene);
 })();
 
 window.sceneVisualizer = {
-  state, get renderer() { return renderer; }, get tiles() { return tiles; }, cache, setScene, setPaint, setOriginal, addCustom, removeCustom, setSeed,
+  state, get renderer() { return renderer; }, get tiles() { return tiles; }, get player() { return player; }, cache, setScene, setPaint, setOriginal, addCustom, removeCustom, setSeed,
   get framesPainted() { return frames; }
 };
 </script>

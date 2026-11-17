@@ -165,12 +165,17 @@ coloured original wall is read as coloured light and tints every new paint.
   Sherwin-Williams palette); up to 5 custom colours (picker or hex; kept
   between visits). No tinting-algorithm selector.
 * **Scenes**: Living Room and Study photos (morning, noon, night), the study
-  day-to-night video, the warm-light video, and one uploaded scene (`room.jpg` or
+  day-to-night video, the living-room morning-to-night video
+  (`prim_hero_morn-to-night_back.mp4`, shown 960 px wide), and one uploaded scene (`room.jpg` or
   .jpeg/.png/.webp, plus `mask.png`, black = wall), kept in the browser.
   Scenes are on top (a room's three times of day side by side), each at
   most half its native size, with the controls underneath.
   Video scenes show a time-of-day selector (the study video: Morning, Noon,
-  Sunset, Night) and a timeline with play/pause in place of the title. The original-wall-colour
+  Sunset, Night; the living-room video: Morning 0 s, Afternoon 2 s, Sunset 3 s,
+  Night 4 s) and a timeline with play/pause in place of the title. Videos play
+  at 80 % speed. The living-room video is one palindrome file (its second
+  5 s are the first 5 s reversed), played as two stacked copies through
+  `js/dayNightSequence.js`, so moving to an earlier time plays backwards. The original-wall-colour
   control is hidden by CSS for now (one rule in the page's style block).
 
 Measured on the before/after photos in `images/source/pairs/`: median
