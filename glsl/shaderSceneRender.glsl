@@ -21,9 +21,6 @@
 //     ANALYSE  P1   light -> light map, in the active model's encoding
 //     RENDER   P2   the wall paint lit by the light map
 //
-//   glsl/sheen.glsl adds two sections for sheenSceneRenderer.html: ENVDOWN
-//   (its own program) and SHEEN (appended to RENDER under #define SHEEN).
-//
 //   Each fragment program is built in JS as COMMON + "\n" + section, so only
 //   VERT and COMMON start with "#version 300 es". That line must remain the
 //   very first line of those two sections; put nothing between the marker
@@ -251,11 +248,9 @@ vec3 lightRGB(float T, float duv) { vec3 c = planckRGB(T, duv) / planckRGB(6500.
 // instead (as a 2D canvas does) darkens every high-contrast edge: measured on
 // these photos, 1 % of 8x8 blocks come out 38-60 % too dark, and those blocks
 // are exactly the shadow and sunbeam edges.
-// Alpha is carried through (linear in an sRGB texture): opaque photos stay
-// opaque; sheenSceneRenderer.html stores a texture map there.
 uniform sampler2D src;
 uniform vec2 size;
-void main() { fragOut = texture(src, gl_FragCoord.xy / size); }
+void main() { fragOut = vec4(texture(src, gl_FragCoord.xy / size).rgb, 1.0); }
 
 //@@DECODE
 // P0: source image -> linear light, at the analysis size.
@@ -399,7 +394,6 @@ void main() {
 //   v2: .x = exposure - 1  (0 = as bright as white, -1 = black)
 //       .y = warm/cool     (-1 cool sky ... 0 neutral ... +1 warm sun/tungsten)
 //       .z = saturation    (0 = white/grey light ... 1 = fully coloured light)
-//       .w = luminance of the blurred UNADJUSTED light (as v3's .w)
 //   v3: .x  = luminance / refY  (1 = the room's reference white)
 //       .yz = the light's chromaticity, CIE 1960 (u, v)
 //       .w  = luminance of the blurred UNADJUSTED light, for RENDER's detail
@@ -407,7 +401,7 @@ void main() {
 // White light encodes as "no change to the paint" in v1 and v2.
 uniform sampler2D lightLin;   // blurred, wall-weighted linear light (v2, v3), adjusted by the sliders
 uniform sampler2D sharpLin;   // unblurred linear light (v1)
-uniform sampler2D rawLin;     // v2, v3: blurred light WITHOUT the sliders' adjustment
+uniform sampler2D rawLin;     // v3: blurred light WITHOUT the sliders' adjustment
 uniform int   model;
 uniform float refY;           // v3: luminance of the reference white (see LightStats.refY)
 void main() {
@@ -453,9 +447,7 @@ void main() {
   vec3  lab  = oklab(lin);
   float hue  = atan(lab.z, lab.y);
   float warm = clamp(2.0 * cos(hue - radians(70.0)), -1.0, 1.0) * sat;
-  // .w: luminance of the blurred UNADJUSTED light, as v3's, for the optional
-  // detail layer (RENDER's v2Detail; sheenVideo.html).
-  fragOut = vec4(exposure - 1.0, warm, sat, lum(texelFetch(rawLin, p, 0).rgb));
+  fragOut = vec4(exposure - 1.0, warm, sat, 1.0);
 }
 
 //@@RENDER
@@ -497,18 +489,6 @@ uniform vec4  v1p;            // ambient, shadowCurve, warmth, glow
 // room's own light, so it scales with the scene's mean wall luminance below
 // fillRefY. (Every photo is above it, so they are unchanged.) Set in main().
 float fillScale = 1.0;
-
-// v2's optional detail layer (0 = off, the default: v2 as on every other
-// page). The light map is blurred, so fine brightness detail - leaf-shadow
-// edges, a panel seam, plaster texture - is smoothed away; as v3 does, it is
-// restored from the full-resolution source: its luminance over the blurred
-// luminance at the same place (light map .w), raised to v2Detail (the
-// detail strength x the Contrast slider's exponent).
-uniform float v2Detail;
-float v2DetailRatio(float blurredY, vec3 sharp) {
-  if (v2Detail <= 0.0 || blurredY <= 1e-6) return 1.0;
-  return pow(clamp(lum(sharp) / blurredY, 0.125, 8.0), v2Detail);
-}
 
 // ---- previous version, kept for side-by-side comparison --------------------
 // v1 (HSV) model. d = (light hue in degrees, light saturation, V - 1); albedo =
@@ -573,13 +553,8 @@ vec3 compress(vec3 c) {
 
 // v2 (perceptual) model. d = light-map texel (exposure - 1, warm, sat);
 // albedo = the paint in linear sRGB (its reflectance per channel).
-// In two halves, so the sheen code (glsl/sheen.glsl) can work between them:
-//   v2Lit     steps 1-3. Outputs, linear sRGB in the photo's units (a white
-//             photo pixel is 1): c = the lit paint, light = the light falling
-//             on the wall (what an ideal white matte wall would show).
-//   v2Finish  steps 4-5: colour constancy for that light, then gamut mapping.
-// renderV2 = both; its result is the lit wall colour, inside the gamut.
-void v2Lit(vec3 d, vec3 albedo, out vec3 c, out vec3 light) {
+// Returns the lit wall colour in linear sRGB, inside the gamut.
+vec3 renderV2(vec3 d, vec3 albedo) {
   // exposure 0..1 (1 = as bright as the photo's white). shadowCurve > 1
   // deepens the shadows.
   float exposure = pow(max(1.0 + d.x, 0.0), shadowCurve);
@@ -610,16 +585,15 @@ void v2Lit(vec3 d, vec3 albedo, out vec3 c, out vec3 light) {
   float f = fill * fillScale;             // scaled for dark scenes (see fillScale)
   vec3 total   = f * fillCol + (1.0 - f) * direct;
   vec3 neutral = f * fillCol + (1.0 - f) * vec3(1.0);
-  light = total / neutral;                 // white in ImageA -> exactly (1,1,1)
+  vec3 light   = total / neutral;          // white in ImageA -> exactly (1,1,1)
 
   // 3. light x wall, per channel in linear sRGB
   // Reflected light = incident light x reflectance, per channel. This is a
   // 3-sample approximation of the spectral product. For this kind of matte
   // paint, linear sRGB primaries were measured as the most accurate
   // 3-channel basis (see the header of js/tinted-wall-v2.js).
-  c = albedo * light;
-}
-vec3 v2Finish(vec3 c, vec3 light) {
+  vec3 c = albedo * light;
+
   // 4. partial colour constancy (CAT16 von Kries, degree D) toward neutral
   // The eye partly discounts the colour of the light; a camera doesn't. Von
   // Kries adaptation: go to CAT16 space, multiply each channel by
@@ -638,11 +612,6 @@ vec3 v2Finish(vec3 c, vec3 light) {
 
   // 5. highlight roll-off and gamut mapping in Oklab
   return compress(c);
-}
-vec3 renderV2(vec3 d, vec3 albedo) {
-  vec3 c, light;
-  v2Lit(d, albedo, c, light);
-  return v2Finish(c, light);
 }
 
 // ---- v3: physically based ---------------------------------------------------
@@ -676,13 +645,8 @@ float mccamyCCT(vec2 xy) {
 
 // L = light-map texel (luminance / refY, CIE 1960 u, v, blurred raw luminance);
 // sharp = the source pixel at full resolution, linear.
-// Outputs, both linear sRGB BEFORE adaptation and gamut mapping:
-//   c  the lit wall colour (renderV3 below adapts and gamut-maps it)
-//   W  the same light on an ideal white matte wall (reflectance 1, so its
-//      bounce light is the original white walls': (1,1,1) x oldBounce). The
-//      sheen model (glsl/sheen.glsl) needs it: the surface reflection of
-//      paint is the LIGHT's colour, not the paint's.
-void v3Lit(vec4 L, vec3 sharp, float sceneY, out vec3 c, out vec3 W) {
+// Returns the lit wall colour in linear sRGB, inside the output gamut.
+vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
   // 1. How much light. The light map is smooth (blurred at the analysis
   // size); the eye resolves brightness far more finely than colour, so fine
   // brightness detail (plaster texture, crisp shadow edges) comes back from
@@ -729,32 +693,12 @@ void v3Lit(vec4 L, vec3 sharp, float sceneY, out vec3 c, out vec3 W) {
   // dark paints (deeper shadows) and more saturated than the paint itself, as
   // in a real room painted one colour.
   float oldBounce = v3Ambient * v3BounceShare * min(4.0, sceneY / max(refY, 1e-4));
-  c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
-  W = planckRGB1 * tint * max(E - oldBounce, 0.0) + vec3(oldBounce);
-}
-// Returns the lit wall colour in linear sRGB, inside the output gamut.
-vec3 renderV3(vec4 L, vec3 sharp, float sceneY) {
-  vec3 c, W;
-  v3Lit(L, sharp, sceneY, c, W);
+  vec3 c = paintLit * tint * max(E - oldBounce, 0.0) + bounceRGB * oldBounce;
+
   // 5. Colour constancy for the whole scene (not per pixel), then highlight
   // roll-off and gamut mapping.
   return compress(adaptMat * c);
 }
-
-#ifdef SHEEN
-// Paint sheen (sheenSceneRenderer.html with v3, sheenVideo.html with v2). The
-// program is then built as COMMON + "#define SHEEN" + RENDER + the SHEEN
-// section of glsl/sheen.glsl, which defines these functions; without the
-// define this block, and the ones in main(), don't exist, so the other pages
-// compile exactly as before.
-//   envPass 1: write the reflection environment (linear, reference-white
-//              units) at the analysis size instead of the wall (see ENV in
-//              glsl/sheen.glsl). Stored image: row 0 at the top, no flip.
-uniform int envPass;
-vec3 sheenEnvTexel(vec2 uv, float sceneY);
-vec3 applySheen(vec3 c, vec3 W, vec4 L, vec2 uv);
-float sheenEmitter(vec2 uv, vec3 lin);
-#endif
 
 // Cheap, stateless hash: a pixel position -> pseudo-random 0..1. Its only
 // job is to decorrelate neighbouring pixels for the dither, so it doesn't
@@ -768,9 +712,6 @@ void main() {
   vec2 uv = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / size;
   float sceneY = lum(texelFetch(frameMean, ivec2(0), 0).rgb);
   fillScale = clamp(sceneY / max(fillRefY, 1e-4), 0.0, 1.0);
-#ifdef SHEEN
-  if (envPass == 1) { fragOut = vec4(sheenEnvTexel(gl_FragCoord.xy / size, sceneY), 1.0); return; }
-#endif
   vec3 c;
   if (model == MODEL_V1) {
     // v1's light map holds HSV hue in degrees, which must not be interpolated
@@ -778,38 +719,10 @@ void main() {
     vec3 d = texelFetch(lightMap, ivec2(uv * vec2(textureSize(lightMap, 0))), 0).xyz;
     c = renderV1(d, albedo);
   } else if (model == MODEL_V2) {
-#ifdef SHEEN
-    // The flat paint (v2's light x paint), then the sheen's surface
-    // reflection, then v2's colour constancy and gamut mapping. The sheen
-    // code works in the photo's linear units here (JS sets refY = 1 for v2).
-    vec4 L = texture(lightMap, uv);
-    vec3 s = texture(src, uv).rgb, lin = srcLinear == 1 ? s : toLinear(s), lit, light;
-    v2Lit(L.xyz, albedo, lit, light);
-    float r = v2DetailRatio(L.w, lin);
-    lit *= r; light *= r;
-    c = mix(v2Finish(applySheen(lit, light, L, uv), light), lin, sheenEmitter(uv, lin));
-#else
-    vec4 L = texture(lightMap, uv);
-    if (v2Detail > 0.0) {
-      vec3 s = texture(src, uv).rgb, lit, light;
-      v2Lit(L.xyz, albedo, lit, light);
-      float r = v2DetailRatio(L.w, srcLinear == 1 ? s : toLinear(s));
-      c = v2Finish(lit * r, light * r);
-    } else c = renderV2(L.xyz, albedo);
-#endif
+    c = renderV2(texture(lightMap, uv).xyz, albedo);
   } else {
     vec3 s = texture(src, uv).rgb;
-#ifdef SHEEN
-    // The flat paint (v3, unchanged), then the sheen's surface reflection,
-    // then v3's scene adaptation and gamut mapping. Light sources (emitter
-    // cores) show the photo: they aren't wall, even where the mask is grey.
-    vec4 L = texture(lightMap, uv);
-    vec3 lin = srcLinear == 1 ? s : toLinear(s), lit, W;
-    v3Lit(L, lin, sceneY, lit, W);
-    c = mix(compress(adaptMat * applySheen(lit, W, L, uv)), lin, sheenEmitter(uv, lin));
-#else
     c = renderV3(texture(lightMap, uv), srcLinear == 1 ? s : toLinear(s), sceneY);
-#endif
   }
   // To the output primaries (Display P3 or sRGB; both use the sRGB curve).
   vec3 enc = toSRGB(clamp(toOutput * c, 0.0, 1.0));

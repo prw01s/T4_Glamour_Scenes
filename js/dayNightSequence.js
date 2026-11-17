@@ -13,7 +13,7 @@
  * between them is covered by a short crossfade.) Browsers can't play video
  * backwards, hence the second video.
  *
- * ONE PALINDROME FILE (sheenVideo.html): both tracks may be copies of a
+ * ONE PALINDROME FILE: both tracks may be copies of a
  * single video that runs morning -> night -> morning (frame k mirrors frame
  * 2N - k, night = frame N at span = N / fps). The forward copy plays its
  * first half, the backward copy its second half: backwardEnd = 2 span. The

@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T4 Scene Visualizer</title>
+<link rel="stylesheet" href="css/visualizer.css">
+<style>
+  /* The scene on top (all of a room's times of day side by side), the controls underneath. */
+  .app { max-width: 3200px; margin: 0 auto; padding: var(--pad); background: var(--booth); min-height: 100vh; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--slate); margin: 0 0 8px; font-weight: 600; }
+  /* Directly under the scene, as wide as it (the script sets --media-w to the
+     scene's drawn width; never narrower than 680 px). */
+  .panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px 32px;
+           width: max(680px, var(--media-w, 1400px)); max-width: 100%; margin: 12px auto 0; align-items: start; }
+  .note { font-size: 13px; color: var(--slate); margin: 6px 0 0; }
+
+  /* ---- the tiles: one per time of day (or one video / photo). Each is shown
+     at most at half its native size (max-width set by the script). ---- */
+  .tiles { display: flex; gap: 14px; justify-content: center; align-items: flex-start; }
+  .tile { flex: 1 1 0; min-width: 0; margin: 0; }
+  .tile figcaption { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--slate); margin-top: 6px; text-align: center; }
+  @media (max-width: 700px) { .tiles { flex-direction: column; align-items: center; } .tile { width: 100%; } }
+  /* ---- a stage: the painted canvas under the original, masked to non-wall ---- */
+  .stage { position: relative; width: 100%; background: #000; overflow: hidden; }
+  .stage > * { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .stage .top { mask-image: var(--mask); mask-size: 100% 100%; mask-repeat: no-repeat; mask-mode: luminance;
+                -webkit-mask-image: var(--mask); -webkit-mask-size: 100% 100%; }
+  .stage .tinted { visibility: hidden; }
+  .stage.is-painted .tinted { visibility: visible; }
+  .stage:not(.is-painted) .top { mask-image: none; -webkit-mask-image: none; }
+  .stage video { visibility: hidden; }
+  .stage-bar { display: flex; gap: 10px; align-items: center; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+  .stage-bar:has(.status:empty) { display: none; }
+  .status { font-size: 13px; color: var(--slate); }
+  .status.is-error { color: #b3261e; }
+
+  button, .btn { font: inherit; font-size: 14px; border: 1px solid var(--rule); background: #fff; color: var(--graphite);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: var(--graphite); }
+  button[aria-pressed="true"] { background: var(--graphite); color: #fff; border-color: var(--graphite); }
+  select { font: inherit; font-size: 15px; padding: 5px 8px; width: 100%; }
+  .linkish { background: none; border: 0; padding: 0; color: var(--graphite); text-decoration: underline; cursor: pointer; font-size: 14px; }
+
+  /* ---- paint chips ---- */
+  .chips { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .chip { position: relative; aspect-ratio: 1; border-radius: 6px; border: 1px solid rgba(0,0,0,.18); cursor: pointer; padding: 0; }
+  .chip[aria-pressed="true"] { outline: 3px solid var(--graphite); outline-offset: 2px; }
+  .chip .x { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--rule);
+    background: #fff; font-size: 12px; line-height: 17px; padding: 0; text-align: center; }
+  .chips:empty::after { content: "No custom colours yet."; grid-column: 1 / -1; font-size: 13px; color: var(--slate); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  input[type="color"] { width: 42px; height: 32px; padding: 0; border: 1px solid var(--rule); border-radius: 6px; background: #fff; }
+  input.hex { font: inherit; font-size: 14px; width: 92px; padding: 5px 6px; text-transform: uppercase; }
+  .readout { display: flex; gap: 10px; align-items: center; font-size: 14px; margin-top: 10px; }
+  .swatch { width: 28px; height: 28px; border-radius: 5px; border: 1px solid rgba(0,0,0,.2); flex: none; }
+
+  /* ---- sliders ---- */
+  .slider { display: grid; grid-template-columns: 90px 1fr 44px; align-items: center; gap: 8px; font-size: 14px; }
+  .slider output { text-align: right; color: var(--slate); }
+
+  /* The original wall colour section is hidden for now (CSS only: it still
+     works, and remove this rule to show it again). */
+  section[aria-labelledby="origTitle"] { display: none; }
+  dialog ul { margin: 4px 0 8px; padding-left: 20px; }
+
+  /* ---- video scenes: time of day + timeline (in place of the title) ---- */
+  .timeline .points { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .timeline .track { position: relative; height: 26px; }
+  .timeline .track input { position: absolute; inset: 0; width: 100%; margin: 0; }
+  .timeline .tick { position: absolute; top: 20px; width: 2px; height: 7px; background: var(--slate); transform: translateX(-1px); pointer-events: none; }
+  .timeline .row { justify-content: space-between; }
+  .timeline output { font-size: 13px; color: var(--slate); font-variant-numeric: tabular-nums; }
+
+  dialog { border: 1px solid var(--rule); border-radius: 8px; max-width: 460px; }
+  dialog label { display: block; margin: 10px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<main class="app" id="app">
+  <section aria-label="Scene" id="sceneView">
+    <div class="tiles" id="tiles"></div>
+    <div class="stage-bar">
+      <span class="status" id="status" role="status"></span>
+    </div>
+  </section>
+  <!-- The WebGL renderer draws here, off screen; each tile copies its result. -->
+  <canvas id="gl" hidden></canvas>
+
+  <div class="panel">
+    <div id="intro">
+      <h1>Scene Visualizer</h1>
+      <p class="note">Repaints the walls under the room's own light.</p>
+    </div>
+    <!-- Video scenes: shown instead of the title. -->
+    <section class="timeline" id="timeline" aria-labelledby="timelineTitle" hidden>
+      <h2 id="timelineTitle">Time of day</h2>
+      <div class="points" id="timePoints" role="group" aria-label="Go to a time of day"></div>
+      <div class="track" id="timelineTrack">
+        <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="Video timeline">
+      </div>
+      <div class="row">
+        <button id="play">Pause</button>
+        <output id="clock">0.0 s</output>
+      </div>
+    </section>
+
+    <section>
+      <h2><label for="scene">Scene</label></h2>
+      <select id="scene"></select>
+      <div class="row">
+        <button class="linkish" id="uploadOpen">Upload a scene (room.jpg + mask.png)</button>
+        <button class="linkish" id="uploadRemove" hidden>Remove my scene</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="origTitle">
+      <h2 id="origTitle">Original wall colour</h2>
+      <div class="readout">
+        <span class="swatch" id="origSwatch"></span>
+        <span><strong id="origHex">…</strong> <span id="origSource" class="note"></span></span>
+      </div>
+      <div class="row">
+        <input type="color" id="origPicker" aria-label="Pick the original wall colour">
+        <input class="hex" id="origHexInput" aria-label="Original wall colour, hex" placeholder="#RRGGBB" maxlength="7">
+        <button id="origSet">Set</button>
+        <button class="linkish" id="origAuto" hidden>Use the estimate</button>
+      </div>
+      <p class="note" id="origNote"></p>
+    </section>
+
+    <section aria-labelledby="paintTitle">
+      <h2 id="paintTitle">Paint colours</h2>
+      <div class="chips" id="randomChips" role="group" aria-label="Random paint colours"></div>
+      <div class="row"><button id="shuffle">New random colours</button></div>
+      <h2 style="margin-top:16px">Your colours (up to 5)</h2>
+      <div class="chips" id="customChips" role="group" aria-label="Your paint colours"></div>
+      <div class="row">
+        <input type="color" id="customPicker" value="#7a8c6e" aria-label="Pick a colour">
+        <input class="hex" id="customHex" aria-label="Colour, hex" placeholder="#RRGGBB" maxlength="7">
+        <button id="customAdd">Add</button>
+      </div>
+      <div class="readout" aria-live="polite">
+        <span class="swatch" id="paintSwatch"></span>
+        <span id="paintText"></span>
+      </div>
+    </section>
+
+    <section aria-labelledby="lightTitle">
+      <h2 id="lightTitle">Room light</h2>
+      <div class="slider"><label for="contrast">Contrast</label><input type="range" id="contrast" min="-100" max="100" value="0"><output id="contrastOut">0</output></div>
+      <div class="slider"><label for="saturation">Saturation</label><input type="range" id="saturation" min="-100" max="100" value="0"><output id="saturationOut">0</output></div>
+      <p class="note">These change the room's light before the paint is applied. Double-click a slider to reset it.</p>
+    </section>
+  </div>
+</main>
+
+<dialog id="uploadDialog">
+  <form method="dialog" id="uploadForm">
+    <h2>Upload a scene</h2>
+    <p class="note">Two files of the same room, with these names (any letter case):</p>
+    <ul class="note">
+      <li><strong>room.jpg</strong> (or room.jpeg, room.png, room.webp): the room photo.</li>
+      <li><strong>mask.png</strong>: the wall mask, the same shape as the photo. Black (or transparent) where the walls are, white everywhere else.</li>
+    </ul>
+    <label>Room image (room.jpg) <input type="file" id="uploadImage" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" required></label>
+    <label>Wall mask (mask.png) <input type="file" id="uploadMask" accept=".png,image/png" required></label>
+    <p class="note status" id="uploadStatus"></p>
+    <div class="row"><button value="ok" id="uploadOk">Use this scene</button><button value="cancel" formnovalidate>Cancel</button></div>
+  </form>
+</dialog>
+
+<script src="js/paintPipeline.js"></script>
+<script src="js/wallPaint.js"></script>
+<script src="js/sceneVisualizer.js"></script>
+<script src="js/sceneStore.js"></script>
+<script type="module">
+/* ==========================================================================
+ * sceneVisualizer.html: one scene at a time (a room's photos, a video or an
+ * uploaded image), its walls repainted with the v4 model. The algorithm is
+ * js/wallPaint.js + glsl/sceneVisualizer.glsl (docs/scene-visualizer.md);
+ * this script is the page: scenes, paints, the original-colour control,
+ * sliders, uploads.
+ * ======================================================================== */
+const PP = window.PaintPipeline, WP = window.WallPaint, SV = window.SceneVisualizer, store = window.SceneStore;
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- config
+/** Every built-in room scene that has a wall mask. */
+const SCENES = {
+  livingRoom: { label: "Living Room (photos)", mask: "images/masks/living_room_mask.jpg", photos: {
+    morning: "images/lighting_variants/living_room/living-room_morning.jpg",
+    noon:    "images/lighting_variants/living_room/living_room-noon.jpg",
+    night:   "images/lighting_variants/living_room/living-room_night.jpg" } },
+  study: { label: "Study (photos)", mask: "images/masks/study_mask.jpg", photos: {
+    morning: "images/lighting_variants/study/study_morning.jpg",
+    noon:    "images/lighting_variants/study/study_noon.jpg",
+    night:   "images/lighting_variants/study/study_night.jpg" } },
+  studyVideo: { label: "Study, morning to night (video)", mask: "images/masks/day-night-mask.png",
+    video: "images/videos/study_day-to-night_v2.mp4",
+    // seconds into the video, as on day-to-night.html
+    times: [{ label: "Morning", time: 0 }, { label: "Noon", time: 2 }, { label: "Sunset", time: 3 }, { label: "Night", time: 5 }] },
+  warmVideo: { label: "Room in changing warm light (video)", mask: "images/masks/video_4K_mask_.png",
+    video: "images/videos/hero_mobile_4k_warm-light.mp4" }
+};
+const TIME_LABELS = { morning: "Morning", noon: "Noon", night: "Night" };
+const MAX_SIDE = 2048;                    // largest drawing size (uploads are scaled down to it)
+const UPLOAD_KEY = "visualizerUpload";    // IndexedDB (js/sceneStore.js)
+const LS_CUSTOM = "sceneVisualizer.customPaints", LS_ORIG = "sceneVisualizer.originals";
+const MAX_CUSTOM = 5;
+const VIDEO_RATE = 0.8;                   // videos play at 80 % of full speed
+
+// ---------------------------------------------------------------- state
+const state = {
+  scene: null, time: "noon", paint: null,
+  original: { hex: null, lin: null, auto: null, source: "auto" },
+  contrast: 0, saturation: 0, lightStats: null,
+  seed: null, random: [], custom: []
+};
+let renderer = null, video = null, sceneToken = 0;
+/** The tiles on screen: { key, stage, out (2-D context of the painted canvas), top, lightStats } */
+let tiles = [];
+let painted = false;
+const cache = {};          // per scene: { stats: {time|"video": stats}, estimate }
+
+const status = (text, error = false) => { $("status").textContent = text; $("status").classList.toggle("is-error", error); };
+const normHex = h => { try { return PP.normalizeHex(h.startsWith("#") ? h : "#" + h); } catch { return null; } };
+const readJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Couldn't load ${src}`));
+    img.src = src;
+  });
+}
+
+// ---------------------------------------------------------------- paints
+function setSeed(seed) {
+  state.seed = seed >>> 0;
+  state.random = WP.randomPaints(10, state.seed);
+  const url = new URL(location.href); url.searchParams.set("seed", state.seed); history.replaceState(null, "", url);
+  renderChips();
+}
+function renderChips() {
+  const mk = (hex, removable) => {
+    const b = document.createElement("button");
+    b.className = "chip"; b.style.background = hex; b.dataset.hex = hex;
+    b.setAttribute("aria-label", `Paint ${hex.toUpperCase()}, LRV ${PP.lrv(hex)}`);
+    b.setAttribute("aria-pressed", String(hex === state.paint));
+    b.addEventListener("click", () => setPaint(hex));
+    if (removable) {
+      const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "Remove"; x.setAttribute("role", "button");
+      x.setAttribute("aria-label", `Remove ${hex.toUpperCase()}`);
+      x.addEventListener("click", e => { e.stopPropagation(); removeCustom(hex); });
+      b.append(x);
+    }
+    return b;
+  };
+  $("randomChips").replaceChildren(...state.random.map(h => mk(h, false)));
+  $("customChips").replaceChildren(...state.custom.map(h => mk(h, true)));
+}
+function setPaint(hex) {
+  state.paint = hex;
+  for (const c of document.querySelectorAll(".chip")) c.setAttribute("aria-pressed", String(c.dataset.hex === hex));
+  $("paintSwatch").style.background = hex;
+  const outside = WP.isPaintLike(hex) ? "" : " · outside the usual paint range";
+  $("paintText").textContent = `${hex.toUpperCase()} · LRV ${PP.lrv(hex)}${outside}`;
+  redraw();
+}
+function addCustom(hex) {
+  hex = normHex(hex || "");
+  if (!hex) { $("customHex").setCustomValidity("Use #RRGGBB"); $("customHex").reportValidity(); return; }
+  $("customHex").setCustomValidity("");
+  state.custom = [...state.custom.filter(h => h !== hex), hex].slice(-MAX_CUSTOM);   // a 6th replaces the oldest
+  localStorage.setItem(LS_CUSTOM, JSON.stringify(state.custom));
+  renderChips(); setPaint(hex);
+}
+function removeCustom(hex) {
+  state.custom = state.custom.filter(h => h !== hex);
+  localStorage.setItem(LS_CUSTOM, JSON.stringify(state.custom));
+  renderChips();
+  if (state.paint === hex) setPaint(state.random[0]);
+}
+
+// ---------------------------------------------------------------- original colour
+function setOriginal(hex, source) {
+  const o = state.original;
+  o.hex = hex; o.lin = PP.hexToLinear(hex); o.source = source;
+  $("origSwatch").style.background = hex;
+  $("origHex").textContent = hex.toUpperCase();
+  $("origSource").textContent = source === "auto" ? "· estimated from the scene" : "· set by you";
+  $("origPicker").value = hex; $("origHexInput").value = hex.toUpperCase();
+  $("origAuto").hidden = source === "auto" || !o.auto;
+  $("origNote").textContent = source === "auto"
+    ? "Estimated from the image alone: typically within about 8 ΔE of the real paint, less reliable for very dark walls. Set the real colour if you know it."
+    : "";
+  const saved = readJSON(LS_ORIG, {});
+  if (source === "auto") delete saved[state.scene]; else saved[state.scene] = hex;
+  localStorage.setItem(LS_ORIG, JSON.stringify(saved));
+  updateLightStats(); redraw();
+}
+
+// ---------------------------------------------------------------- scenes
+function sceneList() {
+  $("scene").replaceChildren(...Object.entries(SCENES).map(([k, s]) => new Option(s.label, k)));
+  $("scene").value = state.scene;
+  $("uploadRemove").hidden = !SCENES.upload;
+}
+
+/** Statistics of one source (photo or video frame) for the estimate and the sliders. */
+const statsOf = (source, mask, w, h) => WP.imageStats(source, mask, w, h);
+
+/** Samples a video at several times on a hidden copy (the page's own video keeps playing). */
+async function videoStats(url, mask) {
+  const v = Object.assign(document.createElement("video"), { muted: true, playsInline: true, preload: "auto", src: url });
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(`Couldn't load ${url}`)); });
+  const out = [];
+  for (const f of [0.05, 0.25, 0.5, 0.75, 0.95]) {
+    await new Promise(res => { v.onseeked = res; v.currentTime = f * v.duration; });
+    out.push(statsOf(v, mask, v.videoWidth, v.videoHeight));
+  }
+  v.removeAttribute("src"); v.load();
+  return out;
+}
+
+/**
+ * Builds one tile: a stage (the painted canvas under the original image or
+ * video copy, masked to non-wall) at most half the source's native size.
+ */
+function makeTile(key, label, nativeW, nativeH, maskUrl, topEl) {
+  const fig = document.createElement("figure"); fig.className = "tile";
+  fig.style.maxWidth = `${Math.round(nativeW / 2)}px`;
+  const stage = document.createElement("div"); stage.className = "stage";
+  stage.style.aspectRatio = `${nativeW} / ${nativeH}`;
+  stage.style.setProperty("--mask", `url("${maskUrl}")`);
+  const canvas = Object.assign(document.createElement("canvas"), { className: "tinted" });
+  canvas.setAttribute("role", "img"); canvas.setAttribute("aria-label", `The room${label ? ", " + label.toLowerCase() : ""}, walls painted`);
+  topEl.classList.add("top");
+  stage.append(canvas, topEl);
+  fig.append(stage);
+  if (label) { const cap = document.createElement("figcaption"); cap.textContent = label; fig.append(cap); }
+  $("tiles").append(fig);
+  return { key, stage, canvas, out: null, top: topEl, lightStats: null };
+}
+
+async function setScene(key) {
+  const token = ++sceneToken, s = SCENES[key];
+  state.scene = key; $("scene").value = key;
+  painted = false;
+  if (video) { video.pause(); video.removeAttribute("src"); video.load(); video = null; }
+  for (const t of tiles) renderer.release(t.key);
+  tiles = []; $("tiles").replaceChildren();
+  status("Loading…");
+  try {
+    const mask = await loadImage(s.mask);
+    if (token !== sceneToken) return;
+    const c = (cache[key] ||= { stats: {}, estimate: null });
+    if (s.video) {
+      const v = Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, autoplay: false, preload: "auto", src: s.video });
+      v.defaultPlaybackRate = v.playbackRate = VIDEO_RATE;
+      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error(`Couldn't load ${s.video}`)); });
+      if (token !== sceneToken) return;
+      const w = v.videoWidth, h = v.videoHeight;
+      const top = Object.assign(document.createElement("canvas"), { width: w, height: h });
+      const tile = makeTile("video", "", w, h, s.mask, top);
+      tile.stage.prepend(v); video = v; tile.copy = top.getContext("2d");
+      v.addEventListener("seeked", () => { redraw(); syncTime(); });     // paused seeks repaint too
+      v.addEventListener("play", syncPlay); v.addEventListener("pause", syncPlay);
+      tiles = [tile];
+      if (!c.estimate) {
+        status("Measuring the walls…");
+        const list = await videoStats(s.video, mask);
+        if (token !== sceneToken) return;
+        c.stats.video = list; c.estimate = PP.linearToHex(WP.estimateFromSet(list));
+        c.sample = list.reduce((best, x) => (x.wallY > best.wallY ? x : best)).sample;
+      }
+      showTimeline(s.times || []);
+    } else {
+      const times = Object.keys(s.photos);
+      const imgs = Object.fromEntries(await Promise.all(times.map(async t => [t, await loadImage(s.photos[t])])));
+      if (token !== sceneToken) return;
+      if (!c.estimate) {
+        status("Measuring the walls…");
+        for (const t of times) c.stats[t] = statsOf(imgs[t], mask, imgs[t].naturalWidth, imgs[t].naturalHeight);
+        c.estimate = PP.linearToHex(WP.estimateFromSet(times.map(t => c.stats[t])));
+      }
+      showTimeline(null);
+      tiles = times.map(t => {
+        const img = imgs[t];
+        const tile = makeTile(t, times.length > 1 ? (TIME_LABELS[t] || t) : "", img.naturalWidth, img.naturalHeight, s.mask,
+                              Object.assign(document.createElement("img"), { src: img.src, alt: "" }));
+        // Drawn at most MAX_SIDE (uploads can be larger); one GPU texture per photo.
+        const k = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+        let source = img;
+        if (k < 1) {
+          source = Object.assign(document.createElement("canvas"), { width: Math.round(img.naturalWidth * k), height: Math.round(img.naturalHeight * k) });
+          source.getContext("2d").drawImage(img, 0, 0, source.width, source.height);
+        }
+        renderer.upload(source, t);
+        return tile;
+      });
+    }
+    for (const t of tiles) t.out = t.canvas.getContext("2d", { colorSpace: renderer.outputSpace === "display-p3" ? "display-p3" : "srgb" });
+    const saved = readJSON(LS_ORIG, {})[key];
+    state.original.auto = c.estimate;
+    painted = true;
+    for (const t of tiles) t.stage.classList.add("is-painted");
+    fitPanel();
+    setOriginal(saved || c.estimate, saved ? "user" : "auto");        // also measures the light and draws
+    status("");
+    if (video) { video.requestVideoFrameCallback(onFrame); video.play().then(syncPlay, syncPlay); }
+  } catch (err) {
+    console.warn("sceneVisualizer:", err);
+    status(err.message || String(err), true);
+  }
+}
+
+/** The sliders' statistics of the wall's light, per tile. */
+function updateLightStats() {
+  const c = cache[state.scene];
+  if (!c || !state.original.lin) return;
+  for (const t of tiles) {
+    const sample = t.key === "video" ? c.sample : c.stats[t.key]?.sample;
+    t.lightStats = sample ? WP.lightStats(sample, state.original.lin) : null;
+  }
+}
+
+function look(tile) {
+  return { oldLin: state.original.lin, newLin: PP.hexToLinear(state.paint), contrast: state.contrast, saturation: state.saturation, lightStats: tile.lightStats };
+}
+/** Draws one tile: render on the GPU, then copy into the tile's canvas. */
+function drawTile(t) {
+  renderer.draw(look(t), t.key);
+  const g = renderer.canvas;
+  if (t.canvas.width !== g.width || t.canvas.height !== g.height) { t.canvas.width = g.width; t.canvas.height = g.height; }
+  t.out.drawImage(g, 0, 0);
+}
+function redraw() {
+  if (!renderer || !painted || !state.original.lin || !state.paint) return;
+  for (const t of tiles) {
+    if (t.key === "video") {
+      if (video.readyState < 2) continue;
+      renderer.upload(video, "video");
+      t.copy.drawImage(video, 0, 0, t.top.width, t.top.height);
+    }
+    drawTile(t);
+  }
+}
+/** Each new video frame: upload it, repaint, and copy the original into the masked top layer (frame-locked). */
+function onFrame() {
+  if (!video || !tiles[0] || tiles[0].key !== "video") return;
+  const t = tiles[0];
+  renderer.upload(video, "video");
+  drawTile(t);
+  t.copy.drawImage(video, 0, 0, t.top.width, t.top.height);
+  frames++;
+  syncTime();
+  video.requestVideoFrameCallback(onFrame);
+}
+let frames = 0;
+
+// ---------------------------------------------------------------- layout
+// The controls sit directly under the scene and take its drawn width.
+function fitPanel() {
+  const figs = [...$("tiles").children];
+  if (!figs.length) return;
+  const l = Math.min(...figs.map(f => f.getBoundingClientRect().left)), r = Math.max(...figs.map(f => f.getBoundingClientRect().right));
+  $("app").style.setProperty("--media-w", `${Math.round(r - l)}px`);
+}
+new ResizeObserver(fitPanel).observe($("tiles"));
+
+// ---------------------------------------------------------------- video timeline
+/**
+ * Video scenes show the time-of-day selector and the timeline in place of
+ * the title (`points`: null = a photo scene, [] = a video without named times).
+ * A time point pauses the video on that moment; Play continues the loop.
+ */
+function showTimeline(points) {
+  const isVideo = points !== null;
+  $("intro").hidden = isVideo; $("timeline").hidden = !isVideo;
+  if (!isVideo) return;
+  $("timelineTitle").textContent = points.length ? "Time of day" : "Timeline";
+  const dur = video.duration || 1;
+  $("timePoints").replaceChildren(...points.map(p => {
+    const b = document.createElement("button"); b.textContent = p.label; b.dataset.time = p.time;
+    b.addEventListener("click", () => {
+      video.pause(); syncPlay();
+      video.currentTime = Math.min(p.time, dur - 0.5 / 24);        // the last frame, not past the end
+    });
+    return b;
+  }));
+  $("timePoints").hidden = !points.length;
+  $("timelineTrack").querySelectorAll(".tick").forEach(t => t.remove());
+  for (const p of points) {
+    const t = document.createElement("span"); t.className = "tick";
+    t.style.left = `calc(8px + (100% - 16px) * ${Math.min(p.time / dur, 1)})`;   // under the range thumb's centre
+    $("timelineTrack").append(t);
+  }
+  syncTime();
+}
+function syncPlay() { if (video) $("play").textContent = video.paused ? "Play" : "Pause"; }
+/** The scrubber, clock and selected time point follow the video. */
+function syncTime() {
+  if (!video) return;
+  const t = video.currentTime, dur = video.duration || 1;
+  if (document.activeElement !== $("scrub") || !video.paused) $("scrub").value = t / dur;
+  $("clock").value = `${t.toFixed(1)} s / ${dur.toFixed(1)} s`;
+  for (const b of $("timePoints").children)
+    b.setAttribute("aria-pressed", String(Math.abs(Math.min(+b.dataset.time, dur) - t) < 0.06));
+}
+
+// ---------------------------------------------------------------- uploads
+async function useUpload(blobs, save) {
+  const [img, mask] = await Promise.all([loadImage(URL.createObjectURL(blobs.image)), loadImage(URL.createObjectURL(blobs.mask))]);
+  const a = img.naturalWidth / img.naturalHeight, b = mask.naturalWidth / mask.naturalHeight;
+  if (Math.abs(a - b) / a > 0.02) throw new Error("The mask isn't the same shape as the image.");
+  const st = WP.imageStats(img, mask, img.naturalWidth, img.naturalHeight);     // throws when the mask has no wall
+  if (cache.upload) delete cache.upload;
+  SCENES.upload = { label: "Your scene", mask: mask.src, photos: { photo: img.src } };
+  if (save) { try { await store.save(UPLOAD_KEY, blobs); } catch { status("This browser couldn't store your scene; it will be gone after a reload."); } }
+  sceneList();
+  return st;
+}
+$("uploadOpen").addEventListener("click", () => { $("uploadStatus").textContent = ""; $("uploadDialog").showModal(); });
+$("uploadForm").addEventListener("submit", async e => {
+  if (e.submitter && e.submitter.value === "cancel") return;
+  e.preventDefault();
+  const image = $("uploadImage").files[0], mask = $("uploadMask").files[0];
+  if (!image || !mask) { $("uploadStatus").textContent = "Choose both files."; return; }
+  if (!/^room\.(jpe?g|png|webp)$/i.test(image.name)) { $("uploadStatus").textContent = `The room photo must be named room.jpg (or .jpeg, .png, .webp), not "${image.name}".`; return; }
+  if (!/^mask\.png$/i.test(mask.name)) { $("uploadStatus").textContent = `The wall mask must be named mask.png, not "${mask.name}".`; return; }
+  try {
+    await useUpload({ image, mask }, true);
+    $("uploadDialog").close();
+    localStorage.removeItem(LS_ORIG + ".upload");
+    const saved = readJSON(LS_ORIG, {}); delete saved.upload; localStorage.setItem(LS_ORIG, JSON.stringify(saved));
+    await setScene("upload");
+  } catch (err) { $("uploadStatus").textContent = err.message; }
+});
+$("uploadRemove").addEventListener("click", async () => {
+  await store.remove(UPLOAD_KEY).catch(() => {});
+  delete SCENES.upload; delete cache.upload;
+  const saved = readJSON(LS_ORIG, {}); delete saved.upload; localStorage.setItem(LS_ORIG, JSON.stringify(saved));
+  sceneList();
+  if (state.scene === "upload") setScene("livingRoom");
+});
+
+// ---------------------------------------------------------------- wiring
+$("scene").addEventListener("change", e => setScene(e.target.value));
+$("shuffle").addEventListener("click", () => { setSeed((Math.random() * 2 ** 32) >>> 0); setPaint(state.random[0]); });
+$("customPicker").addEventListener("input", e => { $("customHex").value = e.target.value.toUpperCase(); });
+$("customAdd").addEventListener("click", () => addCustom($("customHex").value || $("customPicker").value));
+$("customHex").addEventListener("keydown", e => { if (e.key === "Enter") addCustom($("customHex").value); });
+$("origPicker").addEventListener("input", e => { $("origHexInput").value = e.target.value.toUpperCase(); });
+$("origSet").addEventListener("click", () => {
+  const hex = normHex($("origHexInput").value || $("origPicker").value);
+  if (!hex) { $("origHexInput").setCustomValidity("Use #RRGGBB"); $("origHexInput").reportValidity(); return; }
+  $("origHexInput").setCustomValidity("");
+  setOriginal(hex, "user");
+});
+$("origHexInput").addEventListener("keydown", e => { if (e.key === "Enter") $("origSet").click(); });
+$("origAuto").addEventListener("click", () => setOriginal(state.original.auto, "auto"));
+for (const k of ["contrast", "saturation"]) {
+  const input = $(k), out = $(k + "Out");
+  const apply = () => { state[k] = Math.abs(+input.value) < 3 ? 0 : +input.value / 100; out.value = Math.round(state[k] * 100); redraw(); };
+  input.addEventListener("input", apply);
+  input.addEventListener("dblclick", () => { input.value = 0; apply(); });
+}
+$("play").addEventListener("click", () => {
+  if (!video) return;
+  if (video.paused) video.play().then(syncPlay, syncPlay); else { video.pause(); syncPlay(); }
+});
+$("scrub").addEventListener("input", e => {
+  if (!video) return;
+  video.pause(); syncPlay();
+  video.currentTime = +e.target.value * video.duration;
+});
+
+
+// ---------------------------------------------------------------- boot
+(async function boot() {
+  try {
+    PP.checkGates();
+    renderer = await SV.createRenderer($("gl"), { onRestored: redraw });
+  } catch (err) {
+    status(PP.noticeFor ? (err.message || String(err)) : String(err), true);
+    return;
+  }
+  const q = new URLSearchParams(location.search);
+  state.custom = readJSON(LS_CUSTOM, []).map(normHex).filter(Boolean).slice(-MAX_CUSTOM);
+  setSeed(q.has("seed") ? +q.get("seed") : (Math.random() * 2 ** 32) >>> 0);
+  state.paint = state.random[0];
+  const stored = await store.load(UPLOAD_KEY).catch(() => null);
+  if (stored && stored.image && stored.mask) { try { await useUpload(stored, false); } catch (e) { console.warn("sceneVisualizer: stored upload", e); } }
+  state.scene = q.get("scene") in SCENES ? q.get("scene") : "livingRoom";
+  sceneList();
+  setPaint(state.paint);
+  await setScene(state.scene);
+})();
+
+window.sceneVisualizer = {
+  state, get renderer() { return renderer; }, get tiles() { return tiles; }, cache, setScene, setPaint, setOriginal, addCustom, removeCustom, setSeed,
+  get framesPainted() { return frames; }
+};
+</script>
+</body>
+</html>

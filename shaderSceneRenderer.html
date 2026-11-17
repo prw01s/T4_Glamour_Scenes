@@ -335,7 +335,7 @@
 <script src="js/paintPipeline.js"></script>
 <script src="js/shaderSceneRender.js"></script>
 <script src="js/tuningControls.js"></script>
-<script src="js/sheenCustomRoom.js"></script>
+<script src="js/sceneStore.js"></script>
 <script type="module">
 /* ==========================================================================
  * Page setup for shaderSceneRenderer.html.
@@ -412,7 +412,7 @@ const INITIAL_ROOM = "livingRoom";
 // A visitor can upload a scene of their own (the "Upload Scene" control under
 // the room list): mask.png, morning.jpg, noon.jpg and night.jpg. It becomes a
 // room named UPLOAD_LABEL, is shown at once and is kept in IndexedDB
-// (js/sheenCustomRoom.js), so it is still in the list after a reload. A new
+// (js/sceneStore.js), so it is still in the list after a reload. A new
 // upload replaces it. Each upload gets a fresh ROOMS key ("upload1",
 // "upload2", ...), so the old one can stay on screen while the new one loads.
 
@@ -438,8 +438,8 @@ function uploadedRoom(blobs) {
 function revokeRoom(room) { for (const url of [room.mask, ...Object.values(room.photos)]) URL.revokeObjectURL(url); }
 
 // An earlier upload joins the room list (it is not shown first).
-const storedUpload = window.SheenCustomRoom
-  ? await window.SheenCustomRoom.load(UPLOAD_STORE_KEY).catch(() => null) : null;
+const storedUpload = window.SceneStore
+  ? await window.SceneStore.load(UPLOAD_STORE_KEY).catch(() => null) : null;
 if (storedUpload && storedUpload.blobs) ROOMS[`upload${++uploadCount}`] = uploadedRoom(storedUpload.blobs);
 
 // ---------------------------------------------------------------- markup
@@ -657,7 +657,7 @@ async function useUploadedFiles(files) {
     if (cropped.length) notes.push(`Cropped to the centre square: ${cropped.join(", ")}.`);
     const small = Math.min(...Object.values(sq).map(v => v.size));
     if (small < 1024) notes.push(`The images are small (${small} px), so the scene looks soft.`);
-    try { await window.SheenCustomRoom.save(UPLOAD_STORE_KEY, { blobs }); }
+    try { await window.SceneStore.save(UPLOAD_STORE_KEY, { blobs }); }
     catch { notes.push("This browser couldn't store it, so it will be gone after a reload."); }
     showUploadStatus(`${UPLOAD_LABEL} is in the room list. ${notes.join(" ")}`.trim());
     uploadActions.hidden = false;
@@ -685,7 +685,7 @@ document.getElementById("removeUpload").addEventListener("click", async () => {
   const key = uploadedKey();
   uploadActions.hidden = true;
   if (key) await dropUploadedRoom(key);
-  await window.SheenCustomRoom?.remove(UPLOAD_STORE_KEY).catch(() => {});
+  await window.SceneStore?.remove(UPLOAD_STORE_KEY).catch(() => {});
   showUploadStatus("");
 });
 if (uploadedKey()) {

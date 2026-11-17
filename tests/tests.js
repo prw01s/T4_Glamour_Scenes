@@ -11,8 +11,6 @@
  *   gpu   the shaders on small synthetic images: every model's "white light
  *         shows the swatch" identity, v3's interreflection, mask-weighted
  *         blur, v3's detail layer and warm light
- *   sheen js/sheenModel.js's camera solver; glsl/sheen.glsl: Flat = the
- *         swatch, glossier = deeper off-highlight, untinted highlights
  * ======================================================================== */
 (async function () {
   "use strict";
@@ -314,213 +312,9 @@
   }
 
   // ======================================================================
-  // Sheen tests (js/sheenModel.js, glsl/sheen.glsl; sheenSceneRenderer.html)
+  // Room movie (js/roomMovie.js)
   // ======================================================================
 
-  const SM = window.SheenModel;
-  await test("unit: solveRoom recovers a known camera and room from its lines", () => {
-    // A camera with f = 1.9 image widths and 0.4 deg roll, looking into a
-    // corner: the back wall's horizontal lines run at -35 deg, the side
-    // wall's at +55 deg; the corner at depth 1; the floor 0.3 below the eye.
-    const roll = 0.4 * Math.PI / 180, f = 1.9, c = [0.5, 0.42];
-    const truth = { c, f, rot: [Math.cos(roll), Math.sin(roll)] };
-    const a = -35 * Math.PI / 180, b = a + Math.PI / 2;
-    const dB = [Math.sin(a), 0, Math.cos(a)], dS = [Math.sin(b), 0, Math.cos(b)];
-    const C0 = [0.05, 0, 1];
-    const at = (d, s, y) => [C0[0] + d[0] * s, y, C0[2] + d[2] * s];
-    const seg = (d, s1, s2, y) => [...SM.project(truth, at(d, s1, y)), ...SM.project(truth, at(d, s2, y))];
-    // The back wall runs from the corner toward the camera's right (-dB),
-    // the side wall toward its left (-dS).
-    const cornerU = SM.project(truth, C0)[0];
-    const g = {
-      lines: { a: [seg(dB, -0.3, -0.05, 0.2), seg(dB, -0.35, -0.05, -0.05)],
-               b: [seg(dS, -0.25, -0.05, -0.08), seg(dS, -0.3, -0.05, -0.12), seg(dS, -0.2, -0.05, -0.2)] },
-      verticals: [[...SM.project(truth, at(dB, -0.2, -0.2)), ...SM.project(truth, at(dB, -0.2, 0.2))]],
-      walls: [{ id: "back", dir: "a", through: { u: cornerU } },
-              { id: "side", dir: "b", corner: { wall: "back", u: cornerU } }],
-      floor: { at: { wall: "back", uv: SM.project(truth, at(dB, -0.25, -0.3)) } }
-    };
-    const room = SM.solveRoom(g);
-    near(room.f, f, 0.019, "focal length (1 %)");
-    near(room.report.rollDeg, 0.4, 0.02, "roll (deg)");
-    near(room.report.cameraHeight, 0.3, 0.003, "camera height");
-    const plane = id => room.planes.find(p => p.id === id).p;
-    near(plane("back").slice(0, 3), [-dS[0], 0, -dS[2]], 0.01, "back-wall normal (faces the camera)");
-    near(plane("side").slice(0, 3), [-dB[0], 0, -dB[2]], 0.01, "side-wall normal");
-    near(plane("back")[3], -(dS[0] * C0[0] + dS[2] * C0[2]), 0.01, "back wall through the corner");
-    // The visible wall changes at the corner.
-    const v = SM.project(truth, [C0[0], -0.1, 1])[1];
-    assert(SM.wallAt(room, [cornerU + 0.05, v]) === "back", "right of the corner: back wall");
-    assert(SM.wallAt(room, [cornerU - 0.05, v]) === "side", "left of the corner: side wall");
-    return `f ${room.f.toFixed(4)} (1.9), roll ${room.report.rollDeg.toFixed(3)}°, camera height ${room.report.cameraHeight.toFixed(4)}`;
-  });
-  await test("unit: pointOffWall puts a lamp on its pixel's ray, offset from the wall", () => {
-    const room = { c: [0.5, 0.5], f: 1, rot: [1, 0], planes: [{ id: "back", kind: "wall", p: [0, 0, -1, -2] }] };
-    const uv = [0.7, 0.4], X = SM.pointOffWall(room, uv, "back", 0.3);
-    near(X[2], 1.7, 1e-9, "depth: 0.3 in front of the wall at z = 2");
-    near(SM.project(room, X), uv, 1e-9, "still seen at its pixel");
-    return `lamp at ${fmt(X)}`;
-  });
-  await test("unit: placeWindows builds a window from its edge in the photo and its width", () => {
-    // A side wall x = 1 (normal -x, facing the camera at the origin); the
-    // window's far edge seen at u = 0.9 from v 0.3 to 0.6, 0.4 wide toward the camera.
-    const room = { c: [0.5, 0.5], f: 1, rot: [1, 0], planes: [{ id: "side", kind: "wall", p: [-1, 0, 0, -1] }] };
-    const [w] = SM.placeWindows(room, [{ wall: "side", edge: [0.9, 0.3, 0.6], width: 0.4, toward: "camera", radiance: 5 }]);
-    near(w.O[0], 1, 1e-9, "on the wall");
-    near(SM.project(room, w.O), [0.9, 0.6], 1e-9, "bottom corner at its pixel");
-    near(SM.project(room, w.O.map((v, i) => v + w.V[i])), [0.9, 0.3], 1e-9, "top corner at its pixel");
-    near(w.U, [0, 0, -0.4], 1e-9, "extends toward the camera");
-    const [s] = SM.placeWindows(room, [{ wall: "side", edge: [0.9, 0.3, 0.6], start: 0.1, width: 0.2, toward: "camera", radiance: [1, 2, 3] }]);
-    near(s.O[2], w.O[2] - 0.1, 1e-9, "start offset");
-    near(s.L, [1, 2, 3], 0, "radiance");
-    return `O ${fmt(w.O)}, U ${fmt(w.U)}, V ${fmt(w.V)}`;
-  });
-  await test("unit: the texture gate keeps real texture and drops JPEG blocking", () => {
-    // 64 x 64 mid grey, (a) with 8 x 8 blocks of different levels only
-    // (compression blocking: no detail inside blocks), (b) with per-pixel
-    // texture of +-4 levels (a stippled wall).
-    const w = 64, rgba = fn => { const d = new Uint8ClampedArray(w * w * 4);
-      for (let y = 0; y < w; y++) for (let x = 0; x < w; x++) { const v = fn(x, y), i = 4 * (y * w + x); d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
-      return d; };
-    let seed = 7;
-    const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
-    const blocks = SM.textureDetail(rgba((x, y) => 120 + ((((x >> 3) * 7 + (y >> 3) * 3) % 5) - 2) * 2), null, w, w);
-    const stipple = SM.textureDetail(rgba(() => 120 + Math.round((rand() - 0.5) * 8)), null, w, w);
-    assert(blocks.gain === 0, `blocking kept: gain ${blocks.gain}`);
-    assert(stipple.gain === 1, `texture dropped: gain ${stipple.gain} (in-block ${stipple.inBlock.toFixed(2)})`);
-    return `blocks: in-block ${blocks.inBlock.toFixed(2)} levels/px, gain 0; stipple: ${stipple.inBlock.toFixed(2)}, gain 1`;
-  });
-  // ---- calibration helpers (js/sheenCalib.js, sheenCalibrate.html) ----
-  const SC = window.SheenCalib;
-  /** Luma of a canvas drawn by fn(ctx), n x n. */
-  const drawnGray = (n, fn) => {
-    const c = document.createElement("canvas"); c.width = c.height = n;
-    const x = c.getContext("2d"); fn(x);
-    return SC.gray(x.getImageData(0, 0, n, n).data, n, n);
-  };
-  /** Distance (px) of point (x, y) from the infinite line through a and b. */
-  const offLine = ([ax, ay], [bx, by], x, y) => Math.abs((x - ax) * (by - ay) - (y - ay) * (bx - ax)) / Math.hypot(bx - ax, by - ay);
-  await test("unit: the line detector finds a polygon's edges to sub-pixel accuracy", () => {
-    // A dark quadrilateral on a light ground (anti-aliased by the canvas).
-    const n = 400, P = [[61.3, 72.8], [331.7, 95.2], [312.4, 318.9], [83.6, 290.1]];
-    const g = drawnGray(n, x => { x.fillStyle = "#c8c8c8"; x.fillRect(0, 0, n, n); x.fillStyle = "#3c3c3c";
-      x.beginPath(); P.forEach((p, i) => i ? x.lineTo(...p) : x.moveTo(...p)); x.closePath(); x.fill(); });
-    const segs = SC.detectSegments(g, n, n);
-    const worst = P.map((a, i) => {
-      const b = P[(i + 1) % 4], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      const m = segs.filter(s => s.len > 0.7 * L).map(s => Math.max(offLine(a, b, s.x1, s.y1), offLine(a, b, s.x2, s.y2))).sort((x, y) => x - y)[0];
-      assert(m !== undefined && m < 0.5, `edge ${i + 1}: nearest long segment ${m === undefined ? "missing" : m.toFixed(2) + " px off"}`);
-      return m;
-    });
-    return `${segs.length} segments; each edge within ${fmt(worst)} px`;
-  });
-  await test("unit: snapping moves a roughly drawn line onto the edge (RANSAC through texture)", () => {
-    // An edge at 3 deg with noise-like texture on both sides; the drawn line
-    // is 5 px and 0.8 deg off.
-    const n = 300; let seed = 11;
-    const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-    const A = [20, 100], B = [280, 100 + 260 * Math.tan(3 * Math.PI / 180)];
-    const g = drawnGray(n, x => {
-      x.fillStyle = "#b4b4b4"; x.fillRect(0, 0, n, n);
-      x.fillStyle = "#8c8c8c"; x.beginPath(); x.moveTo(0, A[1] - A[0] * Math.tan(3 * Math.PI / 180)); x.lineTo(n, A[1] + (n - A[0]) * Math.tan(3 * Math.PI / 180)); x.lineTo(n, n); x.lineTo(0, n); x.fill();
-      for (let i = 0; i < 3000; i++) { x.fillStyle = `rgba(0,0,0,${0.08 * rand()})`; x.fillRect(rand() * n, rand() * n, 1 + 2 * rand(), 1 + 2 * rand()); }
-    });
-    const drawn = [A[0], A[1] - 5, B[0], B[1] - 5 + 260 * Math.tan(0.8 * Math.PI / 180)].map(v => v / n);
-    const r = SC.snapLine(g, n, n, drawn);
-    assert(r, "no edge found");
-    const s = r.seg.map(v => v * n), e = [offLine(A, B, s[0], s[1]), offLine(A, B, s[2], s[3])];
-    assert(Math.max(...e) < 0.4, `snapped ${fmt(e)} px off the edge`);
-    return `endpoints ${fmt(e)} px off the edge, ${r.points} of 40 points, RMS ${r.rms.toFixed(2)} px`;
-  });
-  await test("unit: classifyLines + solveRoom recover a known camera from a cluttered line set", () => {
-    // The solveRoom test's camera; lines on two walls and verticals, all
-    // with 0.25 px noise (at 2000 px), plus 25 random clutter segments.
-    const roll = 0.4 * Math.PI / 180, f = 1.9, truth = { c: [0.5, 0.42], f, rot: [Math.cos(roll), Math.sin(roll)] };
-    const a = -35 * Math.PI / 180, b = a + Math.PI / 2, dB = [Math.sin(a), 0, Math.cos(a)], dS = [Math.sin(b), 0, Math.cos(b)], C0 = [0.05, 0, 1];
-    let seed = 5; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647, nz = () => (rand() - 0.5) * 0.5 / 2000 * 1.7;
-    const at = (d, s, y) => [C0[0] + d[0] * s, y, C0[2] + d[2] * s];
-    const seg = (P, Q) => [...SM.project(truth, P), ...SM.project(truth, Q)].map(v => v + nz());
-    const lines = [];
-    for (const y of [-0.28, -0.2, -0.05, 0.05, 0.12, 0.2]) lines.push(seg(at(dB, -0.35, y), at(dB, -0.05, y)));
-    for (const y of [-0.25, -0.12, 0.08, 0.18]) lines.push(seg(at(dS, -0.3, y), at(dS, -0.05, y)));
-    for (const s of [-0.3, -0.15, 0]) lines.push(seg(at(dB, s, -0.25), at(dB, s, 0.2)));
-    for (let i = 0; i < 25; i++) { const u = rand(), v = rand(), t = rand() * Math.PI, l = 0.03 + 0.08 * rand(); lines.push([u, v, u + l * Math.cos(t), v + l * Math.sin(t)]); }
-    const c = SC.classifyLines(lines);
-    const room = SM.solveRoom({ lines: { a: c.a, b: c.b }, verticals: c.verticals, walls: [{ id: "w", dir: "a", through: { u: 0.5 } }], floor: { at: { wall: "w", uv: [0.5, 0.9] } } });
-    near(room.f, f, 0.02 * f, "focal length (2 %)");
-    near(room.report.rollDeg, 0.4, 0.05, "roll (deg)");
-    return `f ${room.f.toFixed(3)} (1.9), roll ${room.report.rollDeg.toFixed(3)}°; ${c.a.length} a, ${c.b.length} b, ${c.verticals.length} vertical of ${lines.length}`;
-  });
-  await test("unit: light detection: day windows are dark at night; bulbs and shades by night", () => {
-    // 100 x 100: a window (bright by day, dark at night), a white sofa
-    // (bright both), a bulb and a partly clipped shade at night. Mask: all
-    // non-wall except a wall band.
-    const n = 100, img = fn => { const d = new Uint8ClampedArray(n * n * 4);
-      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const v = fn(x, y), i = 4 * (y * n + x); d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; } return d; };
-    const inR = (x, y, r) => x >= r[0] && x < r[2] && y >= r[1] && y < r[3];
-    const win = [10, 10, 30, 40], sofa = [50, 60, 90, 75], bulb = [70, 20, 73, 23], shade = [40, 15, 52, 30], core = [44, 25, 48, 30];
-    const day = img((x, y) => inR(x, y, win) || inR(x, y, sofa) ? 255 : 120);
-    const night = img((x, y) => inR(x, y, bulb) || inR(x, y, core) ? 255 : inR(x, y, shade) ? 190 : inR(x, y, sofa) ? 110 : inR(x, y, win) ? 8 : 40);
-    const mask = img((x, y) => y > 85 ? 0 : 255);
-    const d = SC.detectLights(day, mask, n, n, "day", { night });
-    assert(d.length === 1 && d[0].type === "window", `day: ${d.map(e => e.type + " " + fmt(e.rect)).join("; ")}`);
-    assert(d[0].rect[0] <= 0.1 && d[0].rect[2] >= 0.3, `window rect ${fmt(d[0].rect)}`);
-    const nl = SC.detectLights(night, mask, n, n, "night");
-    const types = nl.map(e => e.type).sort().join(",");
-    assert(types === "bulb,shade", `night: ${nl.map(e => e.type + " " + fmt(e.rect)).join("; ")}`);
-    return `day: window ${fmt(d[0].rect)}; night: ${nl.map(e => e.type).join(", ")}`;
-  });
-  await test("unit: automatic walls: the corner between two line families, on the right sides", () => {
-    // An inside corner at u = 0.6: lines running to the left vanishing point
-    // (direction a here) lie right of it, lines to the right one left of it.
-    const roll = 0, f = 1.5, truth = { c: [0.5, 0.45], f, rot: [1, 0] };
-    const ang = -40 * Math.PI / 180, dA = [Math.sin(ang), 0, Math.cos(ang)], dB = [Math.sin(ang + Math.PI / 2), 0, Math.cos(ang + Math.PI / 2)];
-    const C0 = SM.cameraRay(truth, [0.6, 0.45]).map(v => v / SM.cameraRay(truth, [0.6, 0.45])[2]);
-    const at = (d, s, y) => [C0[0] + d[0] * s, y, C0[2] + d[2] * s];
-    const seg = (P, Q) => [...SM.project(truth, P), ...SM.project(truth, Q)];
-    // Back wall (direction a) extends from the corner toward -dA, the side wall toward -dB.
-    const a = [-0.2, 0.1, 0.25].map(y => seg(at(dA, -0.5, y), at(dA, -0.05, y)));
-    const b = [-0.15, 0.15].map(y => seg(at(dB, -0.4, y), at(dB, -0.05, y)));
-    const vpA = SM.intersectLines(a), vpB = SM.intersectLines(b);
-    const { walls, corner } = SC.guessWalls({ a, b, vpA, vpB }, new Set([...a, ...b]));
-    near(corner, 0.6, 0.03, "corner column");
-    const right = vpA[0] > 0.5 ? "b" : "a";      // the family whose lines run left is the right-hand wall
-    assert(walls[0].dir === right && walls[1].dir !== right, `walls ${JSON.stringify(walls)}`);
-    const room = SM.solveRoom({ lines: { a, b }, verticals: [[0.3, 0.2, 0.3, 0.8]], walls, floor: { at: { wall: walls[0].id, uv: [0.8, 0.9] } } });
-    const P = [0.8, 0.3], Q = [0.3, 0.3], onA = SM.wallAt(room, P), onB = SM.wallAt(room, Q);
-    assert(onA !== onB, "both sides of the corner show the same wall");
-    return `corner ${corner.toFixed(3)} (0.6); right of it: ${onA} along ${walls.find(w => w.id === onA).dir}`;
-  });
-  await test("unit: automatic floor point and the default room", () => {
-    // Mask 100 x 100: wall above a sofa-shaped bump; the wall reaches down
-    // to v = 0.8 at the sides.
-    const n = 100, d = new Uint8ClampedArray(n * n * 4);
-    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-      const wall = y < 80 && !(x > 30 && x < 80 && y > 50), i = 4 * (y * n + x);
-      d[i] = d[i + 1] = d[i + 2] = wall ? 0 : 255; d[i + 3] = 255;
-    }
-    const p = SC.guessFloorPoint(d, n);
-    near(p[1], 0.8, 0.011, "floor point v");
-    const room = SC.defaultRoom();
-    near(room.report.hfovDeg, 60, 1e-9, "default field of view");
-    assert(SM.wallAt(room, [0.3, 0.4]) === "wall1", "default wall");
-    const job = SM.sheenJob("satin", room, { emitters: [], keyLight: [0, 0, 0] });
-    assert(job.uniforms.roomPlaneCount === 2, "default room planes");
-    return `floor point ${fmt(p)}; default room: 1 wall + floor, 60°`;
-  });
-  await test("unit: EXIF focal length (35 mm equivalent) and the square's focal length", async () => {
-    // A minimal JPEG: SOI, APP1 "Exif" with IFD0 -> Exif IFD -> FocalLengthIn35mmFilm = 26, EOI.
-    const tiff = new DataView(new ArrayBuffer(44));
-    tiff.setUint16(0, 0x4949); tiff.setUint16(2, 42, true); tiff.setUint32(4, 8, true);
-    tiff.setUint16(8, 1, true); tiff.setUint16(10, 0x8769, true); tiff.setUint16(12, 4, true); tiff.setUint32(14, 1, true); tiff.setUint32(18, 26, true); tiff.setUint32(22, 0, true);
-    tiff.setUint16(26, 1, true); tiff.setUint16(28, 0xA405, true); tiff.setUint16(30, 3, true); tiff.setUint32(32, 1, true); tiff.setUint16(36, 26, true); tiff.setUint32(40, 0, true);
-    const head = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE1, 0, 52, 0x45, 0x78, 0x69, 0x66, 0, 0]);
-    const f35 = await SC.exifFocal35(new Blob([head, tiff.buffer, new Uint8Array([0xFF, 0xD9])]));
-    assert(f35 === 26, `read ${f35}`);
-    assert(await SC.exifFocal35(new Blob([new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9])])) === null, "no EXIF: null");
-    near(SC.focalForSquare(26, 4032, 3024), 26 / 36 * 4032 / 3024, 1e-12, "square focal (landscape)");
-    return `26 mm read; a 4032 x 3024 photo's centre square: f = ${SC.focalForSquare(26, 4032, 3024).toFixed(3)} widths`;
-  });
   await test("unit: room movie: direct-sun colour and level by elevation (docs/room-movie-plan.md 4.4)", () => {
     const RM = window.RoomMovie;
     const cct = el => { const S = RM.sunLight(el).S, xyz = [0, 1, 2].map(i => S.reduce((t, v, k) => t + v * P.CMF[3 * k + i], 0)), n = xyz[0] + xyz[1] + xyz[2]; return P.mccamyCCT(xyz[0] / n, xyz[1] / n); };
@@ -539,350 +333,6 @@
     near([RM.adaptationD(6000), RM.adaptationD(4000), RM.adaptationD(1800)], [0.95, 0.85, 0.5], 1e-9, "D at 6000 / 4000 / 1800 K");
     assert(RM.adaptationD(2700) > 0.6 && RM.adaptationD(2700) < 0.75, "D at 2700 K within 0.6-0.75");
     return `sky ${RM.skyLux(20).toFixed(0)} lux at 20°, ${RM.skyLux(-14).toFixed(4)} at -14°; D 0.95 / 0.85 / ${RM.adaptationD(2700).toFixed(2)} / 0.5`;
-  });
-  await test("unit: solveRoom with a known focal length needs only one line family", () => {
-    const roll = 0.4 * Math.PI / 180, f = 1.9, truth = { c: [0.5, 0.42], f, rot: [Math.cos(roll), Math.sin(roll)] };
-    const a = -35 * Math.PI / 180, b = a + Math.PI / 2, dB = [Math.sin(a), 0, Math.cos(a)], dS = [Math.sin(b), 0, Math.cos(b)], C0 = [0.05, 0, 1];
-    const at = (d, s, y) => [C0[0] + d[0] * s, y, C0[2] + d[2] * s];
-    const seg = (d, s1, s2, y) => [...SM.project(truth, at(d, s1, y)), ...SM.project(truth, at(d, s2, y))];
-    const cornerU = SM.project(truth, C0)[0];
-    const room = SM.solveRoom({ lines: { a: [seg(dB, -0.3, -0.05, 0.2), seg(dB, -0.35, -0.05, -0.05)], b: [] }, focal: f,
-      verticals: [[...SM.project(truth, at(dB, -0.2, -0.2)), ...SM.project(truth, at(dB, -0.2, 0.2))]],
-      walls: [{ id: "back", dir: "a", through: { u: cornerU } }, { id: "side", dir: "b", corner: { wall: "back", u: cornerU } }],
-      floor: { at: { wall: "back", uv: SM.project(truth, at(dB, -0.25, -0.3)) } } });
-    near(room.f, f, 1e-9, "focal length");
-    near(room.planes.find(p => p.id === "side").p.slice(0, 3), [-dB[0], 0, -dB[2]], 0.01, "side-wall normal from a's VP and f");
-    near(room.report.cameraHeight, 0.3, 0.003, "camera height");
-    return `side wall and floor recovered from direction a alone + f`;
-  });
-  await test("unit: a room config converts to the calibration page's form and solves the same", () => {
-    const P = 1 / 2000, px = l => l.map(v => v * P);
-    const cfg = { label: "T", geometry: { lines: { a: [px([1060, 90.5, 1285, 36.8]), px([1060, 594.2, 1290, 581.9])], b: [px([360, 881.2, 680, 877.0]), px([360, 946.1, 720, 937.9])] },
-                    verticals: [px([870, 120, 870, 920])], walls: [{ id: "back", dir: "a", through: { u: 0.436 } }, { id: "window", dir: "b", corner: { wall: "back", u: 0.436 } }],
-                    floor: { at: { wall: "back", uv: px([1900, 1655]) } } },
-                  lights: { day: { keyLight: { uv: [0.1, 0.2], wall: "window", offset: 0 }, emitters: [{ rect: [0, 0, 0.07, 0.41], threshold: 0, gain: 7, note: "left pane" }] },
-                            night: { keyLight: { uv: [0.4, 0.26], wall: "window", offset: 0.025 }, emitters: [{ rect: [0.35, 0.03, 0.46, 0.5], threshold: 0.85, gain: 1, note: "bulbs (a lamp below)" }],
-                                     lamps: [{ uv: [0.415, 0.095], wall: "window", offset: 0.025, radius: 0.004, core: { rect: [0.35, 0.03, 0.46, 0.5], threshold: 0.85, gain: 12 } }] } } };
-    const room = SM.solveRoom(cfg.geometry), st = SC.calibStateFromConfig(cfg, room);
-    assert(st.lines.length === 5 && st.walls.length === 2 && st.walls[1].joins === "back", "lines and walls");
-    const n = st.lights.night;
-    assert(n.lamps.length === 1 && n.lamps[0].emitter === 0 && n.emitters[0].gain === 12, `night: ${JSON.stringify(n)}`);
-    assert(st.lights.day.emitters[0].type === "window", "day pane is a window");
-    const mpu = SC.CAMERA_HEIGHT_M / room.report.cameraHeight;
-    near(n.lamps[0].offsetCm / 100 / mpu, 0.025, 0.01 / mpu, "lamp offset round trip (1 cm)");
-    return `5 lines, 2 walls; lamp ${n.lamps[0].offsetCm} cm off its wall, ${n.lamps[0].sizeCm} cm across`;
-  });
-  await test("unit: specular albedo = exact Fresnel + Smith (tests/sheen_check.py reference)", () => {
-    // Reference values from tests/sheen_check.py (same quadrature): GGX α
-    // 0.025 and 0.075 at cos θ = 1, 0.6, 0.4.
-    const ref = [0.04, 0.06489, 0.13201, 0.04008, 0.06485, 0.1256];
-    const got = [0.025, 0.075].flatMap(a => [1, 0.6, 0.4].map(n => SM.specularAlbedo(a, n)));
-    near(got, ref, 2e-5, "albedo");
-    // A smooth lobe approaches the exact Fresnel reflectance of n = 1.5 (0.0892 at 60°).
-    return near(SM.specularAlbedo(0.025, 0.5), SM.fresnel(0.5), 0.003, "semi-gloss at 60° vs Fresnel");
-  });
-  await test("unit: every sheen's parameters are documented and ordered", () => {
-    let prev = Infinity;
-    for (const k of SM.SHEEN_ORDER) {
-      const s = SM.SHEENS[k];
-      assert(SM.SHEEN_COPY[k] && SM.SHEEN_COPY[k].look, `${k}: no copy`);
-      assert(s.alpha < prev, `${k}: alpha should fall with gloss`);
-      prev = s.alpha;
-    }
-    return SM.SHEEN_ORDER.map(k => `${k} α ${SM.SHEENS[k].alpha} v ${SM.SHEENS[k].v}`).join(", ");
-  });
-
-  // GPU: a simple camera whose mirror rays all leave the photo, so every
-  // wall pixel reflects the "unseen room" (its own colour and the scene's
-  // mean): a room painted one colour, as off-highlight walls usually see.
-  let sheenSources;
-  const plainCam = { c: [0.5, 0.5], f: 1, rot: [1, 0], planes: [
-    { id: "back", kind: "wall", p: [0, 0, -1, -1] }, { id: "side", kind: "wall", p: [1, 0, 0, -10] },
-    { id: "floor", kind: "floor", p: [0, 1, 0, -10] }] };
-  await test("gpu: the sheen shaders load and compile", async () => {
-    sheenSources = await P.loadShaders("../glsl/shaderSceneRender.glsl", { sheenUrl: "../glsl/sheen.glsl" });
-    makeSheenPipeline();
-    return "RENDER with SHEEN + ENVDOWN";
-  });
-  function makeSheenPipeline() {
-    return new P.LightPipeline(document.createElement("canvas"), {
-      analysis: [64, 64], render: [64, 64], sources: sheenSources, sheen: true, preserveDrawingBuffer: true,
-      hooks: { onRestored() {}, onError(e) { throw e; } }
-    });
-  }
-  /**
-   * Renders `image` with a sheen (v3, or v2 as sheenVideo.html: no texture
-   * map, as a video frame) and returns the mean linear RGB of `block`.
-   */
-  async function runSheen(image, hex, sheen, { mask = null, emitters = [], lamps = [], windows = [], block = [24, 16, 40, 24],
-                                               model = "v3", degree = 1, relief = null, row = null, direct = null } = {}) {
-    const pipe = makeSheenPipeline();
-    const src = pipe.createSource(64, 64, { srgb: true });
-    const maskImg = mask || makeImage(4, 4, () => [0, 0, 0]);
-    // v3: as the photo page uploads it (texture map in alpha); v2: as the video page (the frame as is).
-    pipe.upload(src, model === "v3" ? await SM.photoWithDetail(image, maskImg) : image);
-    const m = pipe.createSource(...P.sizeOf(maskImg), { mipmaps: true });
-    pipe.upload(m, maskImg);
-    const stats = new P.LightStats(32, 32); stats.add(image, maskImg);
-    const lightMap = pipe.createLightMap();
-    pipe.analyse({ src, mask: m, lightMap, model, adjust: null, refY: stats.refY });
-    const photo = { emitters, keyLight: [0, 0, 0], lamps, windows, textureDetail: model === "v3", relief, direct };
-    pipe.render({ lightMap, src, model, paint: P.paintSpec(hex), scene: P.sceneSpec(stats, stats), detailGamma: 1,
-                  sheen: { mask: m, ...SM.sheenJob(sheen, plainCam, photo, { degree }) } });
-    // row: the luminance of every pixel of one row (for profiles).
-    if (row !== null) return Array.from({ length: 64 }, (_, x) => P.luminance(readPixel(pipe, x, row).map(v => P.decodeSrgb(v / 255))));
-    // Mean of a 16 x 8 block in linear light: one 8-bit pixel carries +-1
-    // level of dither, as large as the step between neighbouring sheens on
-    // mid-tone paints.
-    const [x0, y0, x1, y1] = block, n = (x1 - x0) * (y1 - y0), sum = [0, 0, 0];
-    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++)
-      readPixel(pipe, x, y).forEach((v, i) => { sum[i] += P.decodeSrgb(v / 255) / n; });
-    return sum;
-  }
-  const labOf = rgb => {
-    const X = P.mat.apply(P.RGB2XYZ, rgb).map((v, i) => v / [0.95047, 1, 1.08883][i]);
-    const f = X.map(t => t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
-    return [116 * f[1] - 16, Math.hypot(500 * (f[0] - f[1]), 200 * (f[1] - f[2]))];   // L*, C*
-  };
-  await test("gpu: Flat shows the same wall as v3 without sheen (the swatch)", async () => {
-    const out = [];
-    for (const hex of ["#a4aca6", "#2f3d4c", "#e8decd"]) {
-      const flat = encoded(await runSheen(white, hex, "flat"));
-      const v3 = readPixel(run(makePipeline(64, 64), white, { model: "v3", hex }).pipe, 32, 20);
-      near(flat, v3, 1, hex);
-      out.push(hex);
-    }
-    return out.join(" ") + ": within 1 level";
-  });
-  await test("gpu: glossier = deeper off-highlight, most for dark colours (veil removed)", async () => {
-    const rows = [];
-    for (const [hex, minDrop] of [["#2f3d4c", 2], ["#607d84", 1]]) {
-      const L = []; for (const k of SM.SHEEN_ORDER) L.push(labOf(await runSheen(white, hex, k)));
-      for (let i = 1; i < L.length; i++) {
-        assert(L[i][0] < L[i - 1][0] + 0.05, `${hex}: ${SM.SHEEN_ORDER[i]} not darker than ${SM.SHEEN_ORDER[i - 1]}`);
-        assert(L[i][1] > L[i - 1][1] - 0.05, `${hex}: ${SM.SHEEN_ORDER[i]} not more saturated`);
-      }
-      assert(L[0][0] - L[3][0] >= minDrop, `${hex}: semi-gloss only ${(L[0][0] - L[3][0]).toFixed(2)} L* darker`);
-      rows.push(`${hex} L* ${L.map(l => l[0].toFixed(1)).join(" → ")}, C* ${L[0][1].toFixed(1)} → ${L[3][1].toFixed(1)}`);
-    }
-    const w = []; for (const k of SM.SHEEN_ORDER) w.push(labOf(await runSheen(white, "#e8decd", k)));
-    assert(Math.abs(w[0][0] - w[3][0]) < 1.5, `off-white changed by ${(w[0][0] - w[3][0]).toFixed(2)} L*`);
-    rows.push(`#e8decd L* ${w[0][0].toFixed(1)} → ${w[3][0].toFixed(1)}`);
-    return rows.join("; ");
-  });
-  await test("gpu: reflections of a light source add the light's colour, not the paint's", async () => {
-    // Top half wall, bottom half a bright light source (emitter x 20): the
-    // unseen room is then brighter than the wall's own light, like a highlight.
-    const mask = makeImage(64, 64, (x, y) => y < 32 ? [0, 0, 0] : [255, 255, 255]);
-    const emitters = [{ rect: [0, 0.5, 1, 1], threshold: 0, gain: 20 }];
-    const hex = "#7a1f2b";
-    const flat = await runSheen(white, hex, "flat", { mask, emitters });
-    const semi = await runSheen(white, hex, "semigloss", { mask, emitters });
-    const add = semi.map((v, i) => v - flat[i]);
-    assert(add.every(v => v > 0), `semi-gloss not brighter: ${fmt(add)}`);
-    const spread = (Math.max(...add) - Math.min(...add)) / Math.max(...add);
-    assert(spread < 0.15, `added light is tinted: ${fmt(add)}`);
-    const [Lf, Cf] = labOf(flat), [Ls, Cs] = labOf(semi);
-    return `added ${fmt(add)} (neutral within ${(spread * 100).toFixed(0)} %); L* ${Lf.toFixed(1)} → ${Ls.toFixed(1)}, C* ${Cf.toFixed(1)} → ${Cs.toFixed(1)}`;
-  });
-
-  await test("gpu: a lamp in front of the wall: a neutral highlight that narrows with gloss", async () => {
-    // A neutral lamp on the optical axis, halfway to the wall (z = 0.5 of 1):
-    // its mirror image is seen at the image centre. Added light = with the
-    // lamp - without, at the centre (4 x 4 block) and well away from it.
-    const lamps = [{ pos: [0, 0, 0.5], radius: 0.05, I: [0.5, 0.5, 0.5], axis: [0, -1, 0], cone: -1 }];
-    const hex = "#7a1f2b", centre = [30, 30, 34, 34], away = [30, 4, 34, 8], rows = [], peaks = [];
-    for (const k of SM.SHEEN_ORDER) {
-      const at = async (block, withLamp) => await runSheen(white, hex, k, { block, lamps: withLamp ? lamps : [] });
-      const add = await at(centre, true), base = await at(centre, false), farL = await at(away, true), farN = await at(away, false);
-      const peak = add.map((v, i) => v - base[i]), tail = farL.map((v, i) => v - farN[i]);
-      peaks.push(P.luminance(peak));
-      if (k === "semigloss") {
-        const spread = (Math.max(...peak) - Math.min(...peak)) / Math.max(...peak);
-        assert(spread < 0.15, `semi-gloss highlight tinted: ${fmt(peak)}`);
-        assert(P.luminance(tail) < 0.1 * P.luminance(peak), `semi-gloss highlight not concentrated: ${fmt(tail)} vs ${fmt(peak)}`);
-      }
-      rows.push(`${k} +${P.luminance(peak).toFixed(3)}`);
-    }
-    for (let i = 1; i < peaks.length; i++)
-      assert(peaks[i] > peaks[i - 1], `${SM.SHEEN_ORDER[i]} peak not above ${SM.SHEEN_ORDER[i - 1]}'s`);
-    assert(peaks[0] < 0.01, `flat shows a highlight: ${peaks[0]}`);
-    return "peak added luminance " + rows.join(", ");
-  });
-
-  await test("gpu: a window outside the photo is reflected, in its own colour, more with gloss", async () => {
-    // Behind the camera (z = -0.5, facing the wall), where the centre's
-    // mirror rays go: no plane and no photo there, so without the window they
-    // see the unseen room. Added light = with the window - without.
-    const windows = [{ O: [-0.6, -0.6, -0.5], U: [1.2, 0, 0], V: [0, 1.4, 0], L: [6, 6, 6] }];
-    const hex = "#2f3d4c", adds = [];
-    for (const k of SM.SHEEN_ORDER) {
-      const withW = await runSheen(white, hex, k, { windows }), without = await runSheen(white, hex, k);
-      adds.push(withW.map((v, i) => v - without[i]));
-    }
-    const lum = adds.map(a => P.luminance(a));
-    const semi = adds[3], spread = (Math.max(...semi) - Math.min(...semi)) / Math.max(...semi);
-    assert(spread < 0.15, `semi-gloss window reflection tinted: ${fmt(semi)}`);
-    for (let i = 2; i < lum.length; i++)
-      assert(lum[i] > lum[i - 1], `${SM.SHEEN_ORDER[i]} reflects the window less than ${SM.SHEEN_ORDER[i - 1]}`);
-    assert(lum[0] < 0.25 * lum[3], `flat reflects the window: ${lum[0]}`);
-    return "added luminance " + SM.SHEEN_ORDER.map((k, i) => `${k} +${lum[i].toFixed(3)}`).join(", ");
-  });
-
-  // ---------------------------------------------------------------- core + halo, sources, relief (third pass)
-
-  // A bright window behind the camera covering only x < 0: its edge is
-  // reflected as a vertical edge down the image's middle. The 10-90 % width
-  // of that edge, in pixels, along a row.
-  const edgeWindow = [{ O: [-1.2, -0.8, -0.6], U: [1.2, 0, 0], V: [0, 1.6, 0], L: [8, 8, 8] }];
-  const edgeWidth = prof => {
-    const lo = Math.min(...prof), hi = Math.max(...prof), at = f => prof.findIndex(v => v > lo + f * (hi - lo));
-    const a = at(0.1), b = at(0.9);
-    return Math.abs(b - a);
-  };
-  await test("gpu: core + halo: a window's edge is reflected sharper in semi-gloss than satin, sharper still at +50 %", async () => {
-    const w = {};
-    for (const [k, deg] of [["eggshell", 1], ["satin", 1], ["semigloss", 1], ["semigloss", 1.5]])
-      w[k + deg] = edgeWidth(await runSheen(white, "#2f3d4c", k, { windows: edgeWindow, row: 32, degree: deg }));
-    assert(w.semigloss1 < w.satin1 && w.satin1 <= w.eggshell1, `edge widths ${JSON.stringify(w)}`);
-    assert(w["semigloss1.5"] <= w.semigloss1, `+50 % not sharper: ${JSON.stringify(w)}`);
-    return `10-90 % edge width (px): eggshell ${w.eggshell1}, satin ${w.satin1}, semi-gloss ${w.semigloss1}, +50 % ${w["semigloss1.5"]}`;
-  });
-  await test("gpu: a surface that is its own source reflects the photo where it is (the cabinet top)", async () => {
-    // Left half of the photo a bright non-wall panel (mask white); a rectangle
-    // on the back wall over it, its own source, placed in front of the camera
-    // where wall pixels' mirror rays can't reach it, so instead: compare a
-    // window with that source behind the camera against one with flat L.
-    const img = makeImage(64, 64, (x) => x < 32 ? [255, 255, 255] : [40, 40, 40]);
-    // The rays of row 20 reach the window at 80 % of its height: the source
-    // point is then at y = -0.1, photo row ~38, inside the non-wall band.
-    const mask = makeImage(64, 64, (x, y) => y > 28 ? [255, 255, 255] : [0, 0, 0]);
-    const src = { O: [-0.5, -0.5, 1], U: [1, 0, 0], V: [0, 0.5, 0] };       // the back wall's lower half (non-wall)
-    const withSrc = await runSheen(img, "#2f3d4c", "semigloss", { mask, row: 20, windows: [{ ...edgeWindow[0], U: [2.4, 0, 0], source: src, L: [1, 1, 1] }] });
-    const flat = await runSheen(img, "#2f3d4c", "semigloss", { mask, row: 20, windows: [{ ...edgeWindow[0], U: [2.4, 0, 0], L: [0.4, 0.4, 0.4] }] });
-    const spread = a => Math.max(...a.slice(8, 56)) - Math.min(...a.slice(8, 56));
-    assert(spread(withSrc) > 2 * spread(flat), `source pattern not reflected: ${spread(withSrc).toFixed(3)} vs ${spread(flat).toFixed(3)}`);
-    return `luminance spread along the row: with the photo as source ${spread(withSrc).toFixed(3)}, flat window ${spread(flat).toFixed(3)}`;
-  });
-  await test("gpu: wall relief bends a reflected edge (and zero relief changes nothing)", async () => {
-    // The reflected window edge's position (50 % crossing, sub-pixel) on rows
-    // 4..28: straight on a smooth wall, wavering with long-wave relief. (In
-    // this test room 1 unit ~ 64 px; slopes 0.02 rad move the edge by pixels.)
-    const crossings = async relief => {
-      const xs = [];
-      for (let y = 4; y <= 28; y += 4) {
-        const p = await runSheen(white, "#2f3d4c", "semigloss", { windows: edgeWindow, row: y, relief });
-        const mid = p.slice(12, 52), lo = Math.min(...mid), hi = Math.max(...mid), m = (lo + hi) / 2;
-        let i = 13;
-        while (i < 52 && (p[i - 1] - m) * (p[i] - m) > 0) i++;            // the crossing in the middle band
-        xs.push(i - 1 + (m - p[i - 1]) / (p[i] - p[i - 1]));
-      }
-      return xs;
-    };
-    const sd = a => { const m = a.reduce((t, v) => t + v, 0) / a.length; return Math.sqrt(a.reduce((t, v) => t + (v - m) ** 2, 0) / a.length); };
-    const smooth = await crossings(null);
-    const zero = await crossings({ wave: 0, waveLength: 1, stipple: 0, stippleLength: 1 });
-    const wavy = await crossings({ wave: 0.02, waveLength: 0.25, stipple: 0, stippleLength: 1 });
-    near(zero, smooth, 1e-6, "zero relief");
-    assert(sd(wavy) > 0.5 && sd(wavy) > 4 * sd(smooth), `edge didn't waver: sd ${sd(wavy).toFixed(2)} vs ${sd(smooth).toFixed(2)} px`);
-    return `edge position SD over 7 rows: smooth ${sd(smooth).toFixed(2)} px, with relief ${sd(wavy).toFixed(2)} px`;
-  });
-  await test("gpu: direct light (sheenVideo.html): sunlit patches shine, shade doesn't, in the light's colour", async () => {
-    // Left half of the wall in sun (white), right half in shade (level 70);
-    // the sun behind the camera, so the wall's centre is near its mirror
-    // direction. Ambient = the shade's level.
-    const img = makeImage(64, 64, x => x < 32 ? [255, 255, 255] : [70, 70, 70]);
-    const ambient = P.decodeSrgb(70 / 255);
-    const direct = { dir: [0.05, 0.05, -1].map(v => v / Math.hypot(0.05, 0.05, 1)), ambient };
-    const sun = [20, 28, 28, 36], shade = [36, 28, 44, 36], hex = "#2f3d4c";
-    const at = async (k, block, d) => await runSheen(img, hex, k, { model: "v2", block, direct: d });
-    const sunOn = await at("semigloss", sun, direct), sunOff = await at("semigloss", sun, null);
-    const shadeOn = await at("semigloss", shade, direct), shadeOff = await at("semigloss", shade, null);
-    const add = sunOn.map((v, i) => v - sunOff[i]);
-    // Capped at headroom (1) x the paint's own sunlit light, approached smoothly.
-    const paintSun = P.luminance(P.hexToLinear(hex)) * (1 - ambient);
-    assert(P.luminance(add) > 0.3 * paintSun && P.luminance(add) < 1.05 * paintSun,
-           `sunlit patch sheen +${P.luminance(add).toFixed(4)} vs the paint's sunlit ${paintSun.toFixed(4)}`);
-    near(shadeOn, shadeOff, 0.004, "shade unchanged");
-    const spread = (Math.max(...add) - Math.min(...add)) / Math.max(...add);
-    assert(spread < 0.15, `sheen tinted by the paint: ${fmt(add)}`);
-    const away = await at("semigloss", sun, { dir: [0, 0, 1], ambient });                // the light behind the wall
-    near(away, sunOff, 0.004, "light behind the wall");
-    return `sunlit patch +${P.luminance(add).toFixed(4)} (paint's own sunlit ${paintSun.toFixed(4)}; neutral within ${(spread * 100).toFixed(0)} %); shade and a light behind the wall: unchanged`;
-  });
-  await test("unit: core + halo uniforms and calibration (tests/sheen_check.py section D)", () => {
-    const room = { c: [0.5, 0.5], f: 1, rot: [1, 0], planes: [{ id: "w", kind: "wall", p: [0, 0, -1, -1] }] };
-    for (const k of SM.SHEEN_ORDER) {
-      const s = SM.SHEENS[k], u = SM.sheenJob(k, room, { emitters: [], keyLight: [0, 0, 1] }).uniforms;
-      near(u.sheenH, [Math.round(s.alpha * (1 + s.haze) * 1e4) / 1e4, s.beta], 1e-6, k);
-      assert(u.sheenAlbH.length === 32, "halo albedo table");
-    }
-    near([SM.SHEENS.eggshell.beta, SM.SHEENS.satin.beta, SM.SHEENS.semigloss.beta], [0.662, 0.632, 0.432], 1e-9, "betas");
-    return "halo alpha / share per sheen; betas as solved by the virtual gloss meter";
-  });
-
-  // ---------------------------------------------------------------- sheen with v2 (sheenVideo.html)
-
-  await test("gpu: v2 + sheen: Flat shows the same wall as v2 without sheen", async () => {
-    const out = [];
-    for (const hex of ["#a4aca6", "#2f3d4c", "#e8decd"]) {
-      const flat = encoded(await runSheen(white, hex, "flat", { model: "v2" }));
-      const v2 = readPixel(run(makePipeline(64, 64), white, { model: "v2", hex }).pipe, 32, 20);
-      near(flat, v2, 1, hex);
-      out.push(hex);
-    }
-    return out.join(" ") + ": within 1 level";
-  });
-  await test("gpu: v2 + sheen: glossier = deeper off-highlight; +50 % degree deeper still", async () => {
-    const hex = "#2f3d4c", L = [];
-    for (const k of SM.SHEEN_ORDER) L.push(labOf(await runSheen(white, hex, k, { model: "v2" })));
-    for (let i = 1; i < L.length; i++)
-      assert(L[i][0] < L[i - 1][0] + 0.05, `${SM.SHEEN_ORDER[i]} not darker than ${SM.SHEEN_ORDER[i - 1]}`);
-    assert(L[0][0] - L[3][0] >= 2, `semi-gloss only ${(L[0][0] - L[3][0]).toFixed(2)} L* darker`);
-    const more = labOf(await runSheen(white, hex, "satin", { model: "v2", degree: 1.5 }));
-    const less = labOf(await runSheen(white, hex, "satin", { model: "v2", degree: 0.5 }));
-    assert(more[0] < L[2][0] - 0.05 && less[0] > L[2][0] + 0.05,
-           `satin L* ${L[2][0].toFixed(2)}: +50 % ${more[0].toFixed(2)}, -50 % ${less[0].toFixed(2)}`);
-    return `${hex} L* ${L.map(l => l[0].toFixed(1)).join(" → ")}; satin −50 % / 0 / +50 %: ` +
-           `${less[0].toFixed(1)} / ${L[2][0].toFixed(1)} / ${more[0].toFixed(1)}`;
-  });
-  await test("gpu: v2 + sheen: a lamp's highlight is neutral and grows with the degree", async () => {
-    const lamps = [{ pos: [0, 0, 0.5], radius: 0.05, I: [0.5, 0.5, 0.5], axis: [0, -1, 0], cone: -1 }];
-    const hex = "#7a1f2b", centre = [30, 30, 34, 34], peaks = [];
-    for (const degree of [0.5, 1, 1.5]) {
-      const on = await runSheen(white, hex, "satin", { model: "v2", lamps, block: centre, degree });
-      const off = await runSheen(white, hex, "satin", { model: "v2", block: centre, degree });
-      const add = on.map((v, i) => v - off[i]);
-      const spread = (Math.max(...add) - Math.min(...add)) / Math.max(...add);
-      assert(spread < 0.15, `degree ${degree}: highlight tinted ${fmt(add)}`);
-      peaks.push(P.luminance(add));
-    }
-    assert(peaks[0] < peaks[1] && peaks[1] < peaks[2], `peaks ${fmt(peaks)}`);
-    return `satin highlight at −50 % / 0 / +50 %: ${peaks.map(p => "+" + p.toFixed(3)).join(" / ")}`;
-  });
-  await test("unit: sheen degree: 1 = the sheen itself; more = smoother and glossier; clamped to ±50 %", () => {
-    for (const k of SM.SHEEN_ORDER) {
-      const s = SM.SHEENS[k], d = SM.sheenAtDegree(k, 1);
-      assert(d.alpha === s.alpha && d.v === s.v && d.k === s.k, `${k} at degree 1 changed`);
-      const up = SM.sheenAtDegree(k, 1.5), down = SM.sheenAtDegree(k, 0.5);
-      assert(up.alpha < s.alpha && up.k < s.k && up.v <= s.v, `${k} +50 % not glossier`);
-      assert(down.alpha > s.alpha && down.k > s.k && down.v > s.v, `${k} −50 % not flatter`);
-      assert(up.v >= 0 && down.alpha <= 0.6, `${k} out of range`);
-    }
-    const far = SM.sheenAtDegree("satin", 9), at = SM.sheenAtDegree("satin", 1.5);
-    assert(far.alpha === at.alpha && far.v === at.v, "degree not clamped");
-    return "flat … semi-gloss; clamped at 1.5";
-  });
-  await test("unit: a room from a known camera (roomFromCamera) and the 16:9 image mapping", () => {
-    // A camera 1.5 m from a wall (Y = 0, facing it: yaw pi so forward is -Y), eye height 1.2 m.
-    const room = SM.roomFromCamera({ pos: [0, 1.5, 1.2], yaw: Math.PI, fPx: 1000, horizonPx: 540, width: 1920 }, 9 / 16,
-      [{ id: "wall", kind: "wall", n: [0, 1, 0], d: 0 }, { id: "floor", kind: "floor", n: [0, 0, 1], d: 0 }]);
-    near(room.planes[0].p, [0, 0, -1, -1.5], 1e-9, "wall in camera space");
-    near(room.planes[1].p, [0, 1, 0, -1.2], 1e-9, "floor in camera space");
-    near(room.toCamera([0.3, 0, 1.2]), [-0.3, 0, 1.5], 1e-9, "a point on the wall");   // +x world is to the camera's left
-    const job = SM.sheenJob("satin", room, { emitters: [], keyLight: [0, 0, 1], textureDetail: false });
-    near([job.uniforms.camAspect, job.uniforms.sheenDetail, job.uniforms.camF], [9 / 16, 0, 1000 / 1920], 1e-12, "uniforms");
-    return `f ${room.f.toFixed(4)} widths, horizon at v ${room.c[1].toFixed(4)}`;
   });
 
   // ======================================================================
@@ -1031,7 +481,7 @@
     return "followed 0.3 -> 0.6, paused after the drag";
   });
 
-  await test("sequence: one palindrome file (sheenVideo.html): night mid-file, reverse from the second half", async () => {
+  await test("sequence: one palindrome file: night mid-file, reverse from the second half", async () => {
     // Both tracks are copies of one 2-second video: morning -> night (t 1) -> morning (t 2).
     const track = () => ({ video: new FakeVideo(2 * SPAN), layer: document.body.appendChild(Object.assign(document.createElement("div"), { hidden: true })) });
     const forward = track(), backward = track();
@@ -1047,6 +497,161 @@
     assert(backward.video.currentTime >= SPAN - FRAME, `backward copy started at ${backward.video.currentTime.toFixed(3)}`);
     seq.pause(); await waitFor(settled(seq));
     return `reverse from t ${(2 * SPAN - 0.25).toFixed(2)}; autoplay stopped the forward copy at ${forward.video.currentTime.toFixed(3)} (night)`;
+  });
+
+  // ======================================================================
+  // v4: sceneVisualizer.html (js/wallPaint.js, glsl/sceneVisualizer.glsl)
+  // ======================================================================
+
+  const WP = window.WallPaint, SVR = window.SceneVisualizer;
+  const labOfHex = h => WP.lab(P.hexToLinear(h));
+  await test("v4 unit: the original paint as the new paint gives the photo back exactly", () => {
+    for (const h of ["#bcb6b6", "#4a5d5f", "#ffffff", "#9dbdb3"]) near(WP.transfer(P.hexToLinear(h), P.hexToLinear(h)).gain, [1, 1, 1], 1e-12, h);
+    return "gain = (1, 1, 1)";
+  });
+  await test("v4 unit: consistency: A -> B -> C equals A -> C (your two-uploads case)", () => {
+    const rand = WP.rng(7); let worst = 0;
+    for (let i = 0; i < 300; i++) {
+      const hx = () => P.linearToHex([rand(), rand(), rand()].map(v => 0.02 + 0.9 * v));
+      const [A, B, C, photo] = [hx(), hx(), hx(), hx()].map(P.hexToLinear);
+      const viaB = WP.recolour(WP.recolour(photo, A, B), B, C), direct = WP.recolour(photo, A, C);
+      worst = Math.max(worst, WP.deltaE2000(WP.lab(viaB), WP.lab(direct)));
+    }
+    assert(worst < 1e-6, `worst dE2000 ${worst}`);
+    return `300 random paint triples: worst dE2000 ${worst.toExponential(1)}`;
+  });
+  await test("v4 unit: the transfer matches the Python reference (tools/v4ref.py)", () => {
+    const ref = [["#808080", "#bcb6b6", "#4a5d5f", [0.0230074, 0.0428333, 0.0449707]],
+                 ["#f0e8d8", "#e3e0da", "#736660", [0.1436567, 0.1065236, 0.0863841]],
+                 ["#203040", "#9dbdb3", "#cfba9c", [0.0356142, 0.0288949, 0.0370696]],
+                 ["#ffffff", "#ffffff", "#c9cdb9", [0.4571051, 0.4839768, 0.3601135]]];
+    for (const [p, o, n, out] of ref) near(WP.recolour(P.hexToLinear(p), P.hexToLinear(o), P.hexToLinear(n)), out, 2e-6, `${p} ${o}->${n}`);
+    return "4 cases within 2e-6";
+  });
+  await test("v4 unit: random paints: realistic, reproducible, spread over hue, chroma and lightness", () => {
+    const sets = [1, 2, 3, 99, 12345].map(s => WP.randomPaints(10, s));
+    assert(JSON.stringify(WP.randomPaints(10, 12345)) === JSON.stringify(sets[4]), "same seed, different colours");
+    const notes = [];
+    for (const set of sets) {
+      assert(set.length === 10 && new Set(set).size === 10, "10 distinct colours");
+      for (const h of set) assert(WP.isPaintLike(h), `${h} outside the paint gamut`);
+      const L = set.map(h => labOfHex(h)[0]), C = set.map(h => Math.hypot(...labOfHex(h).slice(1)));
+      const hues = new Set(set.filter((h, i) => C[i] > 8).map(h => Math.floor(((Math.atan2(labOfHex(h)[2], labOfHex(h)[1]) * 180 / Math.PI + 360) % 360) / 60)));
+      assert(Math.max(...L) - Math.min(...L) > 50, `lightness span ${(Math.max(...L) - Math.min(...L)).toFixed(0)}`);
+      assert(hues.size >= 4, `only ${hues.size} hue sextants`);
+      assert(Math.min(...C) < 4 && Math.max(...C) > 20, `chroma ${Math.min(...C).toFixed(0)}..${Math.max(...C).toFixed(0)}`);
+      notes.push(`L* ${Math.min(...L).toFixed(0)}-${Math.max(...L).toFixed(0)}, C* ${Math.min(...C).toFixed(0)}-${Math.max(...C).toFixed(0)}, ${hues.size} hue sextants`);
+    }
+    return notes[4];
+  });
+  await test("v4 unit: the estimate recovers a wall's colour under coloured light (synthetic room)", () => {
+    // Wall paint #9dbdb3 and a neutral grey surround, both under warm light
+    // with a gradient; the camera neutralised nothing. The colour must come
+    // back (lightness is a fitted guess and is not tested here).
+    const paint = P.hexToLinear("#9dbdb3"), grey = [0.4, 0.4, 0.4], light = [1.0, 0.85, 0.62];
+    const w = 160, h = 120, px = new Uint8ClampedArray(w * h * 4), mk = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = 4 * (y * w + x), isWall = x > 40 && x < 140 && y < 90, e = 0.55 + 0.4 * x / w;
+      const c = (isWall ? paint : grey).map((v, k) => P.encodeSrgb(Math.min(1, v * light[k] * e)) * 255);
+      px.set([...c, 255], i); mk.set(isWall ? [0, 0, 0, 255] : [255, 255, 255, 255], i);
+    }
+    const st = WP.statsFromPixels(px, mk, w, h), est = WP.estimateFromStats(st);
+    const a = WP.lab(est), t = WP.lab(paint);
+    const dab = Math.hypot(a[1] * t[0] / a[0] - t[1], a[2] * t[0] / a[0] - t[2]);
+    assert(Math.hypot(a[1] - t[1], a[2] - t[2]) < 3, `a*b* ${fmt(a.slice(1))} vs ${fmt(t.slice(1))}`);
+    return `estimated a*b* ${fmt(a.slice(1))}, true ${fmt(t.slice(1))}`;
+  });
+
+  // GPU
+  async function loadImg(src) {
+    return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error(`Couldn't load ${src}`)); i.src = src; });
+  }
+  let v4r = null;
+  await test("v4 gpu: the sceneVisualizer shader compiles", async () => {
+    v4r = await SVR.createRenderer(document.createElement("canvas"), { glslUrl: "../glsl/sceneVisualizer.glsl", srgbOnly: true });
+    return v4r.outputSpace;
+  });
+  const look = (o, n, extra = {}) => ({ oldLin: P.hexToLinear(o), newLin: P.hexToLinear(n), contrast: 0, saturation: 0, lightStats: null, dither: false, ...extra });
+  await test("v4 gpu: original paint in = photo out (every pixel within 1 level)", async () => {
+    const img = await loadImg("../images/lighting_variants/living_room/living-room_morning.jpg");
+    const w = 512, h = 512, c = makeImage(w, h, () => [0, 0, 0]); c.getContext("2d").drawImage(img, 0, 0, w, h);
+    v4r.setSize(w, h); v4r.upload(c); v4r.draw(look("#dddeD9".toLowerCase(), "#ddded9"));
+    const out = v4r.readPixels(), inp = c.getContext("2d").getImageData(0, 0, w, h).data;
+    let worst = 0; for (let i = 0; i < out.length; i += 4) for (let k = 0; k < 3; k++) worst = Math.max(worst, Math.abs(out[i + k] - inp[i + k]));
+    assert(worst <= 1, `worst ${worst} levels`);
+    return `worst difference ${worst} level(s)`;
+  });
+  await test("v4 gpu: the shader matches the JS model (in-gamut colours within 1 level)", async () => {
+    const cols = ["#808080", "#f0e8d8", "#203040", "#b0a090", "#5a6b4c", "#c8c8d0"], w = cols.length, h = 1;
+    const c = makeImage(w, h, x => P.hexToRgb(cols[x]));
+    v4r.setSize(w, h); v4r.upload(c);
+    let worst = 0;
+    for (const [o, n] of [["#bcb6b6", "#4a5d5f"], ["#e3e0da", "#736660"], ["#cec8bd", "#9fa195"]]) {
+      v4r.draw(look(o, n)); const out = v4r.readPixels();
+      cols.forEach((hx, x) => {
+        const js = WP.recolour(P.hexToLinear(hx), P.hexToLinear(o), P.hexToLinear(n));
+        if (js.some(v => v < 0 || v > 1)) return;                       // gamut-mapped: not comparable
+        const enc = js.map(v => Math.round(255 * P.encodeSrgb(v)));
+        for (let k = 0; k < 3; k++) worst = Math.max(worst, Math.abs(out[4 * x + k] - enc[k]));
+      });
+    }
+    assert(worst <= 1, `worst ${worst} levels`);
+    return `worst ${worst} level(s)`;
+  });
+  await test("v4 gpu: consistency on a real photo: (A -> B image) -> C equals A -> C", async () => {
+    const img = await loadImg("../images/lighting_variants/study/study_noon.jpg"), mask = await loadImg("../images/masks/study_mask.jpg");
+    const w = 384, h = 384, c = makeImage(w, h, () => [0, 0, 0]); c.getContext("2d").drawImage(img, 0, 0, w, h);
+    const mk = makeImage(w, h, () => [0, 0, 0]); mk.getContext("2d").drawImage(mask, 0, 0, w, h);
+    const m = mk.getContext("2d").getImageData(0, 0, w, h).data;
+    const A = "#dcdad3", B = "#9dbdb3", C = "#736660";
+    v4r.setSize(w, h); v4r.upload(c); v4r.draw(look(A, B));
+    const imgB = makeImage(w, h, () => [0, 0, 0]); const bd = imgB.getContext("2d").createImageData(w, h); bd.data.set(v4r.readPixels()); imgB.getContext("2d").putImageData(bd, 0, 0);
+    v4r.draw(look(A, C)); const direct = v4r.readPixels();
+    v4r.upload(imgB); v4r.draw(look(B, C)); const via = v4r.readPixels();
+    const des = [];
+    for (let i = 0; i < w * h; i++) {
+      if (m[4 * i] > 64) continue;                                            // walls only (black)
+      const a = [0, 1, 2].map(k => P.decodeSrgb(direct[4 * i + k] / 255)), b = [0, 1, 2].map(k => P.decodeSrgb(via[4 * i + k] / 255));
+      des.push(WP.deltaE2000(WP.lab(a), WP.lab(b)));
+    }
+    des.sort((x, y) => x - y);
+    const med = des[des.length >> 1], p99 = des[Math.floor(des.length * 0.99)];
+    assert(med < 0.5 && p99 < 1.5, `median ${med.toFixed(2)}, p99 ${p99.toFixed(2)}`);
+    return `${des.length} wall pixels: median dE2000 ${med.toFixed(2)}, p99 ${p99.toFixed(2)} (8-bit rounding of the intermediate image)`;
+  });
+  await test("v4 gpu: sliders centred = exact; sliders on change the light, not the paint's hue", async () => {
+    const c = makeImage(4, 1, x => [[200, 190, 170], [120, 110, 95], [60, 55, 50], [230, 225, 215]][x]);
+    v4r.setSize(4, 1); v4r.upload(c);
+    const ls = { pivotY: 1, medianChroma: 0.02 };
+    v4r.draw(look("#e3e0da", "#5a6b8c", { lightStats: ls })); const a = v4r.readPixels();
+    v4r.draw(look("#e3e0da", "#5a6b8c", { lightStats: ls, contrast: 0.5 })); const b = v4r.readPixels();
+    let changed = 0; for (let i = 0; i < 16; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) > 2) changed++;
+    assert(changed >= 2, "contrast changed nothing");
+    return `contrast +50 changed ${changed} of 4 pixels`;
+  });
+  await test("v4 gpu: speed at 1920 x 1080 (video frame)", async () => {
+    const c = makeImage(1920, 1080, (x, y) => [(x * 7) & 255, (y * 3) & 255, 160]);
+    v4r.setSize(1920, 1080); v4r.upload(c);
+    const ms = v4r.timeDraw(look("#cec8bd", "#2f5d8c", { contrast: 0.3, saturation: 0.2, lightStats: { pivotY: 0.5, medianChroma: 0.02 } }), 20);
+    assert(ms < 12, `${ms.toFixed(1)} ms per frame`);
+    return `${ms.toFixed(2)} ms per frame with both sliders on`;
+  });
+  await test("v4 estimator: JS matches the Python reference on pair photos (within 2 dE2000)", async () => {
+    const ref = { before3: [0.48837, 0.44296, 0.38393], before8: [0.64535, 0.55753, 0.39282], before10: [0.61133, 0.60798, 0.5878] };
+    const out = [];
+    for (const [name, py] of Object.entries(ref)) {
+      const img = await loadImg(`../images/source/pairs/${name}.jpg`), m = await loadImg(`../tools/pairs/masks/${name}.png`);
+      // test masks are white = wall; the app's are black = wall: invert
+      const s = 640 / Math.max(img.naturalWidth, img.naturalHeight), w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
+      const ci = makeImage(w, h, () => [0, 0, 0]); ci.getContext("2d").drawImage(img, 0, 0, w, h);
+      const cm = makeImage(w, h, () => [0, 0, 0]); cm.getContext("2d").drawImage(m, 0, 0, w, h);
+      const md = cm.getContext("2d").getImageData(0, 0, w, h).data; for (let i = 0; i < md.length; i += 4) md[i] = md[i + 1] = md[i + 2] = 255 - md[i];
+      const est = WP.estimateFromStats(WP.statsFromPixels(ci.getContext("2d").getImageData(0, 0, w, h).data, md, w, h));
+      const d = WP.deltaE2000(WP.lab(est), WP.lab(py));
+      assert(d < 2, `${name}: JS ${P.linearToHex(est)} vs Python ${P.linearToHex(py)}: dE ${d.toFixed(2)}`);
+      out.push(`${name} ${d.toFixed(2)}`);
+    }
+    return out.join(", ");
   });
 
   // ---------------------------------------------------------------- summary

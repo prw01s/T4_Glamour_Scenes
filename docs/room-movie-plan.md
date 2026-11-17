@@ -132,7 +132,7 @@ For each surface point, the shader traces toward the sun:
 
 * **Patch**: lit if the ray passes through the window opening (with mullions).
 * **Leaves**: transmission is read from the leaf pattern in the window plane, for the current sun direction (blended between the morning and sunset patterns while the sun moves).
-* **Edge softness**: blur width ≈ (distance from leaves to the surface) × 0.0093 (sun diameter 0.524°–0.542°), stretched into an ellipse along the plane of incidence. Implemented with the blur pyramid the sheen renderer already has, regenerated per video frame (cheap at 512–768 px).
+* **Edge softness**: blur width ≈ (distance from leaves to the surface) × 0.0093 (sun diameter 0.524°–0.542°), stretched into an ellipse along the plane of incidence. Implemented with a blur (mip) pyramid, regenerated per video frame (cheap at 512–768 px).
 * **Expected look**: with the tree 5–10 m from the wall, small gaps project as round or elliptical sun images 5–9 cm across; a 5 cm leaf loses its dark core beyond ~5.4 m; branches and clumps over ~15–20 cm stay readable but soft. A mix of dapples and soft shapes, not crisp leaf outlines.
 * **Furniture** in the patch: per-keyframe shadow masks from Blender or stand-in shapes.
 * Checked against the Blender validation renders at each keyframe.

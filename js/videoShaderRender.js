@@ -205,21 +205,6 @@
    * @property {boolean} [fitDisplay=false]  Render (and analyse) at the canvas's
    *   size on screen in device pixels, never above the video's own size,
    *   instead of always at the video's size.
-   * @property {{ glslUrl: string, jobFor: (video: HTMLVideoElement) => { uniforms: Record<string, any>, envKey: string } }} [sheen]
-   *   Paint sheen (sheenVideo.html): load glsl/sheen.glsl too and render every
-   *   frame with the sheen job jobFor() returns for the source video's current
-   *   frame (js/sheenModel.js sheenJob; the mask is added here). Models v2 and
-   *   v3 only. Renderers sharing a pipeline must all have it.
-   * @property {string} [page]  The page's file name, for the notices.
-   * @property {boolean} [v2Detail=false]  v2: restore fine brightness detail
-   *   from the full-resolution frame (as v3's detail layer) instead of v2's
-   *   smooth light.
-   * @property {number} [analysisScale=1]  Light-map (and sheen environment)
-   *   size relative to the render size, e.g. 0.5: the light map is blurred
-   *   anyway, so a smaller analysis saves GPU time without visible loss (the
-   *   detail layer restores fine detail from the full-resolution frame). The
-   *   sheen's reflection environment stays at the render size: its sharp
-   *   core needs every pixel.
    * @property {Object} elements  Page elements the renderer drives:
    * @property {HTMLElement} elements.app          Gets the .is-painted class.
    * @property {HTMLElement} [elements.ui]         Holds the paint / model radios it keeps checked (default: app).
@@ -245,8 +230,6 @@
    * @property {(amount: number) => void} setSaturation  -1..1, 0 = as filmed.
    * @property {(measure: string) => void} setSatMeasure "full" | "chroma".
    * @property {() => void} play  Starts both videos (for when autoplay was blocked).
-   * @property {() => void} redraw  Repaints the current frame (after a change
-   *   the renderer can't see, e.g. what the sheen option's jobFor() returns).
    * @property {() => Promise<void>} start  Boots paint previews (repeat calls return the same promise).
    * @property {Promise<void> | null} ready  start()'s promise; never rejects.
    * @property {number} framesPainted  Video frames painted so far.
@@ -263,8 +246,6 @@
     const top = options.elements.top || null;
     const ui = options.elements.ui || app;
     const glslUrl = options.glslUrl || DEFAULT_GLSL_URL;
-    const sheenOpt = options.sheen || null;
-    const page = options.page || PAGE;
 
     // ------------------------------------------------------------ state
 
@@ -316,7 +297,7 @@
       syncRadio("paint", hex);
     }
 
-    function showNotice(kind) { notice.innerHTML = noticeFor(kind, page); }
+    function showNotice(kind) { notice.innerHTML = noticeFor(kind, PAGE); }
 
     // ------------------------------------------------------------ rendering
 
@@ -351,9 +332,7 @@
       pipeline.analyse({ src, mask, lightMap, model: activeModel, adjust, refY: stats.refY });
       pipeline.render({
         lightMap, src, model: activeModel, paint: paintAt(now), scene: currentScene(),
-        detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1),
-        v2Detail: options.v2Detail ? SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1) : 0,
-        sheen: sheenOpt ? { mask, ...sheenOpt.jobFor(source) } : null
+        detailGamma: SHADER_DEFAULTS.v3.detail * (adjust ? adjust.contrastK : 1)
       });
       if (outCtx) outCtx.drawImage(pipeline.canvas, 0, 0);        // shared pipeline: copy out at once
       if (newFrame) copyCtx.drawImage(source, 0, 0, copy.width, copy.height);
@@ -467,21 +446,17 @@
      */
     async function startPainting() {
       checkGates();
-      const [sources, maskImg] = await Promise.all([
-        loadShaders(glslUrl, sheenOpt ? { sheenUrl: sheenOpt.glslUrl } : undefined),
-        decodeImage(options.mask), videoReady(source)]);
+      const [sources, maskImg] = await Promise.all([loadShaders(glslUrl), decodeImage(options.mask), videoReady(source)]);
       if (!pipeline) {
         const native = [source.videoWidth, source.videoHeight];
         const size = options.fitDisplay ? displaySize(canvas, ...native) : native;
-        const k = Math.min(1, Math.max(0.125, options.analysisScale || 1));
-        const analysis = [Math.max(16, Math.round(size[0] * k)), Math.max(16, Math.round(size[1] * k))];
         const shared = options.sharePipeline;
         if (shared) {
           // One pipeline for every renderer on the page; its hooks reach them all.
           if (!shared.pipeline) {
             shared.renderers = new Set();
             shared.pipeline = new LightPipeline(document.createElement("canvas"), {
-              analysis, render: size, envSize: size, sources, wideGamut: supportsWideGamut(), sheen: !!sheenOpt,
+              analysis: size, render: size, sources, wideGamut: supportsWideGamut(),
               preserveDrawingBuffer: true,      // copied out with drawImage after each render
               hooks: {
                 onRestored: () => { for (const r of shared.renderers) r.onRestored(); },
@@ -495,8 +470,8 @@
           outCtx = canvas.getContext("2d", { colorSpace: pipeline.outputSpace === "display-p3" ? "display-p3" : "srgb" });
         } else {
           pipeline = new LightPipeline(canvas, {
-            analysis, render: size, envSize: size, sources, hooks: { onRestored, onError: fail },
-            wideGamut: supportsWideGamut(), sheen: !!sheenOpt
+            analysis: size, render: size, sources, hooks: { onRestored, onError: fail },
+            wideGamut: supportsWideGamut()
           });
         }
         // The frame at full size, as an sRGB texture: DECODE's and RENDER's
@@ -532,7 +507,6 @@
       get stats() { return stats; },
       get outputSpace() { return pipeline ? pipeline.outputSpace : "srgb"; },
       setPaint, setModel, setContrast, setSaturation, setSatMeasure, play,
-      redraw() { requestRender(); },
       start() { return (ready ??= startPainting().catch(fail)); }
     };
   }
